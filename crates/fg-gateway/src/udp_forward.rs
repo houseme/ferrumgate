@@ -15,7 +15,10 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::source_policy::{RawSourcePolicy, SourcePolicy};
+use crate::{
+    forward_ports,
+    source_policy::{RawSourcePolicy, SourcePolicy},
+};
 
 const MAX_DATAGRAM: usize = 65_535;
 static QUEUED_PACKETS: Semaphore = Semaphore::const_new(1024);
@@ -23,8 +26,8 @@ static QUEUED_PACKETS: Semaphore = Semaphore::const_new(1024);
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawUdpForward {
-    listen: Option<SocketAddr>,
-    target: Option<SocketAddr>,
+    listen: Option<String>,
+    target: Option<String>,
     max_sessions: usize,
     idle_timeout_ms: u64,
     source: RawSourcePolicy,
@@ -57,16 +60,23 @@ struct Packet {
 }
 
 impl UdpForward {
-    pub fn compile(raw: RawUdpForward) -> Result<Self> {
-        let listen = raw.listen.context("udp_forward.listen is required")?;
-        let target = raw.target.context("udp_forward.target is required")?;
+    pub fn compile(raw: RawUdpForward) -> Result<Vec<Self>> {
+        let listens = forward_ports::parse(&raw.listen.context("udp_forward.listen is required")?)
+            .context("invalid udp_forward.listen")?;
+        let targets = forward_ports::targets(
+            &raw.target.context("udp_forward.target is required")?,
+            listens.len(),
+        )
+        .context("invalid udp_forward.target")?;
         ensure!(
-            target.port() != 0
-                && !target.ip().is_unspecified()
-                && !target.ip().is_multicast()
-                && target.ip() != IpAddr::V4(Ipv4Addr::BROADCAST)
-                && target != listen,
-            "udp_forward target must be a unicast address with nonzero port, different from the listener"
+            targets.iter().all(|target| {
+                target.port() != 0
+                    && !target.ip().is_unspecified()
+                    && !target.ip().is_multicast()
+                    && target.ip() != IpAddr::V4(Ipv4Addr::BROADCAST)
+                    && !listens.contains(target)
+            }),
+            "udp_forward targets must be unicast addresses with nonzero ports, different from the rule's listeners"
         );
         ensure!(
             (1..=4096).contains(&raw.max_sessions),
@@ -76,13 +86,18 @@ impl UdpForward {
             (100..=3_600_000).contains(&raw.idle_timeout_ms),
             "udp_forward.idle_timeout_ms must be in 100..=3600000"
         );
-        Ok(Self {
-            listen,
-            target,
-            max_sessions: raw.max_sessions,
-            idle: Duration::from_millis(raw.idle_timeout_ms),
-            source: SourcePolicy::compile(raw.source)?,
-        })
+        let source = SourcePolicy::compile(raw.source)?;
+        Ok(listens
+            .into_iter()
+            .zip(targets)
+            .map(|(listen, target)| Self {
+                listen,
+                target,
+                max_sessions: raw.max_sessions,
+                idle: Duration::from_millis(raw.idle_timeout_ms),
+                source: source.clone(),
+            })
+            .collect())
     }
 
     #[cfg(unix)]

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{cmp::Reverse, net::SocketAddr, time::Duration};
 
 use anyhow::Result;
 use tokio::{
@@ -116,6 +116,44 @@ async fn empty_client_half_close_reaches_the_upstream() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn forwards_each_tcp_port_to_the_matching_target_position() -> Result<()> {
+    let first = Origin::spawn(|mut stream| async move {
+        stream.write_u8(b'a').await?;
+        Ok(())
+    })
+    .await?;
+    let second = Origin::spawn(|mut stream| async move {
+        stream.write_u8(b'b').await?;
+        Ok(())
+    })
+    .await?;
+    let start = (0..32)
+        .find_map(|_| {
+            let probe = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+            // Steer clear of the ephemeral ports allocated by parallel tests.
+            let port = 12_000 + probe.local_addr().ok()?.port() % 20_000;
+            let _first = std::net::TcpListener::bind(("127.0.0.1", port)).ok()?;
+            let _second = std::net::TcpListener::bind(("127.0.0.1", port + 1)).ok()?;
+            Some(port)
+        })
+        .ok_or_else(|| anyhow::anyhow!("no consecutive loopback TCP ports available"))?;
+    let mut targets = [(first.addr.port(), b'a'), (second.addr.port(), b'b')];
+    targets.sort_unstable_by_key(|&(port, _)| Reverse(port));
+    let rules = format!(
+        "\n[[tcp_forward]]\nlisten = \"127.0.0.1:{start}-{}\"\ntargets = [\"127.0.0.1:{},{}\"]\n",
+        start + 1,
+        targets[0].0,
+        targets[1].0,
+    );
+    let _gateway = Gateway::spawn(&config(&rules, "http_enabled = false", "")).await?;
+    for (port, (_, expected)) in (start..=start + 1).zip(targets) {
+        let mut client = connect(([127, 0, 0, 1], port).into()).await?;
+        assert_eq!(timeout(DEADLINE, client.read_u8()).await??, expected);
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn keeps_existing_tcp_flow_alive_during_graceful_shutdown() -> Result<()> {
@@ -167,6 +205,11 @@ async fn rejects_invalid_tcp_targets_and_conflicting_listeners() -> Result<()> {
         forwarding("127.0.0.1:9000", &[addr], ""),
         forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 0"),
         forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 3600001"),
+        forwarding("127.0.0.1:9050-9051", &[addr], "") + &rule,
+        forwarding("127.0.0.1:9100-9163", &[addr], "") + &rule,
+        rule.replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
+        rule.replace("127.0.0.1:9050", "127.0.0.1:9050-9051")
+            .replace("127.0.0.1:9000", "127.0.0.1:9051,9050"),
         rule.repeat(2),
     ] {
         assert!(!Gateway::check(dir.path(), &config(&routes, "http_enabled = false", "")).await?);

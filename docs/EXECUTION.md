@@ -420,11 +420,33 @@ max_sessions = 128
 idle_timeout_ms = 30000
 ```
 
-每个客户端地址和端口获得一条独立的上游 UDP 会话，只接收已配置目标的响应。支持每规则会话上限和空闲回收，满载时丢弃超出预算的报文。当前使用一个固定目标，规则修改需重启。 [Gately 端口转发](https://gately.cn/en/docs/modules/portforward)
+每个监听端口为每个客户端地址和端口建立独立的上游 UDP 会话，只接收该监听端口所配置目标的响应。支持每端口会话上限和空闲回收，满载时丢弃超出预算的报文。修改目标或预算需重启。 [Gately 端口转发](https://gately.cn/en/docs/modules/portforward)
 
 ```bash
 cargo test --locked -p ferrumgate --test gateway udp::
 ```
+
+### TCP 与 UDP 多端口映射
+
+在同一 IP 后用逗号列出端口，用连字符表示闭区间。每个目标可写一个端口供所有监听端口共享，也可按书写顺序逐个映射。IPv6 地址使用方括号。下例把 9443、9444 和 9550 分别映射到主后端的 443、444 和 8080。主后端拨号失败时改拨备用地址的 8443。UDP 将 5354、5355 分别映射到目标的 5353、5354。
+
+```toml
+schema_version = 1
+
+[server]
+http_enabled = false
+
+[[tcp_forward]]
+listen = "127.0.0.1:9443-9444,9550"
+targets = ["127.0.0.1:443-444,8080", "[::1]:8443"]
+
+[[udp_forward]]
+listen = "127.0.0.1:5354-5355"
+target = "192.0.2.10:5353-5354"
+max_sessions = 128
+```
+
+需要同号映射时，在目标 IP 后重复监听端口表达式。每种协议最多展开 64 个监听器。配置校验拒绝重叠监听、无效范围和端口数量不匹配的目标。每个监听端口独立应用连接或会话上限，全部 UDP 监听端口的 `max_sessions` 之和不能超过 4096。调整映射需重启，来源规则可按原方式热重载。 [Gately 端口映射实现](https://github.com/wangwanjie/gately/blob/main/internal/l4proxy/ports.go)
 
 ## 7. 交付阶段与退出标准
 

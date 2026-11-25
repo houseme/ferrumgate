@@ -50,6 +50,37 @@ async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
 }
 
 #[tokio::test]
+async fn forwards_each_udp_port_independently_to_a_shared_target() -> Result<()> {
+    let (target, mut peers) = echo_target().await?;
+    let first = UdpSocket::bind("127.0.0.1:0").await?;
+    let second = UdpSocket::bind("127.0.0.1:0").await?;
+    let first_addr = first.local_addr()?;
+    let second_addr = second.local_addr()?;
+    let rules = rule(target, "max_sessions = 1").replace(
+        "127.0.0.1:0",
+        &format!("127.0.0.1:{},{}", first_addr.port(), second_addr.port()),
+    );
+    drop((first, second));
+    let _gateway = Gateway::spawn(&config(&rules, "http_enabled = false", "")).await?;
+
+    let sender = client(first_addr).await?;
+    let mut upstream_peers = Vec::new();
+    for (address, payload) in [(first_addr, b"one"), (second_addr, b"two")] {
+        sender.connect(address).await?;
+        sender.send(payload).await?;
+        let mut buffer = [0; 16];
+        let size = timeout(DEADLINE, sender.recv(&mut buffer)).await??;
+        assert_eq!(&buffer[..size], payload);
+        let peer = timeout(DEADLINE, peers.recv())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("UDP target closed"))?;
+        upstream_peers.push(peer);
+    }
+    assert_ne!(upstream_peers[0], upstream_peers[1]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn bounds_udp_associations_and_releases_idle_slots() -> Result<()> {
     let (target, _peers) = echo_target().await?;
     let gateway = Gateway::spawn(&config(
@@ -96,6 +127,8 @@ async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() ->
         rule("127.0.0.1:0".parse()?, ""),
         repeated,
         rule(addr, "max_sessions = 4096") + &rule(addr, "max_sessions = 1"),
+        rule(addr, "max_sessions = 2049").replace("127.0.0.1:0", "127.0.0.1:9050-9051"),
+        rule(addr, "").replace("127.0.0.1:0", "127.0.0.1:9050-9051,9051"),
     ] {
         assert!(!Gateway::check(dir.path(), &config(&rules, "http_enabled = false", "")).await?);
     }

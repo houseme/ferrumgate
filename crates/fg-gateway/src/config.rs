@@ -16,6 +16,7 @@ use crate::{
     acme::{AcmeConfig, Managed, RawAcme},
     backend::{BackendPool, RawBackend},
     domains,
+    forward_ports::MAX_LISTENERS,
     health::{HealthCheck, RawHealthCheck},
     site::{RawResponse, SiteResponse},
     tcp_forward::{RawForward, TcpForward},
@@ -225,8 +226,8 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         );
     }
     ensure!(
-        raw.tcp_forward.len() <= 64,
-        "tcp_forward supports up to 64 listeners"
+        raw.tcp_forward.len() <= MAX_LISTENERS,
+        "tcp_forward supports up to {MAX_LISTENERS} listeners"
     );
     let mut listens = HashSet::new();
     if settings.http_enabled && settings.listen.port() != 0 {
@@ -234,35 +235,47 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     }
     let mut tcp_forward = Vec::with_capacity(raw.tcp_forward.len());
     for (index, raw) in raw.tcp_forward.into_iter().enumerate() {
-        let rule =
+        let rules =
             TcpForward::compile(raw).with_context(|| format!("invalid tcp_forward[{index}]"))?;
         ensure!(
-            rule.listen.port() == 0 || listens.insert(rule.listen),
-            "duplicate TCP listener at tcp_forward[{index}]"
+            tcp_forward.len() + rules.len() <= MAX_LISTENERS,
+            "tcp_forward supports up to {MAX_LISTENERS} listeners"
         );
-        tcp_forward.push(rule);
+        for rule in rules {
+            ensure!(
+                rule.listen.port() == 0 || listens.insert(rule.listen),
+                "duplicate TCP listener at tcp_forward[{index}]"
+            );
+            tcp_forward.push(rule);
+        }
     }
 
     ensure!(
-        raw.udp_forward.len() <= 64,
-        "udp_forward supports up to 64 listeners"
+        raw.udp_forward.len() <= MAX_LISTENERS,
+        "udp_forward supports up to {MAX_LISTENERS} listeners"
     );
     let mut udp_listens = HashSet::new();
     let mut udp_forward = Vec::with_capacity(raw.udp_forward.len());
     let mut udp_sessions = 0;
     for (index, raw) in raw.udp_forward.into_iter().enumerate() {
-        let rule =
+        let rules =
             UdpForward::compile(raw).with_context(|| format!("invalid udp_forward[{index}]"))?;
         ensure!(
-            rule.listen.port() == 0 || udp_listens.insert(rule.listen),
-            "duplicate UDP listener at udp_forward[{index}]"
+            udp_forward.len() + rules.len() <= MAX_LISTENERS,
+            "udp_forward supports up to {MAX_LISTENERS} listeners"
         );
-        udp_sessions += rule.max_sessions;
-        ensure!(
-            udp_sessions <= 4096,
-            "udp_forward supports up to 4096 total sessions"
-        );
-        udp_forward.push(rule);
+        for rule in rules {
+            ensure!(
+                rule.listen.port() == 0 || udp_listens.insert(rule.listen),
+                "duplicate UDP listener at udp_forward[{index}]"
+            );
+            udp_sessions += rule.max_sessions;
+            ensure!(
+                udp_sessions <= 4096,
+                "udp_forward supports up to 4096 total sessions"
+            );
+            udp_forward.push(rule);
+        }
     }
     let acme = if let Some(acme) = raw.acme {
         ensure!(

@@ -17,6 +17,7 @@ use tokio::{
 };
 
 use crate::{
+    forward_ports,
     source_policy::{RawSourcePolicy, SourcePolicy, compile_networks},
     source_quota::SourceQuota,
 };
@@ -24,8 +25,8 @@ use crate::{
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawForward {
-    listen: Option<SocketAddr>,
-    targets: Vec<SocketAddr>,
+    listen: Option<String>,
+    targets: Vec<String>,
     max_connections: usize,
     connect_timeout_ms: u64,
     first_data_timeout_ms: u64,
@@ -80,23 +81,19 @@ struct SourceLimit {
 }
 
 impl TcpForward {
-    pub fn compile(raw: RawForward) -> Result<Self> {
-        let listen = raw.listen.context("tcp_forward.listen is required")?;
+    pub fn compile(raw: RawForward) -> Result<Vec<Self>> {
+        let listens = forward_ports::parse(&raw.listen.context("tcp_forward.listen is required")?)
+            .context("invalid tcp_forward.listen")?;
         ensure!(
             (1..=8).contains(&raw.targets.len()),
             "tcp_forward needs 1..=8 targets"
         );
-        let mut targets = HashSet::new();
-        ensure!(
-            raw.targets.iter().all(|target| {
-                target.port() != 0
-                    && !target.ip().is_unspecified()
-                    && !target.ip().is_multicast()
-                    && *target != listen
-                    && targets.insert(*target)
-            }),
-            "tcp_forward targets must be distinct unicast addresses with nonzero ports, different from the listener"
-        );
+        let targets = raw
+            .targets
+            .iter()
+            .map(|target| forward_ports::targets(target, listens.len()))
+            .collect::<Result<Vec<_>>>()
+            .context("invalid tcp_forward.targets")?;
         ensure!(
             (1..=65_535).contains(&raw.max_connections),
             "tcp_forward.max_connections must be in 1..=65535"
@@ -128,17 +125,36 @@ impl TcpForward {
         } else {
             None
         };
-        Ok(Self {
-            listen,
-            targets: raw.targets,
-            max_connections: raw.max_connections,
-            connect_timeout: Duration::from_millis(raw.connect_timeout_ms),
-            first_data_timeout: Duration::from_millis(raw.first_data_timeout_ms),
-            connection_lifetime: Duration::from_millis(raw.connection_lifetime_ms),
-            proxy_protocol: raw.proxy_protocol,
-            source: SourcePolicy::compile(raw.source)?,
-            source_limit,
-        })
+        let source = SourcePolicy::compile(raw.source)?;
+        listens
+            .iter()
+            .enumerate()
+            .map(|(index, &listen)| {
+                let targets: Vec<_> = targets.iter().map(|target| target[index]).collect();
+                let mut unique = HashSet::new();
+                ensure!(
+                    targets.iter().all(|target| {
+                        target.port() != 0
+                            && !target.ip().is_unspecified()
+                            && !target.ip().is_multicast()
+                            && !listens.contains(target)
+                            && unique.insert(*target)
+                    }),
+                    "tcp_forward targets must be distinct unicast addresses with nonzero ports, different from the rule's listeners"
+                );
+                Ok(Self {
+                    listen,
+                    targets,
+                    max_connections: raw.max_connections,
+                    connect_timeout: Duration::from_millis(raw.connect_timeout_ms),
+                    first_data_timeout: Duration::from_millis(raw.first_data_timeout_ms),
+                    connection_lifetime: Duration::from_millis(raw.connection_lifetime_ms),
+                    proxy_protocol: raw.proxy_protocol,
+                    source: source.clone(),
+                    source_limit: source_limit.clone(),
+                })
+            })
+            .collect()
     }
 
     #[cfg(unix)]

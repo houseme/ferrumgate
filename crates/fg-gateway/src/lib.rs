@@ -8,6 +8,7 @@ mod cert_deploy;
 mod config;
 mod dns01;
 mod domains;
+mod forward_ports;
 mod health;
 mod proxy;
 mod server;
