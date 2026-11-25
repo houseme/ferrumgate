@@ -164,3 +164,66 @@ async fn sends_proxy_v1_and_v2_before_the_client_payload() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reloads_tcp_source_rules_without_closing_existing_connections() -> Result<()> {
+    use std::{sync::Arc, time::Duration};
+    let dialed = Arc::new(tokio::sync::Notify::new());
+    let origin = Origin::spawn({
+        let dialed = dialed.clone();
+        move |mut socket| {
+            let dialed = dialed.clone();
+            async move {
+                dialed.notify_one();
+                let mut buffer = [0; 64];
+                loop {
+                    let size = socket.read(&mut buffer).await?;
+                    if size == 0 {
+                        break;
+                    }
+                    socket.write_all(&buffer[..size]).await?;
+                }
+                Ok(())
+            }
+        }
+    })
+    .await?;
+    let settings = |source: &str| {
+        config(
+            &forwarding("127.0.0.1:0", &[origin.addr], source),
+            "http_enabled = false",
+            "",
+        )
+    };
+    let deny = "[tcp_forward.source]\nallow = [\"127.0.0.0/8\"]\ndeny = [\"127.0.0.1\"]";
+    let allow = "[tcp_forward.source]\nallow = [\"127.0.0.1\"]";
+    let mut gateway = Gateway::spawn(&settings(deny)).await?;
+
+    let mut denied = connect(gateway.addr).await?;
+    assert!(timeout(DEADLINE, denied.read_u8()).await?.is_err());
+    assert!(
+        timeout(Duration::from_millis(100), dialed.notified())
+            .await
+            .is_err()
+    );
+    gateway.replace(&settings(allow))?;
+    gateway.signal("-HUP").await?;
+    gateway.wait_log("configuration reloaded").await?;
+
+    let mut existing = connect(gateway.addr).await?;
+    existing.write_all(b"a").await?;
+    assert_eq!(timeout(DEADLINE, existing.read_u8()).await??, b'a');
+    gateway.replace(&settings(deny))?;
+    gateway.signal("-HUP").await?;
+    gateway.wait_log("configuration reloaded").await?;
+
+    let mut denied = connect(gateway.addr).await?;
+    assert!(timeout(DEADLINE, denied.read_u8()).await?.is_err());
+    existing.write_all(b"b").await?;
+    assert_eq!(timeout(DEADLINE, existing.read_u8()).await??, b'b');
+
+    let invalid = "[tcp_forward.source]\nallow = [\"192.0.2.1/33\"]";
+    assert!(!Gateway::check(gateway.dir.path(), &settings(invalid)).await?);
+    Ok(())
+}

@@ -489,6 +489,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "instant-acme",
+ "ipnet",
  "libc",
  "mime",
  "mime_guess",

@@ -24,12 +24,14 @@ use crate::{
     acme::{self, Managed},
     config::{self, Config, milliseconds},
     proxy::Proxy,
+    source_policy::SourcePolicy,
     tls::{ConnectionIdentity, ServerTls},
 };
 
 struct Generation {
     proxy: Proxy,
     tls: Option<ServerTls>,
+    forward_sources: Vec<SourcePolicy>,
 }
 
 impl Generation {
@@ -37,6 +39,12 @@ impl Generation {
         Self {
             proxy: Proxy::new(config.routes, &config.settings, config.tls.client),
             tls: config.tls.server,
+            forward_sources: config
+                .tcp_forward
+                .into_iter()
+                .map(|rule| rule.source)
+                .chain(config.udp_forward.into_iter().map(|rule| rule.source))
+                .collect(),
         }
     }
 }
@@ -60,8 +68,8 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     } else {
         None
     };
-    let tcp_rules = std::mem::take(&mut config.tcp_forward);
-    let udp_rules = std::mem::take(&mut config.udp_forward);
+    let tcp_rules = config.tcp_forward.clone();
+    let udp_rules = config.udp_forward.clone();
     let settings = config.settings.clone();
     let state = Arc::new(ArcSwap::from_pointee(Generation::new(config)));
     let (drain, _) = watch::channel(false);
@@ -94,8 +102,18 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                 let next = config::load(&path, managed.clone()).await?;
                 anyhow::ensure!(
                     next.settings == settings
-                        && next.tcp_forward == tcp_rules
-                        && next.udp_forward == udp_rules
+                        && next.tcp_forward.len() == tcp_rules.len()
+                        && next
+                            .tcp_forward
+                            .iter()
+                            .zip(&tcp_rules)
+                            .all(|(next, current)| next.same_startup(current))
+                        && next.udp_forward.len() == udp_rules.len()
+                        && next
+                            .udp_forward
+                            .iter()
+                            .zip(&udp_rules)
+                            .all(|(next, current)| next.same_startup(current))
                         && next.acme == acme_config,
                     "server, forwarding, and ACME settings require restart"
                 );
@@ -144,13 +162,20 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         udp_listeners[0].1.local_addr()?
     };
     let mut forwarding = JoinSet::new();
-    for (rule, socket) in udp_listeners {
+    for (index, (rule, socket)) in udp_listeners.into_iter().enumerate() {
+        let slot = tcp_rules.len() + index;
+        let source_state = state.clone();
         tracing::info!(listen = %socket.local_addr()?, "UDP forward ready");
-        forwarding.spawn(rule.serve(socket, drain.subscribe()));
+        forwarding.spawn(rule.serve(socket, drain.subscribe(), move |ip| {
+            source_state.load().forward_sources[slot].permits(ip)
+        }));
     }
-    for (rule, listener) in tcp_listeners {
+    for (index, (rule, listener)) in tcp_listeners.into_iter().enumerate() {
+        let source_state = state.clone();
         tracing::info!(listen = %listener.local_addr()?, "TCP forward ready");
-        forwarding.spawn(rule.serve(listener, drain.subscribe()));
+        forwarding.spawn(rule.serve(listener, drain.subscribe(), move |ip| {
+            source_state.load().forward_sources[index].permits(ip)
+        }));
     }
     let mut acme_tasks = JoinSet::new();
     let _acme_lock = if let Some((lock, renew_at, listener)) = acme_boot {

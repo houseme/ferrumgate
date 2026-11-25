@@ -12,6 +12,7 @@ mod health;
 mod proxy;
 mod server;
 mod site;
+mod source_policy;
 mod static_files;
 mod tcp_forward;
 mod tls;

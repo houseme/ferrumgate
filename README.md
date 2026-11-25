@@ -53,3 +53,5 @@ ACME DNS-01 支持 Cloudflare 托管区自动发现、CNAME 委托、通配证�
 TCP 端口转发支持向后端发送 PROXY v1/v2，以传递网关看到的连接地址。[TCP 转发配置](docs/EXECUTION.md#tcp-端口转发)
 
 ACME 可将签发和续期后的证书链与私钥自动部署到 Unix 本地目录。[本地证书部署](docs/EXECUTION.md#acme-本地证书部署)
+
+TCP 和 UDP 转发可使用来源 IP／CIDR 允许与拒绝规则，来源规则支持热重载。[来源访问控制](docs/EXECUTION.md#tcp-与-udp-的来源规则)

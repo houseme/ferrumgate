@@ -15,6 +15,8 @@ use tokio::{
     time::{sleep, timeout},
 };
 
+use crate::source_policy::{RawSourcePolicy, SourcePolicy};
+
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawForward {
@@ -24,6 +26,7 @@ pub(crate) struct RawForward {
     connect_timeout_ms: u64,
     connection_lifetime_ms: u64,
     proxy_protocol: Option<ProxyProtocol>,
+    source: RawSourcePolicy,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -42,11 +45,12 @@ impl Default for RawForward {
             connect_timeout_ms: 2_000,
             connection_lifetime_ms: 300_000,
             proxy_protocol: None,
+            source: RawSourcePolicy::default(),
         }
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub(crate) struct TcpForward {
     pub listen: SocketAddr,
     targets: Vec<SocketAddr>,
@@ -54,6 +58,7 @@ pub(crate) struct TcpForward {
     connect_timeout: Duration,
     connection_lifetime: Duration,
     proxy_protocol: Option<ProxyProtocol>,
+    pub source: SourcePolicy,
 }
 
 impl TcpForward {
@@ -93,10 +98,26 @@ impl TcpForward {
             connect_timeout: Duration::from_millis(raw.connect_timeout_ms),
             connection_lifetime: Duration::from_millis(raw.connection_lifetime_ms),
             proxy_protocol: raw.proxy_protocol,
+            source: SourcePolicy::compile(raw.source)?,
         })
     }
 
-    pub async fn serve(self, listener: TcpListener, mut drain: watch::Receiver<bool>) {
+    #[cfg(unix)]
+    pub fn same_startup(&self, other: &Self) -> bool {
+        self.listen == other.listen
+            && self.targets == other.targets
+            && self.max_connections == other.max_connections
+            && self.connect_timeout == other.connect_timeout
+            && self.connection_lifetime == other.connection_lifetime
+            && self.proxy_protocol == other.proxy_protocol
+    }
+
+    pub async fn serve(
+        self,
+        listener: TcpListener,
+        mut drain: watch::Receiver<bool>,
+        permits: impl Fn(IpAddr) -> bool + Send,
+    ) {
         let targets = std::sync::Arc::new(self.targets);
         let mut connections = JoinSet::new();
         loop {
@@ -117,6 +138,10 @@ impl TcpForward {
                             continue;
                         }
                     };
+                    if !permits(peer.ip()) {
+                        tracing::debug!(source = %peer.ip(), "TCP forward source denied");
+                        continue;
+                    }
                     let targets = targets.clone();
                     connections.spawn(async move {
                         let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.proxy_protocol)).await;

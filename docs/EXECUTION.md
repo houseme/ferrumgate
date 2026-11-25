@@ -381,6 +381,18 @@ cargo test --locked -p ferrumgate --test gateway tcp::
 
 TCP 目标支持匹配的 PROXY protocol 时，可在规则内设置 `proxy_protocol = "v1"` 或 `"v2"`。网关在转发应用数据前写入真实 TCP 对端和网关接收地址。启用后，后端需配置为从受信任的网关地址接收该版本。 [Gately 端口转发](https://gately.cn/en/docs/modules/portforward#proxy-protocol) · [PROXY protocol 规范](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)
 
+### TCP 与 UDP 的来源规则
+
+在转发规则下添加来源表，值可为单个 IP 或 CIDR。以下示例只允许指定网段，并永久拒绝其中一个地址。UDP 使用相同字段，表名替换为 `[udp_forward.source]`。
+
+```toml
+[tcp_forward.source]
+allow = ["192.0.2.0/24", "2001:db8:12::/48"]
+deny = ["192.0.2.9"]
+```
+
+`deny` 优先于 `allow`。省略 `allow` 表示接受未拒绝的来源，设置空数组表示拒绝所有来源。IPv4 映射地址按 IPv4 匹配。可通过 Unix SIGHUP 热重载来源规则。新 TCP 连接在拨号前应用规则，已建立的 TCP 连接继续工作。UDP 每次转发前检查请求和回复，规则修改后也会限制已有会话的报文。 [Gately 来源 IP 访问控制](https://gately.cn/en/docs/modules/portforward#source-ip-access-control)
+
 ### UDP 端口转发
 
 ```toml

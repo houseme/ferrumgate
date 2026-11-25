@@ -101,3 +101,47 @@ async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() ->
     }
     Ok(())
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn udp_source_reload_blocks_pending_replies_and_new_datagrams() -> Result<()> {
+    let target = UdpSocket::bind("127.0.0.1:0").await?;
+    let address = target.local_addr()?;
+    let settings = |source: &str| config(&rule(address, source), "http_enabled = false", "");
+    let allow = "[udp_forward.source]\nallow = [\"127.0.0.0/8\"]";
+    let deny = "[udp_forward.source]\nallow = [\"127.0.0.0/8\"]\ndeny = [\"127.0.0.1\"]";
+    let mut gateway = Gateway::spawn(&settings(allow)).await?;
+    let sender = client(gateway.addr).await?;
+
+    sender.send(b"before").await?;
+    let mut buffer = [0; 32];
+    let (len, peer) = timeout(DEADLINE, target.recv_from(&mut buffer)).await??;
+    assert_eq!(&buffer[..len], b"before");
+
+    gateway.replace(&settings(deny))?;
+    gateway.signal("-HUP").await?;
+    gateway.wait_log("configuration reloaded").await?;
+    target.send_to(b"stale reply", peer).await?;
+    assert!(
+        timeout(Duration::from_millis(100), sender.recv(&mut buffer))
+            .await
+            .is_err()
+    );
+    sender.send(b"blocked").await?;
+    assert!(
+        timeout(Duration::from_millis(100), target.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
+
+    gateway.replace(&settings(allow))?;
+    gateway.signal("-HUP").await?;
+    gateway.wait_log("configuration reloaded").await?;
+    sender.send(b"allowed").await?;
+    let (len, peer) = timeout(DEADLINE, target.recv_from(&mut buffer)).await??;
+    assert_eq!(&buffer[..len], b"allowed");
+    target.send_to(b"new reply", peer).await?;
+    let len = timeout(DEADLINE, sender.recv(&mut buffer)).await??;
+    assert_eq!(&buffer[..len], b"new reply");
+    Ok(())
+}
