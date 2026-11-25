@@ -133,7 +133,33 @@ upstream_h2c = true
 cargo test --locked -p ferrumgate --test gateway http2::
 ```
 
-## 6. 交付阶段与退出标准
+## 6. 配置多后端和备用切换
+
+为同一条路由定义主后端和备用后端。以下例子将两个主后端的健康流量约按 3:1 分配。三个 origin 均可用时，备用后端保持待命。使用 gRPC 的池应为每个后端准备可用的 HTTP/2。
+
+```toml
+[[routes]]
+host = "app.test"
+
+[[routes.backends]]
+upstream = "http://127.0.0.1:9001"
+weight = 3
+
+[[routes.backends]]
+upstream = "http://127.0.0.1:9002"
+
+[[routes.backends]]
+upstream = "http://127.0.0.1:9003"
+backup = true
+```
+
+先通过 `fgate check`，再按第 2 节重载。用后端标识验证分流比例。停止两个主后端，观察连续连接失败导致的 502，以及随后转到备用。启动主后端，等待冷却期结束再发请求，验证权重分流恢复。故障注入使用本机回环环境。
+
+```bash
+cargo test --locked -p ferrumgate --test gateway backends::selects_weighted_backends_and_switches_after_connect_failures
+```
+
+## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
 |---|---|---|
@@ -152,7 +178,7 @@ cargo test --locked -p ferrumgate --test gateway http2::
 
 1. C1 WebSocket 已接入路由开关和双向流式转发。当前测试覆盖握手校验、子协议、普通拒绝响应、两跳 TLS、连接名额、寿命和停机。
 2. C2 HTTP/2 和 h2c 已接入入口 ALPN、独立上游池、流控和 authority 校验。gRPC 验证双向流、客户端取消及 trailers。
-3. 后端定义使用稳定标识。主动探测有自己的并发和超时。被动失败只统计约定故障，健康快照原子发布。测试权重比例、探测抖动、失败阈值、摘除后的恢复以及单个后端失败时的在途请求。自动重试限制在能证明尚未写出请求的情形。
+3. C3 已接入加权后端池、备用切换和被动冷却。主动探测采用独立并发预算与超时，需验证探测抖动、失败阈值和恢复。自动重试限制在能证明尚未写出请求的情形。
 4. 重定向目标由站点配置生成。静态文件使用明确根目录，验证符号链接、目录索引、HEAD、Range、路径编码和跨平台行为。SSE、WebDAV、大文件等依赖长时连接的场景需要独立的上传与响应超时策略。
 
 ### D 证书签发与续期
@@ -197,7 +223,7 @@ cargo test --locked -p ferrumgate --test gateway http2::
 
 Docker、终端、文件服务、定时任务和诊断工具先各自明确哪些操作需要访问宿主机、凭据或网络。每项独立设置授权、资源预算、日志与关闭路径。以单模块完成安装、撤销权限、崩溃、并发和卸载演练作为启用条件。对同一机器上的已有系统服务优先采用可独立关闭的适配方式。
 
-## 7. 校验与性能验收
+## 8. 校验与性能验收
 
 ```bash
 cargo fmt --all --check
@@ -221,10 +247,11 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 
 预热后按 A1、B1、B2、A2 对照运行。本项目将 5% 的吞吐漂移、10% 的 p99 漂移作为首轮实验的暂停归因阈值，第一组稳定样本建立基线后再修订。记录 CPU/RSS、FD、二进制大小、错误率和原始输出。用流式大响应、慢连接和重载分别做资源上限验证。正式性能结论需要附全部环境与样本记录。
 
-## 8. 当前交付记录
+## 9. 当前交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
 - 依赖已用注册表索引核对，当前 15 个直接 crate 均采用最新稳定版，传递依赖按兼容约束求解。重点版本为 Tokio 1.54.1、Hyper 1.13.0、rustls 0.23.46、Clap 4.6.10 和 TOML 1.2.3。rustls 0.24 当前发布的是开发预览，HTTP/TLS 适配器使用 0.23 系列。精确版本见 [Cargo.lock](../Cargo.lock)。
 - Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。C1 在 macOS arm64 上通过 workspace Clippy、5 项 Rust 单测、release 构建和 12 项 Rust 端到端测试。新增场景覆盖两跳握手校验、WebSocket over TLS、子协议、路由关闭后保留既有会话，以及连接名额、寿命和停机。
 - C2 在 macOS arm64 通过 3 项独立 HTTP/2 端到端用例，覆盖两条并行 gRPC 流、双向数据、取消传播、请求与响应 trailers、TLS 上游、WebSocket 回落及 HTTP/1.1 普通后端。
-- 下一切片为多上游和健康检查。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
+- C3 在 macOS arm64 通过 workspace Clippy、6 项 Rust 单测、release 构建与 17 项 Rust 端到端测试。新增场景验证 2:1 权重、三次连接失败后的备用切换、冷却期边界及配置拒绝。
+- 下一切片为主动健康检查。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。

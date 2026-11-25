@@ -1,6 +1,6 @@
 # FerrumGate
 
-FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证、Unix 配置热加载、WebSocket（`ws` / `wss`）以及 HTTP/2 和原生 gRPC 代理。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
+FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证、Unix 配置热加载、WebSocket（`ws` / `wss`）、HTTP/2、原生 gRPC 代理和加权后端池。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
 
 ## 启动
 
@@ -19,6 +19,10 @@ cargo build --release --locked -p ferrumgate
 ## HTTP/2 和 gRPC
 
 TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路由使用 `upstream_h2c = true`，HTTPS 后端通过 ALPN 协商。原生 gRPC 使用两端 HTTP/2，可转发双向数据及 `grpc-status` 等 trailers。[配置与实战验证](docs/EXECUTION.md#5-启用-http2-和-grpc)
+
+## 多后端
+
+同一路由可以配置多条 `[[routes.backends]]`，以 `weight` 分配主后端流量，以 `backup = true` 声明备用后端。连接连续三次失败后暂停选择该后端 30 秒。[配置示例和故障演练](docs/EXECUTION.md#6-配置多后端和备用切换)
 
 ## 工作区
 

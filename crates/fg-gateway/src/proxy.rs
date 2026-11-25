@@ -141,7 +141,7 @@ impl Proxy {
         if !config::valid_authority(&authority) {
             return reply(StatusCode::BAD_REQUEST);
         }
-        let (upstream_uri, route) = {
+        let (upstream_uri, route, backend) = {
             let host = config::canonical_host(authority.host()).expect("validated authority");
             if tls_name.is_some_and(|sni| sni != host) {
                 return reply(StatusCode::MISDIRECTED_REQUEST);
@@ -149,19 +149,22 @@ impl Proxy {
             let Some(route) = self.routes.find(&host, target.path()) else {
                 return reply(StatusCode::NOT_FOUND);
             };
+            let Some(backend) = route.backends.select() else {
+                return reply(StatusCode::SERVICE_UNAVAILABLE);
+            };
             let uri = Uri::builder()
-                .scheme(route.scheme.clone())
-                .authority(route.authority.clone())
+                .scheme(backend.scheme.clone())
+                .authority(backend.authority.clone())
                 .path_and_query(target.clone())
                 .build()
                 .expect("validated authority and origin-form target");
-            (uri, route)
+            (uri, route, backend)
         };
         let grpc = is_grpc(request.headers());
         if grpc && !downstream_h2 {
             return reply(StatusCode::HTTP_VERSION_NOT_SUPPORTED);
         }
-        if grpc && !route.upstream_h2c && route.scheme != Scheme::HTTPS {
+        if grpc && !route.upstream_h2c && backend.scheme != Scheme::HTTPS {
             return reply(StatusCode::BAD_GATEWAY);
         }
         let (handshake, chunked) = if request.headers().contains_key(UPGRADE) {
@@ -187,7 +190,7 @@ impl Proxy {
         for name in forwarding_headers {
             headers.remove(name);
         }
-        headers.insert(HOST, route.upstream_host.clone());
+        headers.insert(HOST, backend.host.clone());
         headers.insert("x-forwarded-host", original_host);
         headers.insert(
             "x-forwarded-proto",
@@ -232,6 +235,12 @@ impl Proxy {
             self.client.request(request)
         };
         let result = timeout(self.response_header_timeout, pending).await;
+
+        match &result {
+            Ok(Ok(_)) => route.backends.connected(backend),
+            Ok(Err(error)) if error.is_connect() => route.backends.connection_failed(backend),
+            _ => {}
+        }
 
         match result {
             Ok(Ok(mut response)) if response.status() == StatusCode::SWITCHING_PROTOCOLS => {

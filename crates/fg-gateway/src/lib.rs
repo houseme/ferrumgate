@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod backend;
 mod config;
 mod proxy;
 mod server;

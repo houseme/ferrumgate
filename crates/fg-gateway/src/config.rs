@@ -7,18 +7,18 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
-use hyper::{
-    Uri,
-    header::HeaderValue,
-    http::uri::{Authority, PathAndQuery, Scheme},
-};
+use hyper::http::uri::{Authority, PathAndQuery};
 use serde::Deserialize;
 use tokio::{fs, io::AsyncReadExt};
 
-use crate::tls::{self, CertificateFiles, Tls};
+use crate::{
+    backend::{BackendPool, RawBackend},
+    tls::{self, CertificateFiles, Tls},
+};
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_ROUTES: usize = 1024;
+const MAX_BACKENDS: usize = 2048;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -67,7 +67,9 @@ impl Default for Settings {
 struct RawRoute {
     host: String,
     path_prefix: Option<String>,
-    upstream: String,
+    upstream: Option<String>,
+    #[serde(default)]
+    backends: Vec<RawBackend>,
     #[serde(default)]
     websocket: bool,
     #[serde(default)]
@@ -86,9 +88,7 @@ pub(crate) struct Routes {
 
 pub(crate) struct Route {
     prefix: String,
-    pub scheme: Scheme,
-    pub authority: Authority,
-    pub upstream_host: HeaderValue,
+    pub backends: BackendPool,
     pub websocket: bool,
     pub upstream_h2c: bool,
 }
@@ -168,6 +168,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     );
 
     let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();
+    let mut backend_count = 0;
     for (index, route) in raw.routes.into_iter().enumerate() {
         let host = canonical_host(&route.host)
             .with_context(|| format!("invalid routes[{index}].host"))?
@@ -181,25 +182,13 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
                     .is_ok_and(|value| value.path() == prefix),
             "invalid routes[{index}].path_prefix"
         );
-        let upstream = route.upstream.parse::<Uri>().ok().filter(|uri| {
-            matches!(uri.scheme_str(), Some("http" | "https"))
-                && uri.path() == "/"
-                && uri.query().is_none()
-                && !route.upstream.contains('#')
-        });
-        let parts = upstream.map(Uri::into_parts).with_context(|| {
-            format!("invalid routes[{index}].upstream (expected HTTP(S) origin)")
-        })?;
-        let authority = parts
-            .authority
-            .filter(valid_authority)
-            .with_context(|| format!("invalid routes[{index}].upstream authority"))?;
-        let scheme = parts.scheme.context("missing upstream scheme")?;
+        let backends = BackendPool::compile(route.upstream, route.backends, route.upstream_h2c)
+            .with_context(|| format!("invalid routes[{index}] backend pool"))?;
+        backend_count += backends.len();
         ensure!(
-            !route.upstream_h2c || scheme == Scheme::HTTP,
-            "routes[{index}].upstream_h2c requires an http:// upstream"
+            backend_count <= MAX_BACKENDS,
+            "expected at most {MAX_BACKENDS} backends"
         );
-        let upstream_host = HeaderValue::from_str(authority.as_str())?;
         let list = by_host.entry(host).or_default();
         ensure!(
             !list.iter().any(|entry| entry.prefix == prefix),
@@ -207,9 +196,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         );
         list.push(Route {
             prefix,
-            scheme,
-            authority,
-            upstream_host,
+            backends,
             websocket: route.websocket,
             upstream_h2c: route.upstream_h2c,
         });
