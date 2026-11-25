@@ -8,7 +8,7 @@
 |---|---|---|
 | Web 服务 | HTTP/1.1、HTTP/2、h2c、gRPC、WebSocket；精确域名、通配域名和路径；加权池、备用、被动和主动 HTTP/TCP 检查；重定向、固定文本和静态文件 | HTTP/3、多 Web 监听、导航面板、路径重写、访问策略、请求重试、其他负载策略、缓存、压缩、限流、拓扑 |
 | 证书 | PEM 手动加载、精确和通配 SNI、IP 证书与无 SNI 选择、原子轮换、HTTPS 上游验证；ACME HTTP-01（DNS 名、IPv4 和 IPv6）、Cloudflare DNS-01、CNAME 委托、SOA 区域发现与通配证书、EAB、证书 profile、账户复用、续期、在线换证和本地文件部署 | 其他 DNS 提供商、未完成订单恢复、ARI、部署命令、SSH／容器部署和到期告警 |
-| 端口转发与协议分流 | 独立或 Web 并行的 TCP/UDP 转发，支持端口列表及范围；TCP 顺序目标切换、半关闭、排空、首次数据超时、每源并发配额及出站 PROXY v1/v2；UDP 多目标轮询、建立会话时故障切换、独立会话与空闲回收；TCP/UDP 来源 IP／CIDR 访问控制可热重载 | 订阅地址列表、流量指标、受信任来源的 PROXY 接收、SNI/ALPN 和其他协议分类 |
+| 端口转发与协议分流 | 独立或 Web 并行的 TCP/UDP 转发，支持端口列表及范围；TCP 顺序目标切换、半关闭、排空、首次数据超时、每源并发配额及出站 PROXY v1/v2；UDP 多目标轮询、建立会话时故障切换、独立会话、按需分配回包缓冲与空闲回收；TCP/UDP 来源 IP／CIDR 访问控制可热重载 | 订阅地址列表、流量指标、受信任来源的 PROXY 接收、SNI/ALPN 和其他协议分类 |
 | 管理、认证与运维 | TOML、CLI 校验、Unix 原子重载、结构化运行日志、本地回滚步骤 | 独立管理 API、Web UI、会话与角色、OIDC/TOTP/Passkeys、审计、配置历史、备份、指标和通知 |
 | WAF 与入侵防护 | 按固定路由配置上游，逐跳字段与转发身份边界已实现 | 站点 ACL、CRS 检测与阻断、日志 jail、受限防火墙组件、端口敲门 |
 | DDNS、STUN 与隧道 | 当前路线记录了提供商和运行生命周期的验收要求 | DDNS 提供商与真实读回、STUN/TCP/UDP 穿透、frp、Cloudflare Tunnel、Tailscale、NetBird、EasyTier |

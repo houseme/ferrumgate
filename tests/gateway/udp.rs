@@ -59,6 +59,31 @@ async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
 }
 
 #[tokio::test]
+async fn forwards_empty_and_large_udp_replies_without_truncation() -> Result<()> {
+    let target = UdpSocket::bind("127.0.0.1:0").await?;
+    let gateway = Gateway::spawn(&config(
+        &rule(target.local_addr()?, ""),
+        "http_enabled = false",
+        "",
+    ))
+    .await?;
+    let sender = client(gateway.addr).await?;
+    sender.send(b"start").await?;
+    let mut request = [0; 16];
+    let (size, peer) = timeout(DEADLINE, target.recv_from(&mut request)).await??;
+    assert_eq!(&request[..size], b"start");
+
+    let payload = vec![0x5a; 8192];
+    let mut response = vec![0; payload.len() + 1];
+    for expected in [payload.as_slice(), &[], payload.as_slice()] {
+        target.send_to(expected, peer).await?;
+        let size = timeout(DEADLINE, sender.recv(&mut response)).await??;
+        assert_eq!(&response[..size], expected);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn rotates_new_udp_sessions_and_keeps_existing_sessions_on_their_target() -> Result<()> {
     let (first_target, mut first_peers) = echo_target().await?;
     let (second_target, mut second_peers) = echo_target().await?;

@@ -420,7 +420,7 @@ max_sessions = 128
 idle_timeout_ms = 30000
 ```
 
-用 `targets` 设置 1 到 8 个目标。旧配置可继续使用单个 `target`。每条规则填写其中一个字段。每个监听端口按客户端 IP 与端口建立独立会话。新会话轮询选择起始目标，绑定或连接失败时依次试下一个目标。建立后会话固定使用该目标，只有来自该目标的响应可返回客户端。UDP 目标无响应时会话按空闲期限回收，已发送的数据报不会重发。满载时丢弃超出预算的报文。修改目标或预算需重启。 [Gately UDP 参考实现](https://github.com/wangwanjie/gately/blob/442162e4d0b64df119bc5fe6469a088adee844c4/internal/modules/portforward/forwarder.go#L316-L355)
+用 `targets` 设置 1 到 8 个目标。旧配置可继续使用单个 `target`。每条规则填写其中一个字段。每个监听端口按客户端 IP 与端口建立独立会话。新会话轮询选择起始目标，绑定或连接失败时依次试下一个目标。建立后会话固定使用该目标，只有来自该目标的响应可返回客户端。UDP 目标无响应时会话按空闲期限回收，已发送的数据报不会重发。满载时丢弃超出预算的报文。收到响应时才借用回包缓冲，等待响应的会话不会常驻一份回包缓冲。修改目标或预算需重启。 [Gately UDP 参考实现](https://github.com/wangwanjie/gately/blob/442162e4d0b64df119bc5fe6469a088adee844c4/internal/modules/portforward/forwarder.go#L316-L355)
 
 ```bash
 cargo test --locked -p ferrumgate --test gateway udp::

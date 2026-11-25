@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, hash_map::Entry},
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -23,6 +24,10 @@ use crate::{
 
 const MAX_DATAGRAM: usize = 65_535;
 static QUEUED_PACKETS: Semaphore = Semaphore::const_new(1024);
+
+thread_local! {
+    static REPLY_BUFFER: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
+}
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -60,6 +65,15 @@ pub(crate) struct UdpForward {
 struct Packet {
     data: Bytes,
     _reservation: SemaphorePermit<'static>,
+}
+
+struct ReplyBuffer(Vec<u8>);
+
+impl Drop for ReplyBuffer {
+    fn drop(&mut self) {
+        // A reply may finish on a different worker. Keep one reusable buffer there.
+        let _ = REPLY_BUFFER.try_with(|slot| slot.set(std::mem::take(&mut self.0)));
+    }
 }
 
 impl UdpForward {
@@ -208,7 +222,6 @@ async fn relay(
         connected = connect(target).await;
     }
     let upstream = connected?;
-    let mut buffer = vec![0; MAX_DATAGRAM];
     loop {
         let result = timeout(idle, async {
             tokio::select! {
@@ -217,10 +230,10 @@ async fn relay(
                     if !permits(peer.ip()) { return Ok(false); }
                     upstream.send(&packet.data).await?;
                 }
-                response = upstream.recv(&mut buffer) => {
-                    let len = response?;
+                response = recv_reply(&upstream) => {
+                    let (buffer, len) = response?;
                     if !permits(peer.ip()) { return Ok(false); }
-                    listener.send_to(&buffer[..len], peer).await?;
+                    listener.send_to(&buffer.0[..len], peer).await?;
                 }
             }
             Ok::<_, io::Error>(true)
@@ -230,6 +243,19 @@ async fn relay(
             Ok(Ok(true)) => {}
             Ok(Err(error)) => return Err(error),
             Ok(Ok(false)) | Err(_) => return Ok(()),
+        }
+    }
+}
+
+async fn recv_reply(upstream: &UdpSocket) -> io::Result<(ReplyBuffer, usize)> {
+    loop {
+        upstream.readable().await?;
+        let mut buffer = ReplyBuffer(REPLY_BUFFER.take());
+        buffer.0.resize(MAX_DATAGRAM, 0);
+        match upstream.try_recv(&mut buffer.0) {
+            Ok(len) => return Ok((buffer, len)),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(error) => return Err(error),
         }
     }
 }
