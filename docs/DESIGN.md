@@ -70,7 +70,7 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 ## 4. 阶段 B 手动 TLS
 
-`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。精确 HTTPS 路由须有覆盖其域名的 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。先选精确 SNI 证书，随后尝试覆盖单个子域标签的通配证书。通配证书的 SAN 必须包含配置的名称。未知或缺失的 SNI 会在握手时被拒绝。TLS 下的 Host 需与 SNI 一致，否则返回 421。
+`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。精确 HTTPS 路由须有覆盖其域名的 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。先选精确 SNI 证书，随后尝试覆盖单个子域标签的通配证书。通配证书的 SAN 必须包含配置的名称。未知 SNI 会在握手时被拒绝。无 SNI 时先选与 TCP 连接本地地址匹配的有效 IP 证书，否则选择有效期结束最晚的 IP 证书，HTTP authority 限于该证书声明的地址。没有匹配证书时拒绝握手。无 SNI 的 IP 路径禁用会话恢复。TLS 下的 Host 需与 SNI 一致，否则返回 421。
 
 外连 HTTPS 验证证书链和目标名称。默认信任 `webpki-roots` 的根证书集。根字段 `upstream_ca_file` 可追加私有 CA，添加后对当前所有 HTTPS 上游生效。指定的 TLS 文件相对配置文件目录解析，每个文件最多 1 MiB。Unix 热加载以一代提交路由、证书和上游信任配置。使用带版本的证书和密钥文件名，再替换 TOML。TLS 配置示例和轮换命令见 [EXECUTION.md](EXECUTION.md)。
 

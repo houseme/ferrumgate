@@ -143,3 +143,71 @@ async fn selects_wildcard_certificate_and_prefers_exact_sni() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn ip_tls_uses_the_local_listener_address_and_restricts_http_authority() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let ca = Ca::new()?;
+    let local = ca.identity("127.0.0.1")?;
+    let unrelated = ca.identity("10.0.0.1")?;
+    local.write(dir.path(), "local")?;
+    unrelated.write(dir.path(), "unrelated")?;
+    let backend = Origin::spawn(|socket| async move {
+        serve_http(socket, |request| async move {
+            assert_eq!(request.headers()["x-forwarded-proto"], "https");
+            response("IP TLS")
+        })
+        .await
+    })
+    .await?;
+    let routes = route("127.0.0.1", backend.addr, "/")
+        + &route("10.0.0.1", backend.addr, "/")
+        + &certificate("127.0.0.1", "local")
+        + &certificate("10.0.0.1", "unrelated");
+    let settings = config(&routes, "tls = true", "");
+    let missing = settings
+        .replace("local.pem", "unrelated.pem")
+        .replace("local.key", "unrelated.key");
+    assert!(!Gateway::check(dir.path(), &missing).await?);
+
+    let gateway = Gateway::with_dir(&settings, dir).await?;
+    let stream = ca.connect(gateway.addr, "127.0.0.1", b"http/1.1").await?;
+    assert_eq!(
+        stream.get_ref().1.peer_certificates().unwrap()[0],
+        *local.cert.der()
+    );
+    let mut client = http_client(stream).await?;
+    assert_eq!(get(&mut client, "127.0.0.1", "/").await?.1, "IP TLS");
+    assert_eq!(get(&mut client, "10.0.0.1", "/").await?.0, 421);
+    Ok(())
+}
+
+#[tokio::test]
+async fn ip_tls_uses_latest_expiring_certificate_when_no_local_ip_matches() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let ca = Ca::new()?;
+    let mut earlier = rcgen::CertificateParams::new(vec!["192.0.2.1".to_owned()])?;
+    earlier.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(1);
+    ca.identity_with_params(earlier)?
+        .write(dir.path(), "earlier")?;
+    let latest = ca.identity("2001:db8::1")?;
+    latest.write(dir.path(), "latest")?;
+    let origin = Origin::http("fallback").await?;
+    let routes = route("192.0.2.1", origin.addr, "/")
+        + &route("2001:db8::1", origin.addr, "/")
+        + &certificate("192.0.2.1", "earlier")
+        + &certificate("[2001:db8::1]", "latest");
+    let gateway = Gateway::with_dir(&config(&routes, "tls = true", ""), dir).await?;
+    let stream = ca.connect(gateway.addr, "2001:db8::1", b"http/1.1").await?;
+    assert_eq!(
+        stream.get_ref().1.peer_certificates().unwrap()[0],
+        *latest.cert.der()
+    );
+    assert_eq!(
+        get(&mut http_client(stream).await?, "[2001:db8::1]", "/")
+            .await?
+            .1,
+        "fallback"
+    );
+    Ok(())
+}

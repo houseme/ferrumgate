@@ -26,6 +26,7 @@ use tokio::time::timeout;
 use crate::{
     config::{self, RouteAction, Routes, Settings, milliseconds},
     static_files::LocalBody,
+    tls::ConnectionIdentity,
     websocket::{Handshake, Tunnel},
 };
 
@@ -99,7 +100,7 @@ impl Proxy {
         &self,
         mut request: Request<Incoming>,
         peer: SocketAddr,
-        tls_name: Option<&str>,
+        tls_identity: Option<&ConnectionIdentity>,
         tunnel: Option<&OnceLock<Tunnel>>,
     ) -> Reply {
         let downstream_version = request.version();
@@ -161,7 +162,7 @@ impl Proxy {
         }
         let (upstream_uri, route, backend) = {
             let host = config::canonical_host(authority.host()).expect("validated authority");
-            if tls_name.is_some_and(|sni| sni != host) {
+            if tls_identity.is_some_and(|identity| !identity.matches(&host)) {
                 return reply(StatusCode::MISDIRECTED_REQUEST);
             }
             let Some(route) = self.routes.find(&host, target.path()) else {
@@ -233,7 +234,11 @@ impl Proxy {
         headers.insert("x-forwarded-host", original_host);
         headers.insert(
             "x-forwarded-proto",
-            HeaderValue::from_static(if tls_name.is_some() { "https" } else { "http" }),
+            HeaderValue::from_static(if tls_identity.is_some() {
+                "https"
+            } else {
+                "http"
+            }),
         );
         headers.insert(
             "x-forwarded-for",

@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    io,
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,11 +11,15 @@ use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     crypto::ring,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    server::{ClientHello, ResolvesServerCert, ResolvesServerCertUsingSni},
-    sign::CertifiedKey,
+    server::{
+        Acceptor, ClientHello, NoServerSessionStorage, ResolvesServerCert,
+        ResolvesServerCertUsingSni,
+    },
+    sign::{CertifiedKey, SingleCertAndKey},
 };
 use serde::Deserialize;
-use tokio_rustls::TlsAcceptor;
+use tokio::net::TcpStream;
+use tokio_rustls::{LazyConfigAcceptor, server::TlsStream};
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
 use crate::{
@@ -31,14 +36,94 @@ pub(crate) struct CertificateFiles {
 }
 
 pub(crate) struct Tls {
-    pub server: Option<TlsAcceptor>,
+    pub server: Option<ServerTls>,
     pub client: ClientConfig,
 }
 
 struct Resolver {
     exact: ResolvesServerCertUsingSni,
     wildcard: HashMap<String, Arc<CertifiedKey>>,
+    ip: HashMap<IpAddr, IpCertificate>,
     managed: Option<(Vec<String>, Arc<Managed>)>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ServerTls {
+    base: Arc<ServerConfig>,
+    resolver: Arc<Resolver>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ConnectionIdentity {
+    Dns(Arc<str>),
+    Ip(Arc<[IpAddr]>),
+}
+
+impl ConnectionIdentity {
+    pub fn matches(&self, host: &str) -> bool {
+        match self {
+            Self::Dns(name) => name.as_ref() == host,
+            Self::Ip(names) => ip_literal(host).is_some_and(|host| names.contains(&host)),
+        }
+    }
+}
+
+struct IpCertificate {
+    key: Arc<CertifiedKey>,
+    starts: i64,
+    expires: i64,
+    hosts: Arc<[IpAddr]>,
+}
+
+impl ServerTls {
+    pub async fn accept(
+        &self,
+        stream: TcpStream,
+    ) -> io::Result<(TlsStream<TcpStream>, ConnectionIdentity)> {
+        let local = stream.local_addr()?.ip();
+        let handshake = LazyConfigAcceptor::new(Acceptor::default(), stream).await?;
+        let (config, identity) = if let Some(name) = handshake.client_hello().server_name() {
+            (self.base.clone(), ConnectionIdentity::Dns(Arc::from(name)))
+        } else {
+            let (key, hosts) = self.resolver.ip_certificate(local).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "no valid IP certificate for a TLS connection without SNI",
+                )
+            })?;
+            let mut config = (*self.base).clone();
+            config.cert_resolver = Arc::new(SingleCertAndKey::from(key));
+            // IP identities share no SNI name on which to bind resumed sessions.
+            config.session_storage = Arc::new(NoServerSessionStorage {});
+            config.send_tls13_tickets = 0;
+            (Arc::new(config), ConnectionIdentity::Ip(hosts))
+        };
+        Ok((handshake.into_stream(config).await?, identity))
+    }
+}
+
+impl Resolver {
+    fn ip_certificate(&self, local: IpAddr) -> Option<(Arc<CertifiedKey>, Arc<[IpAddr]>)> {
+        let now = crate::acme::unix_now();
+        let mapped = match local {
+            IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4),
+            IpAddr::V4(_) => None,
+        };
+        let valid = |entry: &&IpCertificate| entry.starts <= now && entry.expires > now;
+        let preferred = self
+            .ip
+            .get(&local)
+            .filter(valid)
+            .or_else(|| mapped.and_then(|ip| self.ip.get(&ip)).filter(valid));
+        preferred
+            .or_else(|| {
+                self.ip
+                    .values()
+                    .filter(valid)
+                    .max_by_key(|entry| (entry.expires, std::cmp::Reverse(entry.hosts[0])))
+            })
+            .map(|entry| (entry.key.clone(), entry.hosts.clone()))
+    }
 }
 
 impl std::fmt::Debug for Resolver {
@@ -82,6 +167,7 @@ pub(crate) async fn load<'a>(
         let mut resolver = Resolver {
             exact: ResolvesServerCertUsingSni::new(),
             wildcard: HashMap::new(),
+            ip: HashMap::new(),
             managed,
         };
         let mut names: HashSet<String> = resolver
@@ -93,8 +179,12 @@ pub(crate) async fn load<'a>(
             let load = async {
                 let wildcard = entry.host.strip_prefix("*.");
                 let domain = canonical_host(wildcard.unwrap_or(&entry.host))
-                    .filter(|name| !name.starts_with('[') && name.parse::<IpAddr>().is_err())
-                    .context("expected a DNS name or *.suffix")?;
+                    .context("expected a DNS name, *.suffix, or IP address")?;
+                let ip = ip_literal(&domain);
+                ensure!(
+                    wildcard.is_none() || ip.is_none(),
+                    "IP wildcard certificates are invalid"
+                );
                 let name = if wildcard.is_some() {
                     format!("*.{domain}")
                 } else {
@@ -115,7 +205,19 @@ pub(crate) async fn load<'a>(
                     .context("could not load certificate and key")?;
                 key.keys_match()
                     .context("verify certificate and private key match")?;
-                if wildcard.is_some() {
+                if let Some(ip) = ip {
+                    verify_ip(&key, ip)?;
+                    let (starts, expires) = validity(&key)?;
+                    resolver.ip.insert(
+                        ip,
+                        IpCertificate {
+                            key: Arc::new(key),
+                            starts,
+                            expires,
+                            hosts: Arc::from([ip]),
+                        },
+                    );
+                } else if wildcard.is_some() {
                     verify_wildcard(&key, &name)?;
                     resolver.wildcard.insert(domain.into_owned(), Arc::new(key));
                 } else {
@@ -143,12 +245,16 @@ pub(crate) async fn load<'a>(
             }),
             "every exact HTTPS route host requires a covering certificate entry"
         );
+        let resolver = Arc::new(resolver);
         let mut server = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
-            .with_cert_resolver(Arc::new(resolver));
+            .with_cert_resolver(resolver.clone());
         server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-        Some(TlsAcceptor::from(Arc::new(server)))
+        Some(ServerTls {
+            base: Arc::new(server),
+            resolver,
+        })
     } else {
         None
     };
@@ -179,6 +285,43 @@ fn managed_covers(domains: &[String], host: &str) -> bool {
                 .iter()
                 .any(|name| name.strip_prefix("*.") == Some(suffix))
         })
+}
+
+pub(crate) fn ip_literal(host: &str) -> Option<IpAddr> {
+    match host.strip_prefix('[').and_then(|ip| ip.strip_suffix(']')) {
+        Some(ip) => ip.parse::<std::net::Ipv6Addr>().ok().map(IpAddr::V6),
+        None => host.parse().ok(),
+    }
+}
+
+fn validity(key: &CertifiedKey) -> Result<(i64, i64)> {
+    let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
+        .map_err(|_| anyhow::anyhow!("invalid leaf certificate"))?;
+    let validity = leaf.validity();
+    Ok((
+        validity.not_before.timestamp(),
+        validity.not_after.timestamp(),
+    ))
+}
+
+pub(crate) fn verify_ip(key: &CertifiedKey, ip: IpAddr) -> Result<()> {
+    let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
+        .map_err(|_| anyhow::anyhow!("invalid leaf certificate"))?;
+    let san = leaf
+        .subject_alternative_name()
+        .map_err(|_| anyhow::anyhow!("invalid certificate SAN"))?
+        .context("IP certificate needs SAN")?;
+    ensure!(
+        san.value.general_names.iter().any(|entry| match entry {
+            GeneralName::IPAddress(bytes) => match ip {
+                IpAddr::V4(ip) => *bytes == ip.octets(),
+                IpAddr::V6(ip) => *bytes == ip.octets(),
+            },
+            _ => false,
+        }),
+        "certificate SAN does not include the configured IP address"
+    );
+    Ok(())
 }
 
 pub(crate) fn verify_wildcard(key: &CertifiedKey, name: &str) -> Result<()> {

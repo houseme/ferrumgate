@@ -24,11 +24,12 @@ use crate::{
     acme::{self, Managed},
     config::{self, Config, milliseconds},
     proxy::Proxy,
+    tls::{ConnectionIdentity, ServerTls},
 };
 
 struct Generation {
     proxy: Proxy,
-    tls: Option<tokio_rustls::TlsAcceptor>,
+    tls: Option<ServerTls>,
 }
 
 impl Generation {
@@ -228,14 +229,12 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                                 result = timeout(handshake_timeout, tls.accept(stream)) => result,
                             };
                             match negotiated {
-                                Ok(Ok(stream)) => {
-                                    let session = stream.get_ref().1;
-                                    let http2 = session.alpn_protocol() == Some(b"h2");
-                                    let name = session.server_name().map(str::to_owned);
+                                Ok(Ok((stream, identity))) => {
+                                    let http2 = stream.get_ref().1.alpn_protocol() == Some(b"h2");
                                     if http2 {
-                                        serve_h2(&h2, stream, &state, peer, name, drain).await;
+                                        serve_h2(&h2, stream, &state, peer, identity, drain).await;
                                     } else {
-                                        serve_http(&http, stream, &state, peer, name.as_deref(), drain).await;
+                                        serve_http(&http, stream, &state, peer, Some(&identity), drain).await;
                                     }
                                 }
                                 _ => tracing::debug!("TLS handshake failed or timed out"),
@@ -273,7 +272,7 @@ async fn serve_http(
     stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     state: &ArcSwap<Generation>,
     peer: SocketAddr,
-    tls_name: Option<&str>,
+    tls_identity: Option<&ConnectionIdentity>,
     mut drain: watch::Receiver<bool>,
 ) {
     let tunnel = OnceLock::new();
@@ -283,7 +282,7 @@ async fn serve_http(
             Ok::<_, std::convert::Infallible>(
                 current
                     .proxy
-                    .forward(request, peer, tls_name, Some(&tunnel))
+                    .forward(request, peer, tls_identity, Some(&tunnel))
                     .await,
             )
         });
@@ -319,18 +318,17 @@ async fn serve_h2(
     stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
     state: &ArcSwap<Generation>,
     peer: SocketAddr,
-    tls_name: Option<String>,
+    tls_identity: ConnectionIdentity,
     mut drain: watch::Receiver<bool>,
 ) {
-    let tls_name = tls_name.map(Arc::<str>::from);
     let service = service_fn(|request| {
         let current = state.load_full();
-        let tls_name = tls_name.clone();
+        let tls_identity = tls_identity.clone();
         async move {
             Ok::<_, std::convert::Infallible>(
                 current
                     .proxy
-                    .forward(request, peer, tls_name.as_deref(), None)
+                    .forward(request, peer, Some(&tls_identity), None)
                     .await,
             )
         }

@@ -97,6 +97,23 @@ curl --noproxy '*' --fail --cacert /path/to/tls-demo/tls/app.pem \
 
 轮换时写入新的证书和私钥文件，以不同文件名作为一组。在候选 TOML 改引用，执行 `fgate check`，随后按第 2 节替换和重载。复验新连接看到的证书、SAN 和到期时间，旧连接保留已协商状态。保留旧版本文件直到回滚窗口结束。TLS PEM 配置需要可读文件和兼容密钥，部署前在实际 TLS 客户端核验证书链。
 
+### 手动配置 IP 证书
+
+路由和证书的 `host` 可填写 IPv4 或 IPv6 地址。证书的 SAN 必须包含所配置的 IP。配置中 IPv6 可以写成 `2001:db8::1`，浏览器 URL 中使用方括号。
+
+```toml
+[[routes]]
+host = "192.0.2.10"
+upstream = "http://127.0.0.1:9000"
+
+[[certificates]]
+host = "192.0.2.10"
+cert_file = "tls/ip-fullchain.pem"
+key_file = "tls/ip-key.pem"
+```
+
+没有 SNI 时优先选连接本地地址对应的有效证书。若监听在 NAT 后且本地地址与证书地址不同，选择有效期结束最晚的 IP 证书。同一连接上的 HTTP authority 必须属于已选证书配置的 IP。 [Gately IP 证书](https://gately.cn/en/docs/modules/ssl#short-lived-and-ip-address-certificates)
+
 ### ACME HTTP-01 与自动续期
 
 先创建私有状态目录，再启用专用的 HTTP-01 明文端口。域名的 DNS 应解析到网关，CA 需要能通过公网 TCP 80 到达该端口。通过端口映射部署时，`challenge_listen` 使用对应的本地端口。 HTTP-01 只适用于精确 DNS 名。 [Gately 证书文档](https://gately.cn/en/docs/modules/ssl#http-01-validation)

@@ -47,3 +47,5 @@ UDP 可用 `[[udp_forward]]` 按客户端维护独立会话，并配置会话上
 ACME DNS-01 支持 Cloudflare 托管区自动发现、CNAME 委托、通配证书、TXT 传播检查和重启后的记录清理。[DNS-01 配置](docs/EXECUTION.md#acme-dns-01-cloudflare)
 
 可通过 `acme.profile` 选择 CA 支持的证书档位，例如 `shortlived`。调整档位后重启会触发重新签发。[证书档位](docs/EXECUTION.md#acme-http-01-与自动续期)
+
+可为 IP 地址配置证书。无 SNI 客户端按连接本地地址选择证书，并支持 NAT 场景下的有效期兜底。[配置 IP 证书](docs/EXECUTION.md#手动配置-ip-证书)

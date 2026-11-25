@@ -282,8 +282,12 @@ impl Ca {
     }
 
     pub fn identity(&self, name: &str) -> Result<Identity> {
+        self.identity_with_params(CertificateParams::new(vec![name.to_owned()])?)
+    }
+
+    pub fn identity_with_params(&self, params: CertificateParams) -> Result<Identity> {
         let key = KeyPair::generate()?;
-        let cert = CertificateParams::new(vec![name.to_owned()])?.signed_by(&key, &self.0)?;
+        let cert = params.signed_by(&key, &self.0)?;
         Ok(Identity { cert, key })
     }
 
