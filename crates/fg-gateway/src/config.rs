@@ -271,7 +271,8 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         );
         let acme = AcmeConfig::compile(acme, dir).await?;
         ensure!(
-            acme.challenge_listen.port() == 0 || listens.insert(acme.challenge_listen),
+            acme.challenge_listen
+                .is_none_or(|listen| listen.port() == 0 || listens.insert(listen)),
             "duplicate ACME HTTP challenge listener"
         );
         Some(acme)

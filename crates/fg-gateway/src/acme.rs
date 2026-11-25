@@ -42,7 +42,11 @@ use tokio::{
 };
 use x509_parser::prelude::{FromDer, X509Certificate};
 
-use crate::config::{canonical_host, read_file, valid_authority};
+use crate::{
+    config::{canonical_host, read_file, valid_authority},
+    dns01::{Dns01, RawDns01},
+    tls,
+};
 
 const CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
 const STAGING_DIRECTORY: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
@@ -62,6 +66,7 @@ pub(crate) struct RawAcme {
     challenge_listen: Option<SocketAddr>,
     renew_before_hours: Option<u32>,
     eab: Option<ExternalBinding>,
+    dns01: Option<RawDns01>,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -74,13 +79,14 @@ struct ExternalBinding {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct AcmeConfig {
     pub domains: Vec<String>,
-    pub challenge_listen: SocketAddr,
+    pub challenge_listen: Option<SocketAddr>,
     pub state_dir: PathBuf,
     email: String,
     directory: String,
     pub ca_file: Option<PathBuf>,
     renew_before_hours: u32,
     eab: Option<ExternalBinding>,
+    dns01: Option<Dns01>,
 }
 
 #[derive(Default)]
@@ -130,12 +136,21 @@ impl AcmeConfig {
         );
         let mut domains = Vec::with_capacity(raw.domains.len());
         for name in raw.domains {
-            let host = canonical_host(&name)
+            let wildcard = name.strip_prefix("*.");
+            ensure!(
+                wildcard.is_none() || raw.dns01.is_some(),
+                "ACME wildcard requires DNS-01"
+            );
+            let host = canonical_host(wildcard.unwrap_or(&name))
                 .filter(|host| {
                     host.contains('.') && !host.starts_with('[') && host.parse::<IpAddr>().is_err()
                 })
-                .context("ACME HTTP-01 requires exact DNS names")?;
-            domains.push(host.into_owned());
+                .context("ACME requires valid DNS names")?;
+            domains.push(if wildcard.is_some() {
+                format!("*.{host}")
+            } else {
+                host.into_owned()
+            });
         }
         domains.sort_unstable();
         ensure!(
@@ -179,6 +194,9 @@ impl AcmeConfig {
                 "ACME state directory must be private (mode 0700)"
             );
         }
+        let state_dir = tokio::fs::canonicalize(state_dir)
+            .await
+            .context("resolve ACME state directory")?;
         let ca_file = raw.ca_file.map(|file| dir.join(file));
         if let Some(file) = &ca_file {
             let bytes = read_file(file).await.context("read ACME CA file")?;
@@ -196,15 +214,33 @@ impl AcmeConfig {
             );
             eab.hmac_key_file = dir.join(eab.hmac_key_file);
             eab.key().await?;
+            eab.hmac_key_file = tokio::fs::canonicalize(eab.hmac_key_file)
+                .await
+                .context("resolve EAB secret file")?;
             Some(eab)
         } else {
             None
         };
+        let (challenge_listen, dns01) = if let Some(raw_dns) = raw.dns01 {
+            ensure!(
+                raw.challenge_listen.is_none(),
+                "challenge_listen is only for HTTP-01"
+            );
+            (None, Some(Dns01::compile(raw_dns, dir, &domains).await?))
+        } else {
+            (
+                Some(
+                    raw.challenge_listen
+                        .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 80))),
+                ),
+                None,
+            )
+        };
+        crate::dns01::validate_journal(dns01.as_ref(), &state_dir).await?;
         Ok(Self {
             domains,
-            challenge_listen: raw
-                .challenge_listen
-                .unwrap_or(SocketAddr::from(([0, 0, 0, 0], 80))),
+            challenge_listen,
+            dns01,
             state_dir,
             email: raw.email,
             directory,
@@ -215,7 +251,9 @@ impl AcmeConfig {
     }
 
     pub fn protected_paths(&self) -> impl Iterator<Item = &PathBuf> {
-        std::iter::once(&self.state_dir).chain(self.eab.iter().map(|eab| &eab.hmac_key_file))
+        std::iter::once(&self.state_dir)
+            .chain(self.eab.iter().map(|eab| &eab.hmac_key_file))
+            .chain(self.dns01.iter().map(|dns| &dns.token_file))
     }
 
     pub async fn restore(&self, managed: &Managed) -> Result<(std::fs::File, i64)> {
@@ -254,6 +292,11 @@ impl AcmeConfig {
     pub async fn run(self, managed: Arc<Managed>, lock: Arc<std::fs::File>, mut renew_at: i64) {
         let mut delay = Duration::from_secs(30);
         loop {
+            if !self.cleanup_dns(&lock).await {
+                sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(3600));
+                continue;
+            }
             let remaining = renew_at.saturating_sub(unix_now());
             if remaining > 0 {
                 sleep(Duration::from_secs((remaining as u64).min(3600))).await;
@@ -269,8 +312,24 @@ impl AcmeConfig {
                 Ok(Err(error)) => tracing::warn!(%error, "ACME issuance failed"),
                 Err(_) => tracing::warn!("ACME issuance deadline elapsed"),
             }
+            self.cleanup_dns(&lock).await;
             sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(3600));
+        }
+    }
+
+    async fn cleanup_dns(&self, lock: &Arc<std::fs::File>) -> bool {
+        let Some(dns) = &self.dns01 else { return true };
+        match timeout(Duration::from_secs(60), dns.cleanup(&self.state_dir, lock)).await {
+            Ok(Ok(())) => true,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "ACME DNS cleanup will retry");
+                false
+            }
+            Err(_) => {
+                tracing::warn!("ACME DNS cleanup deadline elapsed");
+                false
+            }
         }
     }
 
@@ -305,7 +364,8 @@ impl AcmeConfig {
                 external.as_ref(),
             )
             .await?;
-        self.persist(
+        persist_private(
+            &self.state_dir,
             ACCOUNT_FILE,
             lock,
             serde_json::to_vec(&StoredAccount {
@@ -320,6 +380,10 @@ impl AcmeConfig {
 
     async fn issue(&self, managed: &Managed, lock: &Arc<std::fs::File>) -> Result<i64> {
         let account = self.account(lock).await?;
+        let mut dns = match &self.dns01 {
+            Some(dns) => Some(dns.order(&self.state_dir, lock).await?),
+            None => None,
+        };
         let names: Vec<_> = self.domains.iter().cloned().map(Identifier::Dns).collect();
         let mut order = account.new_order(&NewOrder::new(&names)).await?;
         let challenges = OrderChallenges(managed);
@@ -332,25 +396,36 @@ impl AcmeConfig {
                 _ => anyhow::bail!("ACME authorization is not pending or valid"),
             }
             let mut challenge = auth
-                .challenge(ChallengeType::Http01)
-                .context("ACME server did not offer HTTP-01")?;
+                .challenge(if dns.is_some() {
+                    ChallengeType::Dns01
+                } else {
+                    ChallengeType::Http01
+                })
+                .context("ACME server did not offer the configured challenge type")?;
             let authorized = challenge.identifier().to_string();
             ensure!(
                 self.domains.contains(&authorized) && valid_token(&challenge.token),
                 "unexpected ACME challenge host or token"
             );
-            challenges
-                .0
-                .challenges
-                .write()
-                .expect("ACME challenge lock")
-                .insert(
-                    challenge.token.clone(),
-                    (
-                        authorized,
-                        Bytes::copy_from_slice(challenge.key_authorization().as_str().as_bytes()),
-                    ),
-                );
+            if let Some(dns) = dns.as_mut() {
+                dns.provision(&authorized, challenge.key_authorization().dns_value())
+                    .await?;
+            } else {
+                challenges
+                    .0
+                    .challenges
+                    .write()
+                    .expect("ACME challenge lock")
+                    .insert(
+                        challenge.token.clone(),
+                        (
+                            authorized,
+                            Bytes::copy_from_slice(
+                                challenge.key_authorization().as_str().as_bytes(),
+                            ),
+                        ),
+                    );
+            }
             challenge.set_ready().await?;
         }
         let policy = RetryPolicy::new().timeout(Duration::from_secs(120));
@@ -363,8 +438,7 @@ impl AcmeConfig {
         let chain = order.poll_certificate(&policy).await?;
         let bundle = format!("{}\n{}", chain.trim_end(), key);
         let (certificate, renew_at) = self.parse_identity(bundle.as_bytes())?;
-        self.persist(IDENTITY_FILE, lock, bundle.into_bytes())
-            .await?;
+        persist_private(&self.state_dir, IDENTITY_FILE, lock, bundle.into_bytes()).await?;
         managed.certificate.store(Some(Arc::new(certificate)));
         Ok(renew_at)
     }
@@ -377,9 +451,14 @@ impl AcmeConfig {
         key.keys_match()?;
         let mut verifier = ResolvesServerCertUsingSni::new();
         for domain in &self.domains {
-            verifier
-                .add(domain, key.clone())
-                .context("ACME certificate does not cover a configured domain")?;
+            if domain.starts_with("*.") {
+                tls::verify_wildcard(&key, domain)
+                    .context("ACME certificate does not cover a configured wildcard")?;
+            } else {
+                verifier
+                    .add(domain, key.clone())
+                    .context("ACME certificate does not cover a configured domain")?;
+            }
         }
         let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
             .map_err(|_| anyhow::anyhow!("invalid ACME leaf certificate"))?;
@@ -393,28 +472,28 @@ impl AcmeConfig {
         let lead = i64::from(self.renew_before_hours) * 3600;
         Ok((key, end - lead.min((end - start) / 3)))
     }
+}
 
-    async fn persist(
-        &self,
-        name: &'static str,
-        lock: &Arc<std::fs::File>,
-        bytes: Vec<u8>,
-    ) -> Result<()> {
-        let dir = self.state_dir.clone();
-        let lock = lock.clone();
-        tokio::task::spawn_blocking(move || {
-            let _lock = lock;
-            let mut file = tempfile::NamedTempFile::new_in(&dir)?;
-            file.write_all(&bytes)?;
-            file.as_file().sync_all()?;
-            file.persist(dir.join(name))?;
-            #[cfg(unix)]
-            std::fs::File::open(&dir)?.sync_all()?;
-            Ok::<_, anyhow::Error>(())
-        })
-        .await??;
-        Ok(())
-    }
+pub(crate) async fn persist_private(
+    state_dir: &Path,
+    name: &'static str,
+    lock: &Arc<std::fs::File>,
+    bytes: Vec<u8>,
+) -> Result<()> {
+    let dir = state_dir.to_owned();
+    let lock = lock.clone();
+    tokio::task::spawn_blocking(move || {
+        let _lock = lock;
+        let mut file = tempfile::NamedTempFile::new_in(&dir)?;
+        file.write_all(&bytes)?;
+        file.as_file().sync_all()?;
+        file.persist(dir.join(name))?;
+        #[cfg(unix)]
+        std::fs::File::open(&dir)?.sync_all()?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    Ok(())
 }
 
 impl ExternalBinding {
@@ -442,7 +521,7 @@ impl ExternalBinding {
     }
 }
 
-async fn read_saved(path: &Path) -> Result<Option<Vec<u8>>> {
+pub(crate) async fn read_saved(path: &Path) -> Result<Option<Vec<u8>>> {
     match tokio::fs::symlink_metadata(path).await {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
@@ -461,7 +540,7 @@ async fn read_saved(path: &Path) -> Result<Option<Vec<u8>>> {
     }
 }
 
-fn unix_now() -> i64 {
+pub(crate) fn unix_now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -11,6 +11,7 @@ arc-swap = "1"
 cap-std = "4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 base64 = "0.23"
+hickory-resolver = { version = "0.26.4", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
 instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
 hyper = { version = "1", features = ["client", "server", "http1", "http2"] }

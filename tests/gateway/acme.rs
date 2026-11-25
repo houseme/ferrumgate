@@ -1,11 +1,16 @@
 use std::{net::SocketAddr, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
+use http_body_util::BodyExt;
+use hyper::{Method, Response, body::Incoming};
 use rustls::{
     ClientConfig, RootCertStore,
     crypto::ring,
     pki_types::{CertificateDer, ServerName, pem::PemObject},
 };
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use tokio::sync::{Mutex, Notify};
 use tokio::{
     net::{TcpStream, UdpSocket},
     process::Command,
@@ -65,76 +70,16 @@ async fn pebble_requires_eab_then_reuses_the_account() -> Result<()> {
 }
 
 async fn pebble_lifecycle(eab: bool) -> Result<()> {
-    let files = tempfile::tempdir()?;
-    let api = free_tcp()?;
-    let management = free_tcp()?;
-    let challenge = free_tcp()?;
-    let dns = UdpSocket::bind("127.0.0.1:0").await?.local_addr()?;
-    let ca = Ca::new()?;
-    ca.write(files.path())?;
-    ca.identity("localhost")?.write(files.path(), "api")?;
-    let mut dns_server =
-        Command::new(std::env::var_os("FGATE_PEBBLE_DNS").unwrap_or("pebble-challtestsrv".into()))
-            .arg("-dnsserver")
-            .arg(dns.to_string())
-            .arg("-defaultIPv6=")
-            .arg("-http01=")
-            .arg("-https01=")
-            .arg("-tlsalpn01=")
-            .arg("-doh=")
-            .arg("-management")
-            .arg(free_tcp()?.to_string())
-            .kill_on_drop(true)
-            .spawn()?;
-    let pebble_file = files.path().join("pebble.json");
-    let eab_key_file = files.path().join("binding.key");
-    let eab_registration = if eab {
-        std::fs::write(&eab_key_file, format!("{EAB_KEY}\n"))?;
-        std::fs::set_permissions(&eab_key_file, std::fs::Permissions::from_mode(0o600))?;
-        format!(
-            ",\"externalAccountBindingRequired\": true, \"externalAccountMACKeys\": {{\"fixture\": \"{EAB_KEY}\"}}"
-        )
-    } else {
-        String::new()
-    };
-    std::fs::write(
-        &pebble_file,
-        format!(
-            r#"{{"pebble": {{
-        "listenAddress": "{api}",
-        "managementListenAddress": "{management}",
-        "certificate": "{}",
-        "privateKey": "{}",
-        "httpPort": {},
-        "tlsPort": 5001{eab_registration}
-    }}}}"#,
-            files.path().join("api.pem").display(),
-            files.path().join("api.key").display(),
-            challenge.port()
-        ),
-    )?;
-    let mut pebble = Command::new(std::env::var_os("FGATE_PEBBLE").unwrap_or("pebble".into()))
-        .arg("-config")
-        .arg(&pebble_file)
-        .arg("-dnsserver")
-        .arg(dns.to_string())
-        .env("PEBBLE_VA_NOSLEEP", "1")
-        .env("PEBBLE_WFE_NONCEREJECT", "0")
-        .env("PEBBLE_AUTHZREUSE", "0")
-        .env_remove("PEBBLE_VA_ALWAYS_VALID")
-        .kill_on_drop(true)
-        .spawn()?;
-    wait_listener(management).await?;
-    ensure!(
-        pebble.try_wait()?.is_none() && dns_server.try_wait()?.is_none(),
-        "Pebble processes must remain alive"
-    );
-
-    let api_ca = CertificateDer::from_pem_file(files.path().join("ca.pem"))?;
-    let trust = connect_tls(management, "localhost", api_ca).await?;
-    let (status, bytes) = get(&mut http_client(trust).await?, "localhost", "/roots/0").await?;
-    assert_eq!(status, 200);
-    let root = CertificateDer::from_pem_slice(&bytes)?;
+    let Pebble {
+        files,
+        api,
+        challenge,
+        root,
+        eab_key_file,
+        _pebble,
+        _dns_server,
+        ..
+    } = pebble(eab).await?;
 
     let state = files.path().join("state");
     std::fs::create_dir(&state)?;
@@ -207,6 +152,105 @@ challenge_listen = "{challenge}"
     assert_ne!(presented_certificate(renewed.addr, root).await?, initial);
     assert_eq!(std::fs::read(state.join("account.json"))?, account);
     Ok(())
+}
+
+struct Pebble {
+    files: tempfile::TempDir,
+    api: SocketAddr,
+    dns: SocketAddr,
+    dns_admin: SocketAddr,
+    challenge: SocketAddr,
+    root: CertificateDer<'static>,
+    eab_key_file: std::path::PathBuf,
+    _pebble: tokio::process::Child,
+    _dns_server: tokio::process::Child,
+}
+
+async fn pebble(eab: bool) -> Result<Pebble> {
+    let files = tempfile::tempdir()?;
+    let api = free_tcp()?;
+    let management = free_tcp()?;
+    let challenge = free_tcp()?;
+    let dns = UdpSocket::bind("127.0.0.1:0").await?.local_addr()?;
+    let ca = Ca::new()?;
+    ca.write(files.path())?;
+    ca.identity("localhost")?.write(files.path(), "api")?;
+    let dns_admin = free_tcp()?;
+    let mut dns_server =
+        Command::new(std::env::var_os("FGATE_PEBBLE_DNS").unwrap_or("pebble-challtestsrv".into()))
+            .arg("-dnsserver")
+            .arg(dns.to_string())
+            .arg("-defaultIPv6=")
+            .arg("-http01=")
+            .arg("-https01=")
+            .arg("-tlsalpn01=")
+            .arg("-doh=")
+            .arg("-management")
+            .arg(dns_admin.to_string())
+            .kill_on_drop(true)
+            .spawn()?;
+    let pebble_file = files.path().join("pebble.json");
+    let eab_key_file = files.path().join("binding.key");
+    let eab_registration = if eab {
+        std::fs::write(&eab_key_file, format!("{EAB_KEY}\n"))?;
+        std::fs::set_permissions(&eab_key_file, std::fs::Permissions::from_mode(0o600))?;
+        format!(
+            ",\"externalAccountBindingRequired\": true, \"externalAccountMACKeys\": {{\"fixture\": \"{EAB_KEY}\"}}"
+        )
+    } else {
+        String::new()
+    };
+    std::fs::write(
+        &pebble_file,
+        format!(
+            r#"{{"pebble": {{
+        "listenAddress": "{api}",
+        "managementListenAddress": "{management}",
+        "certificate": "{}",
+        "privateKey": "{}",
+        "httpPort": {},
+        "tlsPort": 5001{eab_registration}
+    }}}}"#,
+            files.path().join("api.pem").display(),
+            files.path().join("api.key").display(),
+            challenge.port()
+        ),
+    )?;
+    let mut pebble = Command::new(std::env::var_os("FGATE_PEBBLE").unwrap_or("pebble".into()))
+        .arg("-config")
+        .arg(&pebble_file)
+        .arg("-dnsserver")
+        .arg(dns.to_string())
+        .env("PEBBLE_VA_NOSLEEP", "1")
+        .env("PEBBLE_WFE_NONCEREJECT", "0")
+        .env("PEBBLE_AUTHZREUSE", "0")
+        .env_remove("PEBBLE_VA_ALWAYS_VALID")
+        .kill_on_drop(true)
+        .spawn()?;
+    wait_listener(management).await?;
+    ensure!(
+        pebble.try_wait()?.is_none() && dns_server.try_wait()?.is_none(),
+        "Pebble processes must remain alive"
+    );
+
+    let api_ca = CertificateDer::from_pem_file(files.path().join("ca.pem"))?;
+    let trust = connect_tls(management, "localhost", api_ca).await?;
+    let (status, bytes) = get(&mut http_client(trust).await?, "localhost", "/roots/0").await?;
+    assert_eq!(status, 200);
+    let root = CertificateDer::from_pem_slice(&bytes)?;
+
+    wait_listener(dns_admin).await?;
+    Ok(Pebble {
+        files,
+        api,
+        dns,
+        dns_admin,
+        challenge,
+        root,
+        eab_key_file,
+        _pebble: pebble,
+        _dns_server: dns_server,
+    })
 }
 
 fn free_tcp() -> Result<SocketAddr> {
@@ -305,5 +349,261 @@ hmac_key_file = "{}"
     assert!(Gateway::check(dir.path(), &settings).await?);
     std::fs::write(&secret, "short")?;
     assert!(!Gateway::check(dir.path(), &settings).await?);
+    Ok(())
+}
+
+const CF_ZONE: &str = "11111111111111111111111111111111";
+const ACTUAL_RECORD: &str = "22222222222222222222222222222222";
+const ORPHAN_RECORD: &str = "33333333333333333333333333333333";
+const FOREIGN_RECORD: &str = "44444444444444444444444444444444";
+const DNS_HOST: &str = "_acme-challenge.example.test";
+const ORPHAN_TAG: &str = "ferrumgate-AAAAAAAAAAAAAAAAAAAAAA";
+static TOKEN: &str = "cloudflare-fixture";
+
+struct CloudflareFixture {
+    records: Mutex<Vec<Value>>,
+    refuse_delete: AtomicBool,
+    retired_new_record: Notify,
+    dns_admin: SocketAddr,
+}
+
+impl CloudflareFixture {
+    async fn handle(&self, request: hyper::Request<Incoming>) -> Result<Response<TestBody>> {
+        let (head, body) = request.into_parts();
+        assert_eq!(head.headers["authorization"], format!("Bearer {TOKEN}"));
+        let expected = format!("/client/v4/zones/{CF_ZONE}/dns_records");
+        let suffix = head
+            .uri
+            .path()
+            .strip_prefix(&expected)
+            .expect("provider endpoint");
+        match (head.method, suffix) {
+            (Method::POST, "") => {
+                let bytes = body.collect().await?.to_bytes();
+                let mut record: Value = serde_json::from_slice(&bytes)?;
+                assert_eq!(record["type"], "TXT");
+                assert_eq!(record["name"], DNS_HOST);
+                assert!(
+                    record["comment"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("ferrumgate-")
+                );
+                dns_admin(
+                    self.dns_admin,
+                    "/set-txt",
+                    json!({
+                        "host": format!("{DNS_HOST}."),
+                        "value": record["content"],
+                    }),
+                )
+                .await?;
+                record["id"] = Value::String(ACTUAL_RECORD.into());
+                self.records.lock().await.push(record.clone());
+                Ok(cf_response(200, record))
+            }
+            (Method::GET, "") => {
+                let query = head.uri.query().context("record list query")?;
+                assert!(query.contains(&format!("name.exact={DNS_HOST}")));
+                assert!(query.contains(&format!("comment.exact={ORPHAN_TAG}")));
+                Ok(cf_response(
+                    200,
+                    Value::Array(self.records.lock().await.clone()),
+                ))
+            }
+            (Method::GET, suffix) => {
+                let id = suffix.strip_prefix('/').context("read record ID")?;
+                let records = self.records.lock().await;
+                let record = records.iter().find(|record| record["id"] == id);
+                Ok(match record {
+                    Some(record) => cf_response(200, record.clone()),
+                    None => cf_response(404, Value::Null),
+                })
+            }
+            (Method::DELETE, suffix) => {
+                let id = suffix.strip_prefix('/').context("delete record ID")?;
+                assert_ne!(id, FOREIGN_RECORD, "only owned records may be removed");
+                if id == ACTUAL_RECORD && self.refuse_delete.swap(false, Relaxed) {
+                    return Ok(cf_response(502, Value::Null));
+                }
+                dns_admin(
+                    self.dns_admin,
+                    "/clear-txt",
+                    json!({"host": format!("{DNS_HOST}.")}),
+                )
+                .await?;
+                self.records
+                    .lock()
+                    .await
+                    .retain(|record| record["id"] != id);
+                if id == ACTUAL_RECORD {
+                    self.retired_new_record.notify_one();
+                }
+                Ok(cf_response(200, json!({"id": id})))
+            }
+            _ => Ok(cf_response(400, Value::Null)),
+        }
+    }
+}
+
+fn cf_response(status: u16, data: Value) -> Response<TestBody> {
+    Response::builder()
+        .status(status)
+        .body(full(
+            json!({"success": status == 200, "result": data}).to_string(),
+        ))
+        .unwrap()
+}
+
+async fn dns_admin(address: SocketAddr, path: &str, payload: Value) -> Result<()> {
+    let mut client = http_client(connect(address).await?).await?;
+    let result = send(
+        &mut client,
+        request(Method::POST, path, "localhost", full(payload.to_string())),
+    )
+    .await?;
+    ensure!(
+        result.status().is_success(),
+        "Pebble challenge service request failed"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_dns01_issues_a_wildcard_and_recovers_failed_provider_cleanup() -> Result<()> {
+    let pebble = pebble(false).await?;
+    let ca = Ca::new()?;
+    let acceptor = ca.identity("localhost")?.acceptor(b"http/1.1")?;
+    let cf_ca = pebble.files.path().join("provider");
+    std::fs::create_dir(&cf_ca)?;
+    ca.write(&cf_ca)?;
+    let foreign = json!({
+        "id": FOREIGN_RECORD, "type": "TXT", "name": DNS_HOST,
+        "content": "preserved", "comment": "external",
+    });
+    let orphan = json!({
+        "id": ORPHAN_RECORD, "type": "TXT", "name": DNS_HOST,
+        "content": "previous-proof", "comment": ORPHAN_TAG,
+    });
+    let provider = Arc::new(CloudflareFixture {
+        records: Mutex::new(vec![foreign, orphan]),
+        refuse_delete: AtomicBool::new(true),
+        retired_new_record: Notify::new(),
+        dns_admin: pebble.dns_admin,
+    });
+    let cloudflare = Origin::spawn({
+        let provider = provider.clone();
+        move |socket| {
+            let (provider, acceptor) = (provider.clone(), acceptor.clone());
+            async move {
+                let socket = acceptor.accept(socket).await?;
+                serve_http(socket, move |request| {
+                    let provider = provider.clone();
+                    async move {
+                        provider
+                            .handle(request)
+                            .await
+                            .expect("Cloudflare fixture request")
+                    }
+                })
+                .await
+            }
+        }
+    })
+    .await?;
+    let api_base = format!("https://localhost:{}/client/v4", cloudflare.addr.port());
+
+    let state = pebble.files.path().join("state");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let journal = state.join("dns-cleanup.json");
+    std::fs::write(
+        &journal,
+        json!({
+            "zone_id": CF_ZONE, "api_base": api_base,
+            "records": [{"name": DNS_HOST, "content": "previous-proof", "comment": ORPHAN_TAG,
+                "record_id": null, "created_at": 1}],
+        })
+        .to_string(),
+    )?;
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o600))?;
+
+    let token_file = cf_ca.join("token");
+    std::fs::write(&token_file, TOKEN)?;
+    std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))?;
+    let origin = Origin::http("secured").await?;
+    let settings = config(
+        &route("acme.example.test", origin.addr, "/"),
+        "tls = true",
+        &format!(
+            r#"
+[acme]
+domains = ["*.example.test"]
+email = "ops@example.test"
+accept_terms = true
+state_dir = "{}"
+directory = "https://localhost:{}/dir"
+ca_file = "{}"
+
+[acme.dns01]
+zone = "example.test"
+zone_id = "{CF_ZONE}"
+token_file = "{}"
+api_base = "{api_base}"
+api_ca_file = "{}"
+resolver = "{}"
+propagation_timeout_secs = 10
+"#,
+            state.display(),
+            pebble.api.port(),
+            pebble.files.path().join("ca.pem").display(),
+            token_file.display(),
+            cf_ca.join("ca.pem").display(),
+            pebble.dns
+        ),
+    );
+    let mut gateway = Gateway::spawn(&settings).await?;
+    gateway.wait_log("ACME certificate installed").await?;
+    let issued = presented_certificate(gateway.addr, pebble.root.clone()).await?;
+    gateway.wait_log("ACME DNS cleanup will retry").await?;
+    assert!(
+        !provider
+            .records
+            .lock()
+            .await
+            .iter()
+            .any(|record| record["id"] == ORPHAN_RECORD)
+    );
+    assert!(std::fs::read_to_string(&journal)?.contains(ACTUAL_RECORD));
+    gateway.signal("-TERM").await?;
+    gateway.wait_exit().await?;
+
+    let mut restored = Gateway::spawn(&settings).await?;
+    assert_eq!(
+        presented_certificate(restored.addr, pebble.root.clone()).await?,
+        issued
+    );
+    timeout(DEADLINE, provider.retired_new_record.notified()).await?;
+    timeout(DEADLINE, async {
+        loop {
+            let current: Value = serde_json::from_slice(&std::fs::read(&journal)?)?;
+            if current["records"] == json!([]) {
+                break Ok::<_, anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+    restored.signal("-TERM").await?;
+    restored.wait_exit().await?;
+    let files = std::fs::read(&journal)?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&files)?["records"],
+        json!([])
+    );
+    let records = provider.records.lock().await;
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["id"], FOREIGN_RECORD);
     Ok(())
 }

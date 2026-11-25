@@ -5,6 +5,7 @@
 mod acme;
 mod backend;
 mod config;
+mod dns01;
 mod domains;
 mod health;
 mod proxy;

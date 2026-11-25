@@ -50,11 +50,9 @@ impl std::fmt::Debug for Resolver {
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let managed = self.managed.as_ref().filter(|(domains, _)| {
-            hello.server_name().is_some_and(|host| {
-                domains
-                    .binary_search_by(|domain| domain.as_str().cmp(host))
-                    .is_ok()
-            })
+            hello
+                .server_name()
+                .is_some_and(|host| managed_covers(domains, host))
         });
         let wildcard = hello
             .server_name()
@@ -118,14 +116,7 @@ pub(crate) async fn load<'a>(
                 key.keys_match()
                     .context("verify certificate and private key match")?;
                 if wildcard.is_some() {
-                    let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
-                        .map_err(|_| anyhow::anyhow!("invalid leaf certificate"))?;
-                    let san = leaf
-                        .subject_alternative_name()
-                        .map_err(|_| anyhow::anyhow!("invalid certificate SAN"))?
-                        .context("wildcard certificate needs SAN")?;
-                    ensure!(san.value.general_names.iter().any(|entry| matches!(entry, GeneralName::DNSName(value) if value.eq_ignore_ascii_case(&name))),
-                        "certificate SAN does not include the wildcard name");
+                    verify_wildcard(&key, &name)?;
                     resolver.wildcard.insert(domain.into_owned(), Arc::new(key));
                 } else {
                     resolver
@@ -142,6 +133,10 @@ pub(crate) async fn load<'a>(
             route_hosts.into_iter().all(|host| {
                 host.contains('*')
                     || names.contains(host)
+                    || resolver
+                        .managed
+                        .as_ref()
+                        .is_some_and(|(names, _)| managed_covers(names, host))
                     || host
                         .split_once('.')
                         .is_some_and(|(_, suffix)| resolver.wildcard.contains_key(suffix))
@@ -173,6 +168,33 @@ pub(crate) async fn load<'a>(
         .with_no_client_auth();
 
     Ok(Tls { server, client })
+}
+
+fn managed_covers(domains: &[String], host: &str) -> bool {
+    domains
+        .binary_search_by(|name| name.as_str().cmp(host))
+        .is_ok()
+        || host.split_once('.').is_some_and(|(_, suffix)| {
+            domains
+                .iter()
+                .any(|name| name.strip_prefix("*.") == Some(suffix))
+        })
+}
+
+pub(crate) fn verify_wildcard(key: &CertifiedKey, name: &str) -> Result<()> {
+    let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
+        .map_err(|_| anyhow::anyhow!("invalid leaf certificate"))?;
+    let san = leaf
+        .subject_alternative_name()
+        .map_err(|_| anyhow::anyhow!("invalid certificate SAN"))?
+        .context("wildcard certificate needs SAN")?;
+    ensure!(
+        san.value.general_names.iter().any(
+            |entry| matches!(entry, GeneralName::DNSName(value) if value.eq_ignore_ascii_case(name))
+        ),
+        "certificate SAN does not include the wildcard name"
+    );
+    Ok(())
 }
 
 async fn read_certificates(path: &Path) -> Result<Vec<CertificateDer<'static>>> {

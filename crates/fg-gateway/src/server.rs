@@ -47,9 +47,14 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     let acme_config = config.acme.take();
     let acme_boot = if let Some(acme) = &acme_config {
         let (lock, renew_at) = acme.restore(&managed).await?;
-        let listener = TcpListener::bind(acme.challenge_listen)
-            .await
-            .context("bind ACME HTTP-01 listener")?;
+        let listener = match acme.challenge_listen {
+            Some(listen) => Some(
+                TcpListener::bind(listen)
+                    .await
+                    .context("bind ACME HTTP-01 listener")?,
+            ),
+            None => None,
+        };
         Some((lock, renew_at, listener))
     } else {
         None
@@ -148,9 +153,11 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     }
     let mut acme_tasks = JoinSet::new();
     let _acme_lock = if let Some((lock, renew_at, listener)) = acme_boot {
-        tracing::info!(listen = %listener.local_addr()?, "ACME HTTP-01 listener ready");
+        if let Some(listener) = listener {
+            tracing::info!(listen = %listener.local_addr()?, "ACME HTTP-01 listener ready");
+            acme_tasks.spawn(acme::serve_challenges(listener, managed.clone()));
+        }
         let acme = acme_config.clone().expect("ACME startup config");
-        acme_tasks.spawn(acme::serve_challenges(listener, managed.clone()));
         let lock = Arc::new(lock);
         acme_tasks.spawn(acme.run(managed.clone(), lock.clone(), renew_at));
         Some(lock)

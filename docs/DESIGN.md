@@ -80,6 +80,12 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 有效证书在重启时复用。签发和续期检查密钥配对、SAN 和有效时间。归档账户在 CA 目录及邮箱一致时重用。首次注册可通过私有文件读取 EAB 密钥，密钥与归档账户分开保存。终止时取消监听器与后台任务。证书和账户状态可跨重启恢复，单个未完成订单的恢复留待后续。 [Gately 证书模块](https://gately.cn/en/docs/modules/ssl)
 
+### ACME DNS-01
+
+启用 `[acme.dns01]` 后使用显式 Cloudflare 托管区、私有 API 令牌和指定 DNS 递归解析器。DNS-01 支持精确及通配 DNS 名，验权通过 TXT，只启动业务 TLS 监听。通配证书仅覆盖一个 SNI 标签，精确证书优先。
+
+每条 TXT 在写入 Cloudflare 之前记录名称、值和随机归属标签，获得记录 ID 后再持久化一次。提交挑战前从 DNS 读取实际 TXT。清理前复核名称、TXT、归属标签与 ID。创建结果不确定时按归属标签查询。清理错误保留日志状态，在进程或证书恢复后重试。 [Gately DNS-01](https://gately.cn/en/docs/modules/ssl#dns-01-validation) · [Cloudflare Create DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/) · [Cloudflare Delete DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/delete/)
+
 ## 5. 阶段 C1 WebSocket
 
 命中精确 Host 和路径规则后，`websocket = true` 允许 HTTP/1.1 GET 升级。网关校验 `Connection`、`Upgrade`、版本 13、16 字节握手 nonce 和请求体边界。每一跳重建 Upgrade 头，保留 `Origin` 供上游执行来源策略，并按配置验证 HTTPS 上游。上游返回 101 时，网关再核对升级类型、握手证明和已选子协议。握手请求无效返回 400，上游 101 不符合契约返回 502，上游普通拒绝响应按 HTTP 路径透传。该阶段停用 WebSocket 扩展协商。SHA-1 仅用于 RFC 6455 规定的握手证明。[RFC 6455 §4](https://www.rfc-editor.org/rfc/rfc6455#section-4) · [Hyper Upgrade](https://docs.rs/hyper/latest/hyper/upgrade/index.html)
@@ -119,7 +125,7 @@ HTTP 模式发送 GET，按小于 400 的响应状态判断结果。TCP 模式�
 | 阶段 | 决策 | 接入条件 |
 |---|---|---|
 | C HTTP 扩展 | WebSocket、HTTP/2、原生 gRPC、加权后端池和被动摘除已接入。重定向、固定文本与受根目录约束的静态站点已接入。 | 按协议做双端 E2E；使用独立测试后端验证 HEAD、Range、SSE、升级以及大文件 |
-| D ACME | HTTP-01 已接入账户和身份持久化、到期前续期及原子发布。DNS-01、ARI 和未完成订单恢复继续按独立切片验证。 | 本地 CA E2E 覆盖签发、续期、挑战清理、重启、服务端重试与旧证书继续工作 |
+| D ACME | HTTP-01 已接入账户和身份持久化、到期前续期及原子发布。Cloudflare DNS-01 已接入 TXT 传播和归属清理。其他提供商、ARI 和未完成订单恢复继续按独立切片推进。 | 本地 CA E2E 覆盖签发、续期、挑战清理、重启、服务端重试与旧证书继续工作 |
 | E 管理面 | 单独监听回环地址或本地 socket。随机一次性初始化凭据，校验权限，写 API 需要预期配置版本，浏览器写请求校验来源和 CSRF。 | 匿名、过期、越权访问有负向验证；业务站点无法路由到管理入口 |
 | F 可选安全策略 | 先确定可信客户端地址，再评估维护中的 ACL、认证、WAF 规则。WAF 以检测模式试运行，延迟、并发与可观察的失败模式按站点配置。主机规则由最小权限组件执行。 | 凭据与身份头处理、超载、引擎故障、策略优先级和规则回滚均有集成证据 |
 

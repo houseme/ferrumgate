@@ -146,6 +146,23 @@ hmac_key_file = "secrets/eab.key"
 cargo test --locked -p ferrumgate --test gateway pebble_ -- --ignored --test-threads=1
 ```
 
+### ACME DNS-01 Cloudflare
+
+使用 Cloudflare 该托管区的 DNS 编辑 API Token，保存到运行账户可读的私有文件，例如 Unix 0600。为 `acme.domains` 配置精确域名或 `*.example.com`，提供以下表。 `zone_id` 是 Cloudflare 托管区的 ID，`resolver` 指定能读取该公开托管区的 DNS 解析器。
+
+```toml
+[acme.dns01]
+zone = "example.com"
+zone_id = "0123456789abcdef0123456789abcdef"
+token_file = "secrets/cloudflare.token"
+resolver = "1.1.1.1:53"
+propagation_timeout_secs = 120
+```
+
+删除 HTTP-01 专用的 `challenge_listen` 设置。签发验证通过 TXT 记录进行。当前每个 ACME 配置使用一个显式托管区。生产请求默认发送至 Cloudflare HTTPS API。本地测试可通过 `api_base` 和 `api_ca_file` 使用自有 HTTPS 测试端点。
+
+等待日志 `ACME certificate installed` 后核对预期域名的 HTTPS 证书。在发生 `ACME DNS cleanup will retry` 时，保留原托管区、令牌和 `dns-cleanup.json`，让网关重试清理。授权和记录审计仍可在提供商端确认。
+
 ## 4. 启用 WebSocket
 
 为上游 WebSocket 接口添加更长的路径匹配。保留第 1 节的根路由以代理普通请求。两个路由都可使用 HTTP 或 HTTPS 上游。
@@ -356,7 +373,7 @@ cargo test --locked -p ferrumgate --test gateway udp::
 ### D 证书签发与续期
 
 1. HTTP-01 已接入账户、订单、授权、签发、重启恢复和续期。证书和密钥以一个身份文件原子写入。未完成订单恢复与调度状态持久化作为后续切片。
-2. HTTP-01 challenge 按精确 Host 和 token 匹配，并随订单结束、错误和取消清理。下一切片实现 DNS-01，清理仅针对该订单建立的记录，传播检查与 provider 限流分开。
+2. HTTP-01 challenge 按精确 Host 和 token 匹配，并随订单结束、错误和取消清理。Cloudflare DNS-01 已实现传播检查和可恢复清理。其他提供商继续独立交付。
 3. 当前按证书有效期调度续期和退避，已支持 EAB 注册，后续接入 ARI。未获得新证书时持续使用原证书，记录失败阶段和证书剩余寿命。
 4. 在本地通过真实握手确认新旧证书切换，再独立运行公开 staging。记录域名、挑战类型、签发链、真实客户端验证和撤销/恢复演练。生产密钥和真实域名不进入测试 fixtures。
 
@@ -432,3 +449,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 
 - 本轮 ACME 验证使用本机 Pebble 实际完成两次 HTTP-01 授权、签发及 HTTPS 握手。重启复用了账户与未过续期窗口的证书，临近到期的测试证书自动替换。公开 staging CA 与 DNS-01 分开验收。
 - EAB 已通过要求绑定的本机 Pebble。首次注册并签发后，测试移除了 EAB 文件和配置，重启仍复用账户并成功续期。
+- Cloudflare DNS-01 通过本机 Pebble 与 HTTPS API 模拟的端到端测试，覆盖通配证书签发、实际 TXT 查询、历史未确认记录清理、删除失败后的重启恢复，以及保留外部 TXT。公开 CA 和真实 Cloudflare 托管区分开验收。
