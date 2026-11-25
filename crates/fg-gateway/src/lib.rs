@@ -10,6 +10,7 @@ mod proxy;
 mod server;
 mod site;
 mod static_files;
+mod tcp_forward;
 mod tls;
 mod websocket;
 

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
@@ -16,6 +16,7 @@ use crate::{
     domains,
     health::{HealthCheck, RawHealthCheck},
     site::{RawResponse, SiteResponse},
+    tcp_forward::{RawForward, TcpForward},
     tls::{self, CertificateFiles, Tls},
 };
 
@@ -29,7 +30,10 @@ struct RawConfig {
     schema_version: u32,
     #[serde(default)]
     server: Settings,
+    #[serde(default)]
     routes: Vec<RawRoute>,
+    #[serde(default)]
+    tcp_forward: Vec<RawForward>,
     #[serde(default)]
     certificates: Vec<CertificateFiles>,
     upstream_ca_file: Option<PathBuf>,
@@ -39,6 +43,7 @@ struct RawConfig {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub listen: SocketAddr,
+    pub http_enabled: bool,
     pub tls: bool,
     pub tls_handshake_timeout_ms: u64,
     pub max_connections: usize,
@@ -53,6 +58,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            http_enabled: true,
             tls: false,
             tls_handshake_timeout_ms: 5_000,
             max_connections: 1024,
@@ -85,6 +91,7 @@ pub(crate) struct Config {
     pub settings: Settings,
     pub routes: Routes,
     pub tls: Tls,
+    pub tcp_forward: Vec<TcpForward>,
 }
 
 pub(crate) struct Routes {
@@ -191,10 +198,42 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     ] {
         ensure!((1..=max).contains(&value), "{field} must be in 1..={max}");
     }
+    if settings.http_enabled {
+        ensure!(
+            (1..=MAX_ROUTES).contains(&raw.routes.len()),
+            "routes must contain 1..={MAX_ROUTES} entries"
+        );
+    } else {
+        ensure!(
+            raw.routes.is_empty()
+                && !settings.tls
+                && raw.certificates.is_empty()
+                && raw.upstream_ca_file.is_none(),
+            "HTTP and TLS route configuration requires server.http_enabled"
+        );
+        ensure!(
+            !raw.tcp_forward.is_empty(),
+            "enable HTTP or configure a TCP forward"
+        );
+    }
     ensure!(
-        (1..=MAX_ROUTES).contains(&raw.routes.len()),
-        "routes must contain 1..={MAX_ROUTES} entries"
+        raw.tcp_forward.len() <= 64,
+        "tcp_forward supports up to 64 listeners"
     );
+    let mut listens = HashSet::new();
+    if settings.http_enabled && settings.listen.port() != 0 {
+        listens.insert(settings.listen);
+    }
+    let mut tcp_forward = Vec::with_capacity(raw.tcp_forward.len());
+    for (index, raw) in raw.tcp_forward.into_iter().enumerate() {
+        let rule =
+            TcpForward::compile(raw).with_context(|| format!("invalid tcp_forward[{index}]"))?;
+        ensure!(
+            rule.listen.port() == 0 || listens.insert(rule.listen),
+            "duplicate TCP listener at tcp_forward[{index}]"
+        );
+        tcp_forward.push(rule);
+    }
 
     let protected: Vec<_> = raw
         .certificates
@@ -276,6 +315,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     .await?;
     Ok(Config {
         tls,
+        tcp_forward,
         settings,
         routes: Routes { by_host, wildcards },
     })

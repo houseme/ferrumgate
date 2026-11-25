@@ -237,6 +237,30 @@ key_file = "tls/wildcard.key"
 
 示例要求 TLS 监听已开启。通配路由可以匹配多层子域；通配证书覆盖一个子域标签，更深的域名仍需匹配的证书。证书 SAN 必须包含配置的通配名称。精确证书优先。 [Gately 域名匹配](https://gately.cn/en/docs/modules/web#structure-listeners-sites-and-the-default-site)
 
+### TCP 端口转发
+
+配置独立 TCP 规则。目标使用带端口的 IPv4 或 IPv6 地址，按列表顺序拨号。
+
+```toml
+schema_version = 1
+
+[server]
+http_enabled = false
+
+[[tcp_forward]]
+listen = "127.0.0.1:9443"
+targets = ["127.0.0.1:9444", "127.0.0.1:9445"]
+max_connections = 128
+connect_timeout_ms = 2000
+connection_lifetime_ms = 300000
+```
+
+使用 `fgate check` 校验后启动。移除 `http_enabled = false` 并配置 Web 路由，即可并行提供两个监听器。已连接的数据流在终止时可在当前排空预算内完成。修改监听、目标或规则预算需重启。
+
+```bash
+cargo test --locked -p ferrumgate --test gateway tcp::
+```
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
@@ -333,3 +357,5 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - C2 在 macOS arm64 通过 3 项独立 HTTP/2 端到端用例，覆盖两条并行 gRPC 流、双向数据、取消传播、请求与响应 trailers、TLS 上游、WebSocket 回落及 HTTP/1.1 普通后端。
 - C3 在 macOS arm64 通过 workspace Clippy、6 项 Rust 单测、release 构建与 17 项 Rust 端到端测试。新增场景验证 2:1 权重、三次连接失败后的备用切换、冷却期边界及配置拒绝。
 - 已接入主动 HTTP/TCP 健康检查。Web 服务已接入重定向、固定文本和静态文件。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
+
+- 本轮独立验证覆盖 HTTP/TCP 探测、固定文本、重定向、目录受限静态文件、通配域名/SNI 和 TCP 字节转发。

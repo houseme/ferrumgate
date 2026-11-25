@@ -41,7 +41,8 @@ impl Generation {
 
 /// Run the configured data plane until a process shutdown signal arrives.
 pub async fn serve(path: PathBuf) -> Result<()> {
-    let config = config::load(&path).await?;
+    let mut config = config::load(&path).await?;
+    let tcp_rules = std::mem::take(&mut config.tcp_forward);
     let settings = config.settings.clone();
     let state = Arc::new(ArcSwap::from_pointee(Generation::new(config)));
     let (drain, _) = watch::channel(false);
@@ -72,7 +73,10 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         while hangup.recv().await.is_some() {
             let candidate = async {
                 let next = config::load(&path).await?;
-                anyhow::ensure!(next.settings == settings, "server settings require restart");
+                anyhow::ensure!(
+                    next.settings == settings && next.tcp_forward == tcp_rules,
+                    "server and TCP listen settings require restart"
+                );
                 let next = Arc::new(Generation::new(next));
                 state.store(next.clone());
                 publications.send_replace(next);
@@ -87,9 +91,31 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     };
     tokio::pin!(reload);
 
-    let listener = TcpListener::bind(settings.listen)
-        .await
-        .context("bind business listener")?;
+    let listener = if settings.http_enabled {
+        Some(
+            TcpListener::bind(settings.listen)
+                .await
+                .context("bind business listener")?,
+        )
+    } else {
+        None
+    };
+    let mut tcp_listeners = Vec::with_capacity(tcp_rules.len());
+    for (index, rule) in tcp_rules.iter().enumerate() {
+        let listener = TcpListener::bind(rule.listen)
+            .await
+            .with_context(|| format!("bind tcp_forward[{index}] listener"))?;
+        tcp_listeners.push((rule.clone(), listener));
+    }
+    let ready_addr = listener
+        .as_ref()
+        .unwrap_or_else(|| &tcp_listeners[0].1)
+        .local_addr()?;
+    let mut forwarding = JoinSet::new();
+    for (rule, listener) in tcp_listeners {
+        tracing::info!(listen = %listener.local_addr()?, "TCP forward ready");
+        forwarding.spawn(rule.serve(listener, drain.subscribe()));
+    }
     let mut health = JoinSet::new();
     health.spawn(async move {
         loop {
@@ -104,7 +130,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             }
         }
     });
-    tracing::info!(listen = %listener.local_addr()?, tls = settings.tls, "gateway ready");
+    tracing::info!(listen = %ready_addr, http = settings.http_enabled, tls = settings.tls, "gateway ready");
     let mut http = http1::Builder::new();
     http.timer(TokioTimer::new())
         .max_buf_size(32 * 1024)
@@ -129,7 +155,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                     tracing::warn!(%error, "connection task failed");
                 }
             }
-            accepted = listener.accept(), if connections.len() < settings.max_connections => {
+            accepted = async { listener.as_ref().expect("enabled HTTP listener").accept().await }, if listener.is_some() && connections.len() < settings.max_connections => {
                 let (stream, peer) = match accepted {
                     Ok(accepted) => accepted,
                     Err(error) => {
@@ -180,13 +206,16 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     health.shutdown().await;
     tracing::info!("gateway draining connections");
     if timeout(milliseconds(settings.shutdown_timeout_ms), async {
-        while connections.join_next().await.is_some() {}
+        tokio::join!(
+            async { while connections.join_next().await.is_some() {} },
+            async { while forwarding.join_next().await.is_some() {} },
+        );
     })
     .await
     .is_err()
     {
         tracing::warn!("drain deadline expired");
-        connections.shutdown().await;
+        tokio::join!(connections.shutdown(), forwarding.shutdown());
     }
     shutdown_result.context("wait for shutdown signal")
 }

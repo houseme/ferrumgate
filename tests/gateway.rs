@@ -10,6 +10,8 @@ mod http;
 mod http2;
 #[path = "gateway/site.rs"]
 mod site;
+#[path = "gateway/tcp.rs"]
+mod tcp;
 #[path = "gateway/tls.rs"]
 mod tls;
 #[path = "gateway/websocket.rs"]
