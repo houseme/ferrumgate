@@ -38,7 +38,7 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 
 域名路由支持精确域名、单星通配规则和 `*` 兜底。TLS 优先选精确 SNI 证书，同时支持明确配置的 `*.suffix` 证书。[域名配置](docs/EXECUTION.md#通配域名与证书)
 
-TCP 端口转发通过 `[[tcp_forward]]` 配置，可独立运行或与 Web 监听并存，支持多个目标、连接失败时的顺序切换及双向半关闭。[端口转发配置](docs/EXECUTION.md#tcp-端口转发) · [Gately 功能对齐状态](ARCHITECTURE_EXECUTION.md#当前对齐状态)
+TCP 端口转发通过 `[[tcp_forward]]` 配置，可独立运行或与 Web 监听并存，支持多个目标、连接失败时的顺序切换、首次数据超时及双向半关闭。[端口转发配置](docs/EXECUTION.md#tcp-端口转发) · [Gately 功能对齐状态](ARCHITECTURE_EXECUTION.md#当前对齐状态)
 
 UDP 可用 `[[udp_forward]]` 按客户端维护独立会话，并配置会话上限和空闲回收。[UDP 配置](docs/EXECUTION.md#udp-端口转发)
 

@@ -370,10 +370,13 @@ listen = "127.0.0.1:9443"
 targets = ["127.0.0.1:9444", "127.0.0.1:9445"]
 max_connections = 128
 connect_timeout_ms = 2000
+first_data_timeout_ms = 60000
 connection_lifetime_ms = 300000
 ```
 
 使用 `fgate check` 校验后启动。移除 `http_enabled = false` 并配置 Web 路由，即可并行提供两个监听器。已连接的数据流在终止时可在当前排空预算内完成。修改监听、目标或规则预算需重启。
+
+`first_data_timeout_ms` 允许 1 到 3600000 毫秒。后端连接成功并写完可选 PROXY 头后开始计时，两端都未发送应用数据的连接到期释放接入名额。任一端开始传输后继续受总连接寿命约束，空半关闭也可传递给另一端。 [Gately 首次数据超时](https://gately.cn/en/docs/modules/portforward#connection-limits-and-empty-connections)
 
 ```bash
 cargo test --locked -p ferrumgate --test gateway tcp::

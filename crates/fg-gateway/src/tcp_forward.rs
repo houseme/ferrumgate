@@ -28,6 +28,7 @@ pub(crate) struct RawForward {
     targets: Vec<SocketAddr>,
     max_connections: usize,
     connect_timeout_ms: u64,
+    first_data_timeout_ms: u64,
     connection_lifetime_ms: u64,
     proxy_protocol: Option<ProxyProtocol>,
     source: RawSourcePolicy,
@@ -49,6 +50,7 @@ impl Default for RawForward {
             targets: Vec::new(),
             max_connections: 128,
             connect_timeout_ms: 2_000,
+            first_data_timeout_ms: 60_000,
             connection_lifetime_ms: 300_000,
             proxy_protocol: None,
             source: RawSourcePolicy::default(),
@@ -64,6 +66,7 @@ pub(crate) struct TcpForward {
     targets: Vec<SocketAddr>,
     max_connections: usize,
     connect_timeout: Duration,
+    first_data_timeout: Duration,
     connection_lifetime: Duration,
     proxy_protocol: Option<ProxyProtocol>,
     pub source: SourcePolicy,
@@ -103,6 +106,10 @@ impl TcpForward {
             "tcp_forward.connect_timeout_ms must be in 1..=300000"
         );
         ensure!(
+            (1..=3_600_000).contains(&raw.first_data_timeout_ms),
+            "tcp_forward.first_data_timeout_ms must be in 1..=3600000"
+        );
+        ensure!(
             (1..=86_400_000).contains(&raw.connection_lifetime_ms),
             "tcp_forward.connection_lifetime_ms must be in 1..=86400000"
         );
@@ -126,6 +133,7 @@ impl TcpForward {
             targets: raw.targets,
             max_connections: raw.max_connections,
             connect_timeout: Duration::from_millis(raw.connect_timeout_ms),
+            first_data_timeout: Duration::from_millis(raw.first_data_timeout_ms),
             connection_lifetime: Duration::from_millis(raw.connection_lifetime_ms),
             proxy_protocol: raw.proxy_protocol,
             source: SourcePolicy::compile(raw.source)?,
@@ -139,6 +147,7 @@ impl TcpForward {
             && self.targets == other.targets
             && self.max_connections == other.max_connections
             && self.connect_timeout == other.connect_timeout
+            && self.first_data_timeout == other.first_data_timeout
             && self.connection_lifetime == other.connection_lifetime
             && self.proxy_protocol == other.proxy_protocol
             && self.source_limit == other.source_limit
@@ -191,7 +200,7 @@ impl TcpForward {
                     let targets = targets.clone();
                     connections.spawn(async move {
                         let _lease = lease;
-                        let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.proxy_protocol)).await;
+                        let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.first_data_timeout, self.proxy_protocol)).await;
                     });
                 }
             }
@@ -206,6 +215,7 @@ async fn relay(
     source: SocketAddr,
     targets: &[SocketAddr],
     connect_timeout: Duration,
+    first_data_timeout: Duration,
     proxy_protocol: Option<ProxyProtocol>,
 ) {
     let _ = client.set_nodelay(true);
@@ -224,7 +234,26 @@ async fn relay(
                     return;
                 }
             }
-            if let Err(error) = copy_bidirectional(&mut client, &mut upstream).await {
+            let first_data = timeout(first_data_timeout, async {
+                let (mut from_client, mut from_upstream) = ([0; 1], [0; 1]);
+                tokio::select! {
+                    result = client.peek(&mut from_client) => result,
+                    result = upstream.peek(&mut from_upstream) => result,
+                }
+            })
+            .await;
+            let result = match first_data {
+                // EOF is readable too. Relay it so the other peer can still respond.
+                Ok(Ok(_)) => copy_bidirectional(&mut client, &mut upstream)
+                    .await
+                    .map(|_| ()),
+                Ok(Err(error)) => Err(error),
+                Err(_) => {
+                    tracing::debug!("TCP first data timed out");
+                    return;
+                }
+            };
+            if let Err(error) = result {
                 tracing::debug!(kind = ?error.kind(), "TCP relay ended");
             }
             return;

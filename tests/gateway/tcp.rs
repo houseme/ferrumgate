@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use anyhow::Result;
 use tokio::{
@@ -39,6 +39,80 @@ async fn forwards_tcp_after_a_failed_dial_and_preserves_half_close() -> Result<(
     let mut response = Vec::new();
     timeout(DEADLINE, socket.read_to_end(&mut response)).await??;
     assert_eq!(response, b"binary\0relay");
+    Ok(())
+}
+
+#[tokio::test]
+async fn first_data_timeout_releases_an_idle_slot_after_sending_proxy_header() -> Result<()> {
+    let origin = Origin::spawn(|socket| async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        let mut socket = BufReader::new(socket);
+        let mut header = String::new();
+        socket.read_line(&mut header).await?;
+        assert!(header.starts_with("PROXY TCP4 "));
+        let mut byte = [0];
+        if socket.read(&mut byte).await? != 0 {
+            socket.get_mut().write_all(&byte).await?;
+        }
+        Ok(())
+    })
+    .await?;
+    let rule = forwarding(
+        "127.0.0.1:0",
+        &[origin.addr],
+        "proxy_protocol = \"v1\"\nfirst_data_timeout_ms = 500\nmax_connections = 1",
+    );
+    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let mut idle = connect(gateway.addr).await?;
+    let mut byte = [0];
+    assert_eq!(timeout(DEADLINE, idle.read(&mut byte)).await??, 0);
+
+    let mut active = connect(gateway.addr).await?;
+    active.write_all(b"a").await?;
+    assert_eq!(timeout(DEADLINE, active.read_u8()).await??, b'a');
+    Ok(())
+}
+
+#[tokio::test]
+async fn server_first_data_disarms_the_timeout_for_both_directions() -> Result<()> {
+    let origin = Origin::spawn(|mut socket| async move {
+        socket.write_all(b"a").await?;
+        let byte = socket.read_u8().await?;
+        socket.write_u8(byte).await?;
+        Ok(())
+    })
+    .await?;
+    let rule = forwarding("127.0.0.1:0", &[origin.addr], "first_data_timeout_ms = 500");
+    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let mut client = connect(gateway.addr).await?;
+    assert_eq!(timeout(DEADLINE, client.read_u8()).await??, b'a');
+    assert!(
+        timeout(Duration::from_millis(600), client.read_u8())
+            .await
+            .is_err()
+    );
+    client.write_u8(b'b').await?;
+    assert_eq!(timeout(DEADLINE, client.read_u8()).await??, b'b');
+    Ok(())
+}
+
+#[tokio::test]
+async fn empty_client_half_close_reaches_the_upstream() -> Result<()> {
+    let origin = Origin::spawn(|mut socket| async move {
+        let mut byte = [0];
+        assert_eq!(socket.read(&mut byte).await?, 0);
+        socket.write_all(b"eof").await?;
+        Ok(())
+    })
+    .await?;
+    let rule = forwarding("127.0.0.1:0", &[origin.addr], "");
+    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let mut client = connect(gateway.addr).await?;
+    client.shutdown().await?;
+    let mut buffer = [0; 3];
+    timeout(DEADLINE, client.read_exact(&mut buffer)).await??;
+    assert_eq!(&buffer, b"eof");
     Ok(())
 }
 
@@ -91,6 +165,8 @@ async fn rejects_invalid_tcp_targets_and_conflicting_listeners() -> Result<()> {
         forwarding("127.0.0.1:9050", &[], ""),
         forwarding("127.0.0.1:9050", &[addr, addr], ""),
         forwarding("127.0.0.1:9000", &[addr], ""),
+        forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 0"),
+        forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 3600001"),
         rule.repeat(2),
     ] {
         assert!(!Gateway::check(dir.path(), &config(&routes, "http_enabled = false", "")).await?);
