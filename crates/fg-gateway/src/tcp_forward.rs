@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use ipnet::IpNet;
 use serde::Deserialize;
 use tokio::{
     io::{AsyncWriteExt, copy_bidirectional},
@@ -15,7 +16,10 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-use crate::source_policy::{RawSourcePolicy, SourcePolicy};
+use crate::{
+    source_policy::{RawSourcePolicy, SourcePolicy, compile_networks},
+    source_quota::SourceQuota,
+};
 
 #[derive(Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -27,6 +31,8 @@ pub(crate) struct RawForward {
     connection_lifetime_ms: u64,
     proxy_protocol: Option<ProxyProtocol>,
     source: RawSourcePolicy,
+    max_connections_per_source: Option<usize>,
+    source_limit_exempt: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -46,6 +52,8 @@ impl Default for RawForward {
             connection_lifetime_ms: 300_000,
             proxy_protocol: None,
             source: RawSourcePolicy::default(),
+            max_connections_per_source: None,
+            source_limit_exempt: Vec::new(),
         }
     }
 }
@@ -59,6 +67,13 @@ pub(crate) struct TcpForward {
     connection_lifetime: Duration,
     proxy_protocol: Option<ProxyProtocol>,
     pub source: SourcePolicy,
+    source_limit: Option<SourceLimit>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct SourceLimit {
+    max: usize,
+    exempt: Vec<IpNet>,
 }
 
 impl TcpForward {
@@ -91,6 +106,21 @@ impl TcpForward {
             (1..=86_400_000).contains(&raw.connection_lifetime_ms),
             "tcp_forward.connection_lifetime_ms must be in 1..=86400000"
         );
+        ensure!(
+            raw.max_connections_per_source.is_some() || raw.source_limit_exempt.is_empty(),
+            "source_limit_exempt requires max_connections_per_source"
+        );
+        let source_limit = if let Some(max) = raw.max_connections_per_source {
+            ensure!(
+                (1..=raw.max_connections).contains(&max),
+                "max_connections_per_source must be positive and no greater than max_connections"
+            );
+            let exempt =
+                compile_networks(raw.source_limit_exempt).context("invalid source_limit_exempt")?;
+            Some(SourceLimit { max, exempt })
+        } else {
+            None
+        };
         Ok(Self {
             listen,
             targets: raw.targets,
@@ -99,6 +129,7 @@ impl TcpForward {
             connection_lifetime: Duration::from_millis(raw.connection_lifetime_ms),
             proxy_protocol: raw.proxy_protocol,
             source: SourcePolicy::compile(raw.source)?,
+            source_limit,
         })
     }
 
@@ -110,6 +141,7 @@ impl TcpForward {
             && self.connect_timeout == other.connect_timeout
             && self.connection_lifetime == other.connection_lifetime
             && self.proxy_protocol == other.proxy_protocol
+            && self.source_limit == other.source_limit
     }
 
     pub async fn serve(
@@ -119,6 +151,9 @@ impl TcpForward {
         permits: impl Fn(IpAddr) -> bool + Send,
     ) {
         let targets = std::sync::Arc::new(self.targets);
+        let quota = self
+            .source_limit
+            .map(|limit| (limit, std::sync::Arc::new(SourceQuota::default())));
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
@@ -142,8 +177,20 @@ impl TcpForward {
                         tracing::debug!(source = %peer.ip(), "TCP forward source denied");
                         continue;
                     }
+                    let lease = if let Some((limit, quota)) = &quota
+                        && !limit.exempt.iter().any(|network| network.contains(&peer.ip().to_canonical()))
+                    {
+                        let Some(lease) = quota.acquire(peer.ip(), limit.max) else {
+                            tracing::debug!(source = %peer.ip(), "TCP forward source quota exhausted");
+                            continue;
+                        };
+                        Some(lease)
+                    } else {
+                        None
+                    };
                     let targets = targets.clone();
                     connections.spawn(async move {
+                        let _lease = lease;
                         let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.proxy_protocol)).await;
                     });
                 }

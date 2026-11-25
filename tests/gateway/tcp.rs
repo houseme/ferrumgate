@@ -227,3 +227,68 @@ async fn reloads_tcp_source_rules_without_closing_existing_connections() -> Resu
     assert!(!Gateway::check(gateway.dir.path(), &settings(invalid)).await?);
     Ok(())
 }
+
+#[tokio::test]
+async fn tcp_source_quota_rejects_new_flows_and_releases_finished_slots() -> Result<()> {
+    use std::time::Duration;
+    let echo = Origin::spawn(|mut socket| async move {
+        let mut data = [0; 64];
+        loop {
+            let size = socket.read(&mut data).await?;
+            if size == 0 {
+                return Ok(());
+            }
+            socket.write_all(&data[..size]).await?;
+        }
+    })
+    .await?;
+    let base = "max_connections = 3\nmax_connections_per_source = 1";
+    let settings = |options: &str| {
+        config(
+            &forwarding("127.0.0.1:0", &[echo.addr], options),
+            "http_enabled = false",
+            "",
+        )
+    };
+
+    let gateway = Gateway::spawn(&settings(base)).await?;
+    let mut first = connect(gateway.addr).await?;
+    first.write_all(b"a").await?;
+    assert_eq!(timeout(DEADLINE, first.read_u8()).await??, b'a');
+    let mut denied = connect(gateway.addr).await?;
+    assert!(timeout(DEADLINE, denied.read_u8()).await?.is_err());
+    drop(first);
+
+    timeout(DEADLINE, async {
+        loop {
+            let mut sender = connect(gateway.addr).await?;
+            if sender.write_all(b"b").await.is_ok()
+                && timeout(Duration::from_millis(200), sender.read_u8())
+                    .await
+                    .is_ok_and(|result| result.is_ok_and(|byte| byte == b'b'))
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await??;
+
+    let exempt = Gateway::spawn(&settings(&format!(
+        "{base}\nsource_limit_exempt = [\"127.0.0.0/8\"]"
+    )))
+    .await?;
+    let (mut a, mut b) = (connect(exempt.addr).await?, connect(exempt.addr).await?);
+    a.write_all(b"c").await?;
+    b.write_all(b"d").await?;
+    assert_eq!(timeout(DEADLINE, a.read_u8()).await??, b'c');
+    assert_eq!(timeout(DEADLINE, b.read_u8()).await??, b'd');
+    assert!(
+        !Gateway::check(
+            gateway.dir.path(),
+            &settings("max_connections = 2\nmax_connections_per_source = 3")
+        )
+        .await?
+    );
+    Ok(())
+}

@@ -393,6 +393,15 @@ deny = ["192.0.2.9"]
 
 `deny` 优先于 `allow`。省略 `allow` 表示接受未拒绝的来源，设置空数组表示拒绝所有来源。IPv4 映射地址按 IPv4 匹配。可通过 Unix SIGHUP 热重载来源规则。新 TCP 连接在拨号前应用规则，已建立的 TCP 连接继续工作。UDP 每次转发前检查请求和回复，规则修改后也会限制已有会话的报文。 [Gately 来源 IP 访问控制](https://gately.cn/en/docs/modules/portforward#source-ip-access-control)
 
+TCP 可在规则的顶层启用每源并发配额。示例限制每个来源最多 16 条连接，并将指定的运维网段排除在每源配额之外。
+
+```toml
+max_connections_per_source = 16
+source_limit_exempt = ["192.0.2.64/26"]
+```
+
+IPv4 按单地址计数，IPv6 按 /64 分组。先执行来源允许／拒绝规则，再检查并发配额。来源豁免仍受该规则的总连接上限约束。省略配额即保持原有接入行为，启用后修改配额需重启。 [Gately 连接限制](https://gately.cn/en/docs/modules/portforward#connection-limits-and-empty-connections)
+
 ### UDP 端口转发
 
 ```toml

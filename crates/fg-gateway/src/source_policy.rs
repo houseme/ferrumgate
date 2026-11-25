@@ -39,7 +39,7 @@ impl SourcePolicy {
     }
 }
 
-fn compile_networks(entries: Vec<String>) -> Result<Vec<IpNet>> {
+pub(crate) fn compile_networks(entries: Vec<String>) -> Result<Vec<IpNet>> {
     ensure!(
         entries.len() <= 1024,
         "a source list supports at most 1024 entries"
