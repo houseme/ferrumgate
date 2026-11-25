@@ -24,6 +24,15 @@ fn rule(target: SocketAddr, options: &str) -> String {
     format!("\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntarget = \"{target}\"\n{options}\n")
 }
 
+fn multi_target_rule(targets: &[SocketAddr], options: &str) -> String {
+    let targets = targets
+        .iter()
+        .map(|target| format!("\"{target}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntargets = [{targets}]\n{options}\n")
+}
+
 async fn client(address: SocketAddr) -> Result<UdpSocket> {
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     socket.connect(address).await?;
@@ -46,6 +55,81 @@ async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
     let a = timeout(DEADLINE, peers.recv()).await?.unwrap();
     let b = timeout(DEADLINE, peers.recv()).await?.unwrap();
     assert_ne!(a, b);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rotates_new_udp_sessions_and_keeps_existing_sessions_on_their_target() -> Result<()> {
+    let (first_target, mut first_peers) = echo_target().await?;
+    let (second_target, mut second_peers) = echo_target().await?;
+    let settings = multi_target_rule(&[first_target, second_target], "");
+    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+    let first = client(gateway.addr).await?;
+    let second = client(gateway.addr).await?;
+    let third = client(gateway.addr).await?;
+
+    let mut original = None;
+    for (sender, peers, payload) in [
+        (&first, &mut first_peers, b"one"),
+        (&second, &mut second_peers, b"two"),
+    ] {
+        sender.send(payload).await?;
+        let mut response = [0; 16];
+        let len = timeout(DEADLINE, sender.recv(&mut response)).await??;
+        assert_eq!(&response[..len], payload);
+        let peer = timeout(DEADLINE, peers.recv()).await?.unwrap();
+        original.get_or_insert(peer);
+    }
+
+    let mut response = [0; 16];
+    first.send(b"same session").await?;
+    let len = timeout(DEADLINE, first.recv(&mut response)).await??;
+    assert_eq!(&response[..len], b"same session");
+    assert_eq!(timeout(DEADLINE, first_peers.recv()).await?, original);
+
+    third.send(b"new session").await?;
+    let len = timeout(DEADLINE, third.recv(&mut response)).await??;
+    assert_eq!(&response[..len], b"new session");
+    let peer = timeout(DEADLINE, first_peers.recv()).await?.unwrap();
+    assert_ne!(Some(peer), original);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tries_the_next_udp_target_when_connecting_fails() -> Result<()> {
+    // A link-local destination with a nonexistent interface index cannot connect.
+    let invalid = "[fe80::1%4294967295]:12345".parse()?;
+    let (target, mut peers) = echo_target().await?;
+    let settings = multi_target_rule(&[invalid, target], "");
+    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+    let sender = client(gateway.addr).await?;
+    sender.send(b"backup").await?;
+    let mut response = [0; 16];
+    let len = timeout(DEADLINE, sender.recv(&mut response)).await??;
+    assert_eq!(&response[..len], b"backup");
+    assert!(timeout(DEADLINE, peers.recv()).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn does_not_replay_a_udp_datagram_when_the_selected_target_is_silent() -> Result<()> {
+    let silent = UdpSocket::bind("127.0.0.1:0").await?;
+    let backup = UdpSocket::bind("127.0.0.1:0").await?;
+    let settings = multi_target_rule(
+        &[silent.local_addr()?, backup.local_addr()?],
+        "idle_timeout_ms = 100",
+    );
+    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+    let sender = client(gateway.addr).await?;
+    sender.send(b"once").await?;
+    let mut buffer = [0; 16];
+    let (len, _) = timeout(DEADLINE, silent.recv_from(&mut buffer)).await??;
+    assert_eq!(&buffer[..len], b"once");
+    assert!(
+        timeout(Duration::from_millis(250), backup.recv_from(&mut buffer))
+            .await
+            .is_err()
+    );
     Ok(())
 }
 
@@ -129,8 +213,22 @@ async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() ->
         rule(addr, "max_sessions = 4096") + &rule(addr, "max_sessions = 1"),
         rule(addr, "max_sessions = 2049").replace("127.0.0.1:0", "127.0.0.1:9050-9051"),
         rule(addr, "").replace("127.0.0.1:0", "127.0.0.1:9050-9051,9051"),
+        multi_target_rule(&[], ""),
+        multi_target_rule(&[addr; 9], ""),
+        multi_target_rule(&[addr, addr], ""),
+        multi_target_rule(&[addr], "target = \"127.0.0.1:9001\""),
+        multi_target_rule(&[addr], "").replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
     ] {
         assert!(!Gateway::check(dir.path(), &config(&rules, "http_enabled = false", "")).await?);
+    }
+    for rule in [
+        rule(addr, ""),
+        multi_target_rule(&[addr], ""),
+        multi_target_rule(&[addr, "[::1]:9080".parse()?], "")
+            .replace("127.0.0.1:0", "127.0.0.1:9050-9051")
+            .replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
+    ] {
+        assert!(Gateway::check(dir.path(), &config(&rule, "http_enabled = false", "")).await?);
     }
     Ok(())
 }

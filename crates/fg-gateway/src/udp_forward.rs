@@ -1,11 +1,12 @@
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
+    io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use hyper::body::Bytes;
 use serde::Deserialize;
 use tokio::{
@@ -28,6 +29,7 @@ static QUEUED_PACKETS: Semaphore = Semaphore::const_new(1024);
 pub(crate) struct RawUdpForward {
     listen: Option<String>,
     target: Option<String>,
+    targets: Option<Vec<String>>,
     max_sessions: usize,
     idle_timeout_ms: u64,
     source: RawSourcePolicy,
@@ -38,6 +40,7 @@ impl Default for RawUdpForward {
         Self {
             listen: None,
             target: None,
+            targets: None,
             max_sessions: 128,
             idle_timeout_ms: 30_000,
             source: RawSourcePolicy::default(),
@@ -48,7 +51,7 @@ impl Default for RawUdpForward {
 #[derive(Clone)]
 pub(crate) struct UdpForward {
     pub listen: SocketAddr,
-    target: SocketAddr,
+    targets: Arc<[SocketAddr]>,
     pub max_sessions: usize,
     idle: Duration,
     pub source: SourcePolicy,
@@ -63,21 +66,20 @@ impl UdpForward {
     pub fn compile(raw: RawUdpForward) -> Result<Vec<Self>> {
         let listens = forward_ports::parse(&raw.listen.context("udp_forward.listen is required")?)
             .context("invalid udp_forward.listen")?;
-        let targets = forward_ports::targets(
-            &raw.target.context("udp_forward.target is required")?,
-            listens.len(),
-        )
-        .context("invalid udp_forward.target")?;
+        let endpoints = match (raw.target, raw.targets) {
+            (Some(target), None) => vec![target],
+            (None, Some(targets)) => targets,
+            _ => bail!("udp_forward requires exactly one of target or targets"),
+        };
         ensure!(
-            targets.iter().all(|target| {
-                target.port() != 0
-                    && !target.ip().is_unspecified()
-                    && !target.ip().is_multicast()
-                    && target.ip() != IpAddr::V4(Ipv4Addr::BROADCAST)
-                    && !listens.contains(target)
-            }),
-            "udp_forward targets must be unicast addresses with nonzero ports, different from the rule's listeners"
+            (1..=8).contains(&endpoints.len()),
+            "udp_forward needs 1..=8 targets"
         );
+        let targets = endpoints
+            .iter()
+            .map(|target| forward_ports::targets(target, listens.len()))
+            .collect::<Result<Vec<_>>>()
+            .context("invalid udp_forward targets")?;
         ensure!(
             (1..=4096).contains(&raw.max_sessions),
             "udp_forward.max_sessions must be in 1..=4096"
@@ -87,23 +89,38 @@ impl UdpForward {
             "udp_forward.idle_timeout_ms must be in 100..=3600000"
         );
         let source = SourcePolicy::compile(raw.source)?;
-        Ok(listens
-            .into_iter()
-            .zip(targets)
-            .map(|(listen, target)| Self {
-                listen,
-                target,
-                max_sessions: raw.max_sessions,
-                idle: Duration::from_millis(raw.idle_timeout_ms),
-                source: source.clone(),
+        listens
+            .iter()
+            .enumerate()
+            .map(|(index, &listen)| {
+                let targets: Arc<[_]> = targets.iter().map(|target| target[index]).collect();
+                let mut unique = HashSet::new();
+                ensure!(
+                    targets.iter().all(|target| {
+                        target.port() != 0
+                            && !target.ip().is_unspecified()
+                            && !target.ip().is_multicast()
+                            && target.ip() != IpAddr::V4(Ipv4Addr::BROADCAST)
+                            && !listens.contains(target)
+                            && unique.insert(*target)
+                    }),
+                    "udp_forward targets must be distinct unicast addresses with nonzero ports, different from the rule's listeners"
+                );
+                Ok(Self {
+                    listen,
+                    targets,
+                    max_sessions: raw.max_sessions,
+                    idle: Duration::from_millis(raw.idle_timeout_ms),
+                    source: source.clone(),
+                })
             })
-            .collect())
+            .collect()
     }
 
     #[cfg(unix)]
     pub fn same_startup(&self, other: &Self) -> bool {
         self.listen == other.listen
-            && self.target == other.target
+            && self.targets == other.targets
             && self.max_sessions == other.max_sessions
             && self.idle == other.idle
     }
@@ -118,6 +135,7 @@ impl UdpForward {
         let mut tasks = JoinSet::new();
         let mut sessions = HashMap::<SocketAddr, (Id, mpsc::Sender<Packet>)>::new();
         let mut buffer = vec![0; MAX_DATAGRAM];
+        let mut next_target = 0;
         loop {
             tokio::select! {
                 biased;
@@ -149,8 +167,11 @@ impl UdpForward {
                             let (send, receive) = mpsc::channel(4);
                             let socket = socket.clone();
                             let permits = permits.clone();
+                            let targets = self.targets.clone();
+                            let start = next_target;
+                            next_target = (start + 1) % targets.len();
                             let task = tasks.spawn(async move {
-                                if let Err(error) = relay(socket, peer, receive, self.target, self.idle, permits).await {
+                                if let Err(error) = relay(socket, peer, receive, &targets, start, self.idle, permits).await {
                                     tracing::debug!(kind = ?error.kind(), "UDP relay ended");
                                 }
                                 peer
@@ -173,17 +194,20 @@ async fn relay(
     listener: Arc<UdpSocket>,
     peer: SocketAddr,
     mut packets: mpsc::Receiver<Packet>,
-    target: SocketAddr,
+    targets: &[SocketAddr],
+    start: usize,
     idle: Duration,
     permits: impl Fn(IpAddr) -> bool + Send + Sync,
-) -> std::io::Result<()> {
-    let upstream = UdpSocket::bind(if target.is_ipv4() {
-        "0.0.0.0:0"
-    } else {
-        "[::]:0"
-    })
-    .await?;
-    upstream.connect(target).await?;
+) -> io::Result<()> {
+    let mut candidates = targets[start..].iter().chain(&targets[..start]);
+    let mut connected = connect(*candidates.next().expect("validated UDP target list")).await;
+    for &target in candidates {
+        if connected.is_ok() {
+            break;
+        }
+        connected = connect(target).await;
+    }
+    let upstream = connected?;
     let mut buffer = vec![0; MAX_DATAGRAM];
     loop {
         let result = timeout(idle, async {
@@ -199,7 +223,7 @@ async fn relay(
                     listener.send_to(&buffer[..len], peer).await?;
                 }
             }
-            Ok::<_, std::io::Error>(true)
+            Ok::<_, io::Error>(true)
         })
         .await;
         match result {
@@ -208,4 +232,15 @@ async fn relay(
             Ok(Ok(false)) | Err(_) => return Ok(()),
         }
     }
+}
+
+async fn connect(target: SocketAddr) -> io::Result<UdpSocket> {
+    let upstream = UdpSocket::bind(if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .await?;
+    upstream.connect(target).await?;
+    Ok(upstream)
 }
