@@ -9,7 +9,7 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, pem::PemObject},
 };
 use serde_json::{Value, json};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use tokio::sync::{Mutex, Notify};
 use tokio::{
     net::{TcpStream, UdpSocket},
@@ -398,12 +398,25 @@ struct CloudflareFixture {
     retired_new_record: Notify,
     dns_admin: SocketAddr,
     owner: &'static str,
+    zone_name: &'static str,
+    zone_reads: AtomicUsize,
 }
 
 impl CloudflareFixture {
     async fn handle(&self, request: hyper::Request<Incoming>) -> Result<Response<TestBody>> {
         let (head, body) = request.into_parts();
         assert_eq!(head.headers["authorization"], format!("Bearer {TOKEN}"));
+        if head.method == Method::GET && head.uri.path() == "/client/v4/zones" {
+            assert_eq!(
+                head.uri.query(),
+                Some(format!("name={}&status=active&per_page=50", self.zone_name).as_str())
+            );
+            self.zone_reads.fetch_add(1, Relaxed);
+            return Ok(cf_response(
+                200,
+                json!([{"id": CF_ZONE, "name": self.zone_name, "status": "active"}]),
+            ));
+        }
         let expected = format!("/client/v4/zones/{CF_ZONE}/dns_records");
         let suffix = head
             .uri
@@ -505,27 +518,42 @@ async fn dns_admin(address: SocketAddr, path: &str, payload: Value) -> Result<()
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_dns01_issues_a_wildcard_and_recovers_failed_provider_cleanup() -> Result<()> {
-    pebble_dns01_lifecycle(false).await
+    pebble_dns01_lifecycle(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_dns01_follows_cross_zone_cname_and_cleans_the_original_target() -> Result<()> {
-    pebble_dns01_lifecycle(true).await
+    pebble_dns01_lifecycle(true, false).await
 }
 
-async fn pebble_dns01_lifecycle(delegated: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_dns01_discovers_the_soa_zone_after_cname() -> Result<()> {
+    pebble_dns01_lifecycle(true, true).await
+}
+
+async fn pebble_dns01_lifecycle(delegated: bool, automatic: bool) -> Result<()> {
     let pebble = pebble(false).await?;
-    let (zone, owner) = if delegated {
+    let (zone, owner) = match (delegated, automatic) {
+        (true, true) => ("sub.validation.test", "proof.sub.validation.test"),
+        (true, false) => ("validation.test", "proof.validation.test"),
+        _ => ("example.test", DNS_HOST),
+    };
+    if delegated {
         dns_admin(
             pebble.dns_admin,
             "/set-cname",
-            json!({"host": format!("{DNS_HOST}."), "target": "proof.validation.test."}),
+            json!({
+                "host": format!("{DNS_HOST}."), "target": format!("{owner}."),
+            }),
         )
         .await?;
-        ("validation.test", "proof.validation.test")
+    }
+    let resolver = if automatic {
+        dns_with_soa(pebble.dns, zone).await?
     } else {
-        ("example.test", DNS_HOST)
+        pebble.dns
     };
     let ca = Ca::new()?;
     let acceptor = ca.identity("localhost")?.acceptor(b"http/1.1")?;
@@ -546,6 +574,8 @@ async fn pebble_dns01_lifecycle(delegated: bool) -> Result<()> {
         retired_new_record: Notify::new(),
         dns_admin: pebble.dns_admin,
         owner,
+        zone_name: zone,
+        zone_reads: AtomicUsize::new(0),
     });
     let cloudflare = Origin::spawn({
         let provider = provider.clone();
@@ -578,7 +608,8 @@ async fn pebble_dns01_lifecycle(delegated: bool) -> Result<()> {
         json!({
             "zone_id": CF_ZONE, "api_base": api_base,
             "records": [{"name": owner, "content": "previous-proof", "comment": ORPHAN_TAG,
-                "record_id": null, "created_at": 1}],
+                "record_id": null, "created_at": 1,
+                "zone": automatic.then(|| json!({"id": CF_ZONE, "name": zone}))}],
         })
         .to_string(),
     )?;
@@ -588,6 +619,11 @@ async fn pebble_dns01_lifecycle(delegated: bool) -> Result<()> {
     std::fs::write(&token_file, TOKEN)?;
     std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))?;
     let origin = Origin::http("secured").await?;
+    let zone_fields = if automatic {
+        String::new()
+    } else {
+        format!("zone = \"{zone}\"\nzone_id = \"{CF_ZONE}\"")
+    };
     let settings = config(
         &route("acme.example.test", origin.addr, "/"),
         "tls = true",
@@ -602,8 +638,7 @@ directory = "https://localhost:{}/dir"
 ca_file = "{}"
 
 [acme.dns01]
-zone = "{zone}"
-zone_id = "{CF_ZONE}"
+{zone_fields}
 token_file = "{}"
 api_base = "{api_base}"
 api_ca_file = "{}"
@@ -615,10 +650,16 @@ propagation_timeout_secs = 10
             pebble.files.path().join("ca.pem").display(),
             token_file.display(),
             cf_ca.join("ca.pem").display(),
-            pebble.dns
+            resolver
         ),
     );
-    if delegated {
+    if !automatic {
+        let missing_id = settings.replace(&format!("zone_id = \"{CF_ZONE}\""), "");
+        assert!(!Gateway::check(pebble.files.path(), &missing_id).await?);
+        let legacy_to_auto = settings.replace(&zone_fields, "");
+        assert!(!Gateway::check(pebble.files.path(), &legacy_to_auto).await?);
+    }
+    if delegated && !automatic {
         let overridden = settings.replace("[acme.dns01]", "[acme.dns01]\nfollow_cname = false");
         assert!(!Gateway::check(pebble.files.path(), &overridden).await?);
     }
@@ -672,5 +713,43 @@ propagation_timeout_secs = 10
     let records = provider.records.lock().await;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0]["id"], FOREIGN_RECORD);
+    assert_eq!(provider.zone_reads.load(Relaxed), usize::from(automatic));
     Ok(())
+}
+
+async fn dns_with_soa(upstream: SocketAddr, zone: &str) -> Result<SocketAddr> {
+    use hickory_proto::{
+        op::{Message, OpCode},
+        rr::{Name, RData, Record, RecordType, rdata::SOA},
+    };
+    let incoming = UdpSocket::bind("127.0.0.1:0").await?;
+    let address = incoming.local_addr()?;
+    let outgoing = UdpSocket::bind("127.0.0.1:0").await?;
+    outgoing.connect(upstream).await?;
+    let zone = Name::from_ascii(format!("{zone}."))?;
+    tokio::spawn(async move {
+        let mut request = [0; 4096];
+        let mut answer = [0; 4096];
+        while let Ok((length, peer)) = incoming.recv_from(&mut request).await {
+            let message = Message::from_vec(&request[..length])?;
+            if message.queries[0].query_type == RecordType::SOA {
+                let mut response = Message::response(message.metadata.id, OpCode::Query);
+                response.metadata.recursion_available = true;
+                response.metadata.authoritative = true;
+                response.queries = message.queries;
+                response.authorities.push(Record::from_rdata(
+                    zone.clone(),
+                    10,
+                    RData::SOA(SOA::new(zone.clone(), zone.clone(), 1, 60, 60, 60, 10)),
+                ));
+                incoming.send_to(&response.to_vec()?, peer).await?;
+            } else {
+                outgoing.send(&request[..length]).await?;
+                let length = timeout(DEADLINE, outgoing.recv(&mut answer)).await??;
+                incoming.send_to(&answer[..length], peer).await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    });
+    Ok(address)
 }

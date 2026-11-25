@@ -82,9 +82,9 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 ### ACME DNS-01
 
-启用 `[acme.dns01]` 后使用显式 Cloudflare 托管区、私有 API 令牌和指定 DNS 递归解析器。DNS-01 支持精确及通配 DNS 名，验权通过 TXT，只启动业务 TLS 监听。通配证书仅覆盖一个 SNI 标签，精确证书优先。
+启用 `[acme.dns01]` 后使用 Cloudflare 托管区、私有 API 令牌和指定 DNS 递归解析器。可配置明确区域，或通过挑战最终落点的 SOA 和 Cloudflare Zone Read 自动选择唯一的活动区域。DNS-01 支持精确及通配 DNS 名，验权通过 TXT，只启动业务 TLS 监听。通配证书仅覆盖一个 SNI 标签，精确证书优先。
 
-DNS-01 默认沿 CNAME 查找最终 TXT 名称，最多支持八跳。随机同级名称出现相同 CNAME 时，保留原挑战名以避开通配记录产生的别名。实际写入名称必须在配置区域内。每条 TXT 在写入 Cloudflare 之前记录名称、值和随机归属标签，获得记录 ID 后再持久化一次。提交挑战前从 DNS 读取实际 TXT。清理前复核名称、TXT、归属标签与 ID。创建结果不确定时按归属标签查询。清理错误保留日志状态，在进程或证书恢复后重试。 [Gately DNS-01](https://gately.cn/en/docs/modules/ssl#dns-01-validation) · [Cloudflare Create DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/) · [Cloudflare Delete DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/delete/)
+DNS-01 默认沿 CNAME 查找最终 TXT 名称，最多支持八跳。随机同级名称出现相同 CNAME 时，保留原挑战名以避开通配记录产生的别名。实际写入名称必须属于配置或发现的区域。每条 TXT 在写入 Cloudflare 之前记录名称、值和随机归属标签，写入时记录所属区域，获得记录 ID 后再持久化一次。提交挑战前从 DNS 读取实际 TXT。清理前复核名称、TXT、归属标签与 ID。创建结果不确定时按归属标签查询。清理错误保留日志状态，在进程或证书恢复后重试。 [Gately DNS-01](https://gately.cn/en/docs/modules/ssl#dns-01-validation) · [Cloudflare Create DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/) · [Cloudflare Delete DNS Record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/delete/)
 
 ## 5. 阶段 C1 WebSocket
 

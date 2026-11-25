@@ -7,7 +7,7 @@
 | 模块域 | FerrumGate 已实现 | 完成对齐还需交付 |
 |---|---|---|
 | Web 服务 | HTTP/1.1、HTTP/2、h2c、gRPC、WebSocket；精确域名、通配域名和路径；加权池、备用、被动和主动 HTTP/TCP 检查；重定向、固定文本和静态文件 | HTTP/3、多 Web 监听、导航面板、路径重写、访问策略、请求重试、其他负载策略、缓存、压缩、限流、拓扑 |
-| 证书 | PEM 手动加载、精确和通配 SNI、原子轮换、HTTPS 上游验证；ACME HTTP-01、Cloudflare DNS-01、CNAME 委托与通配证书、EAB、证书 profile、账户复用、续期和在线换证 | 其他 DNS 提供商、自动区域发现、IP 证书、未完成订单恢复、ARI、证书部署和到期告警 |
+| 证书 | PEM 手动加载、精确和通配 SNI、原子轮换、HTTPS 上游验证；ACME HTTP-01、Cloudflare DNS-01、CNAME 委托、SOA 区域发现与通配证书、EAB、证书 profile、账户复用、续期和在线换证 | 其他 DNS 提供商、IP 证书、未完成订单恢复、ARI、证书部署和到期告警 |
 | 端口转发与协议分流 | 独立或 Web 并行的 TCP/UDP 转发；TCP 顺序目标切换、半关闭和排空；UDP 单目标、独立会话与空闲回收 | UDP 多目标、端口范围、每源配额、流量指标、PROXY 协议、SNI/ALPN 和其他协议分类 |
 | 管理、认证与运维 | TOML、CLI 校验、Unix 原子重载、结构化运行日志、本地回滚步骤 | 独立管理 API、Web UI、会话与角色、OIDC/TOTP/Passkeys、审计、配置历史、备份、指标和通知 |
 | WAF 与入侵防护 | 按固定路由配置上游，逐跳字段与转发身份边界已实现 | 站点 ACL、CRS 检测与阻断、日志 jail、受限防火墙组件、端口敲门 |

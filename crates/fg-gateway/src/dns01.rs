@@ -45,8 +45,8 @@ const API_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawDns01 {
-    zone: String,
-    zone_id: String,
+    zone: Option<String>,
+    zone_id: Option<String>,
     token_file: PathBuf,
     resolver: SocketAddr,
     api_base: Option<String>,
@@ -57,8 +57,7 @@ pub(crate) struct RawDns01 {
 
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Dns01 {
-    zone: String,
-    zone_id: String,
+    zone: Option<Zone>,
     api_base: String,
     api_ca_file: Option<PathBuf>,
     pub token_file: PathBuf,
@@ -67,9 +66,16 @@ pub(crate) struct Dns01 {
     follow_cname: bool,
 }
 
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Zone {
+    name: String,
+    id: String,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Journal {
-    zone_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    zone_id: Option<String>,
     api_base: String,
     records: Vec<Pending>,
 }
@@ -80,6 +86,8 @@ struct Pending {
     content: String,
     comment: String,
     record_id: Option<String>,
+    #[serde(default)]
+    zone: Option<Zone>,
     created_at: i64,
 }
 
@@ -102,7 +110,7 @@ struct DnsRecord {
 struct Cloudflare {
     client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
     authorization: HeaderValue,
-    path: String,
+    api_base: String,
 }
 
 pub(crate) struct OrderDns<'a> {
@@ -116,22 +124,32 @@ pub(crate) struct OrderDns<'a> {
 
 impl Dns01 {
     pub async fn compile(raw: RawDns01, dir: &Path, domains: &[String]) -> Result<Self> {
-        let zone = canonical_host(&raw.zone)
-            .filter(|zone| zone.contains('.') && zone.parse::<IpAddr>().is_err())
-            .context("DNS-01 zone must be a DNS name")?
-            .into_owned();
         let follow_cname = raw.follow_cname.unwrap_or(true);
-        ensure!(
-            follow_cname
-                || domains
-                    .iter()
-                    .all(|domain| in_zone(domain.strip_prefix("*.").unwrap_or(domain), &zone)),
-            "DNS-01 domains must be within the configured zone"
-        );
-        ensure!(
-            valid_id(&raw.zone_id),
-            "DNS-01 zone_id must be a 32-character Cloudflare ID"
-        );
+        let zone = match (raw.zone, raw.zone_id) {
+            (None, None) => None,
+            (Some(name), Some(id)) => {
+                let name = canonical_host(&name)
+                    .filter(|name| name.contains('.') && name.parse::<IpAddr>().is_err())
+                    .context("DNS-01 zone must be a DNS name")?
+                    .into_owned();
+                ensure!(
+                    valid_id(&id),
+                    "DNS-01 zone_id must be a 32-character Cloudflare ID"
+                );
+                ensure!(
+                    follow_cname
+                        || domains.iter().all(|domain| {
+                            in_zone(domain.strip_prefix("*.").unwrap_or(domain), &name)
+                        }),
+                    "DNS-01 domains must be within the configured zone"
+                );
+                Some(Zone {
+                    name,
+                    id: id.to_ascii_lowercase(),
+                })
+            }
+            _ => anyhow::bail!("provide both DNS-01 zone and zone_id, or omit both for discovery"),
+        };
         ensure!(
             !raw.resolver.ip().is_unspecified() && raw.resolver.port() != 0,
             "DNS-01 resolver must be a DNS server address with a nonzero port"
@@ -157,7 +175,6 @@ impl Dns01 {
         );
         let mut cfg = Self {
             zone,
-            zone_id: raw.zone_id.to_ascii_lowercase(),
             api_base: api_base.trim_end_matches('/').to_owned(),
             api_ca_file: raw.api_ca_file.map(|path| dir.join(path)),
             token_file: dir.join(raw.token_file),
@@ -192,7 +209,7 @@ impl Dns01 {
             cf: self.client().await?,
             resolver,
             journal: Journal {
-                zone_id: self.zone_id.clone(),
+                zone_id: None,
                 api_base: self.api_base.clone(),
                 records: Vec::new(),
             },
@@ -212,25 +229,45 @@ impl Dns01 {
             return Ok(());
         }
         ensure!(
-            journal.zone_id == self.zone_id && journal.api_base == self.api_base,
+            journal.api_base == self.api_base,
             "DNS-01 cleanup journal belongs to another zone or API"
         );
         let client = self.client().await?;
         while let Some(record) = journal.records.last() {
+            let zone = self.record_zone(&journal, record)?;
             ensure!(
                 valid_owner(&record.name)
-                    && in_zone(&record.name, &self.zone)
+                    && in_zone(&record.name, &zone.name)
                     && record
                         .comment
                         .strip_prefix("ferrumgate-")
                         .is_some_and(|tag| tag.len() == 22 && safe_piece(tag)),
                 "invalid record in DNS-01 cleanup journal"
             );
-            client.retire(record).await?;
+            client.retire(zone, record).await?;
             journal.records.pop();
             persist_private(state_dir, JOURNAL_FILE, lock, serde_json::to_vec(&journal)?).await?;
         }
         Ok(())
+    }
+
+    fn record_zone<'a>(&'a self, journal: &Journal, record: &'a Pending) -> Result<&'a Zone> {
+        if let Some(zone) = &record.zone {
+            ensure!(
+                valid_id(&zone.id)
+                    && valid_owner(&zone.name)
+                    && self
+                        .zone
+                        .as_ref()
+                        .is_none_or(|configured| configured == zone),
+                "DNS-01 cleanup record belongs to another zone"
+            );
+            return Ok(zone);
+        }
+        self.zone
+            .as_ref()
+            .filter(|zone| journal.zone_id.as_deref() == Some(zone.id.as_str()))
+            .context("legacy DNS-01 cleanup journal needs its original explicit zone")
     }
 
     async fn roots(&self) -> Result<rustls::RootCertStore> {
@@ -282,7 +319,7 @@ impl Dns01 {
                 .retry_canceled_requests(false)
                 .build(https),
             authorization: self.authorization().await?,
-            path: format!("{}/zones/{}/dns_records", self.api_base, self.zone_id),
+            api_base: self.api_base.clone(),
         })
     }
 }
@@ -297,8 +334,15 @@ impl OrderDns<'_> {
         } else {
             source.clone()
         };
+        let zone = match &self.config.zone {
+            Some(zone) => zone.clone(),
+            None => {
+                let name = authority_zone(&self.resolver, &name).await?;
+                self.cf.find_zone(&name).await?
+            }
+        };
         ensure!(
-            in_zone(&name, &self.config.zone),
+            in_zone(&name, &zone.name),
             "DNS-01 challenge name is outside the zone"
         );
         let mut random = [0; 16];
@@ -311,6 +355,7 @@ impl OrderDns<'_> {
             content,
             comment,
             record_id: None,
+            zone: Some(zone.clone()),
             created_at: unix_now(),
         });
         self.save().await?;
@@ -319,7 +364,7 @@ impl OrderDns<'_> {
             .records
             .last_mut()
             .expect("created journal record");
-        let created = self.cf.create(record).await?;
+        let created = self.cf.create(&zone, record).await?;
         record.record_id = Some(created.id);
         self.save().await?;
         let record = self.journal.records.last().expect("saved journal record");
@@ -368,7 +413,37 @@ impl OrderDns<'_> {
 }
 
 impl Cloudflare {
-    async fn create(&self, record: &Pending) -> Result<DnsRecord> {
+    async fn find_zone(&self, name: &str) -> Result<Zone> {
+        let uri = format!("/zones?name={name}&status=active&per_page=50");
+        let zones: Vec<ProviderZone> = self
+            .request(Method::GET, &uri, Vec::new(), false)
+            .await?
+            .context("missing Cloudflare zone list")?;
+        ensure!(
+            zones.len() < 50,
+            "Cloudflare zone results may be incomplete"
+        );
+        let mut zones = zones
+            .into_iter()
+            .filter(|zone| zone.name.eq_ignore_ascii_case(name) && zone.status == "active");
+        let found = zones
+            .next()
+            .context("authoritative DNS zone is unavailable in Cloudflare")?;
+        ensure!(
+            zones.next().is_none(),
+            "Cloudflare returned multiple active zones with the same name"
+        );
+        ensure!(
+            valid_id(&found.id),
+            "Cloudflare returned an invalid zone ID"
+        );
+        Ok(Zone {
+            name: name.to_owned(),
+            id: found.id.to_ascii_lowercase(),
+        })
+    }
+
+    async fn create(&self, zone: &Zone, record: &Pending) -> Result<DnsRecord> {
         let body = serde_json::to_vec(&serde_json::json!({
             "type": "TXT",
             "name": record.name,
@@ -377,7 +452,7 @@ impl Cloudflare {
             "comment": record.comment,
         }))?;
         let response: DnsRecord = self
-            .request(Method::POST, "", body)
+            .request(Method::POST, &zone.records_path(), body, false)
             .await?
             .context("missing DNS provider record")?;
         ensure!(
@@ -387,17 +462,19 @@ impl Cloudflare {
         Ok(response)
     }
 
-    async fn retire(&self, record: &Pending) -> Result<()> {
+    async fn retire(&self, zone: &Zone, record: &Pending) -> Result<()> {
         if let Some(id) = &record.record_id {
             ensure!(valid_id(id), "invalid DNS record ID in cleanup journal");
-            return self.remove_if_owned(id, record).await;
+            return self.remove_if_owned(zone, id, record).await;
         }
         let query = format!(
-            "?type=TXT&name.exact={}&comment.exact={}&per_page=100",
-            record.name, record.comment
+            "{}?type=TXT&name.exact={}&comment.exact={}&per_page=100",
+            zone.records_path(),
+            record.name,
+            record.comment
         );
         let records: Vec<DnsRecord> = self
-            .request(Method::GET, &query, Vec::new())
+            .request(Method::GET, &query, Vec::new(), false)
             .await?
             .context("missing DNS provider record list")?;
         let possibly_truncated = records.len() >= 100;
@@ -410,7 +487,7 @@ impl Cloudflare {
                 valid_id(&entry.id),
                 "invalid DNS record ID recovered from provider"
             );
-            self.remove_if_owned(&entry.id, record).await?;
+            self.remove_if_owned(zone, &entry.id, record).await?;
             found = true;
         }
         ensure!(
@@ -424,12 +501,12 @@ impl Cloudflare {
         Ok(())
     }
 
-    async fn remove_if_owned(&self, id: &str, record: &Pending) -> Result<()> {
-        let suffix = format!("/{id}");
-        let current: Option<DnsRecord> = self.request(Method::GET, &suffix, Vec::new()).await?;
+    async fn remove_if_owned(&self, zone: &Zone, id: &str, record: &Pending) -> Result<()> {
+        let uri = format!("{}/{id}", zone.records_path());
+        let current: Option<DnsRecord> = self.request(Method::GET, &uri, Vec::new(), true).await?;
         if current.is_some_and(|current| current.id == id && same_record(&current, record)) {
             let _: Option<serde_json::Value> =
-                self.request(Method::DELETE, &suffix, Vec::new()).await?;
+                self.request(Method::DELETE, &uri, Vec::new(), true).await?;
         }
         Ok(())
     }
@@ -437,13 +514,13 @@ impl Cloudflare {
     async fn request<T: for<'a> Deserialize<'a>>(
         &self,
         method: Method,
-        suffix: &str,
+        path: &str,
         body: Vec<u8>,
+        allow_missing: bool,
     ) -> Result<Option<T>> {
-        let allow_missing = !suffix.is_empty() && suffix.starts_with('/');
         let request = Request::builder()
             .method(method)
-            .uri(format!("{}{suffix}", self.path))
+            .uri(format!("{}{path}", self.api_base))
             .header(AUTHORIZATION, self.authorization.clone())
             .header(CONTENT_TYPE, "application/json")
             .body(Full::new(Bytes::from(body)))?;
@@ -473,6 +550,50 @@ impl Cloudflare {
         })
         .await
         .context("DNS provider request timed out")?
+    }
+}
+
+#[derive(Deserialize)]
+struct ProviderZone {
+    id: String,
+    name: String,
+    status: String,
+}
+
+impl Zone {
+    fn records_path(&self) -> String {
+        format!("/zones/{}/dns_records", self.id)
+    }
+}
+
+async fn authority_zone(resolver: &TokioResolver, owner: &str) -> Result<String> {
+    let mut candidate = owner;
+    loop {
+        let name = format!("{candidate}.");
+        let soa = match resolver.lookup(name.as_str(), RecordType::SOA).await {
+            Ok(answer) => answer
+                .answers()
+                .iter()
+                .chain(answer.authorities())
+                .filter(|record| matches!(record.data, RData::SOA(_)))
+                .map(|record| record.name.to_ascii())
+                .max_by_key(|name| name.len()),
+            Err(error) if dns_absence(&error) => {
+                error.into_soa().map(|record| record.name.to_ascii())
+            }
+            Err(error) => return Err(error).context("look up DNS-01 authoritative zone"),
+        };
+        if let Some(soa) = soa {
+            let zone = canonical_host(&soa)
+                .filter(|zone| in_zone(owner, zone) && valid_owner(zone))
+                .context("DNS SOA does not cover the challenge name")?;
+            return Ok(zone.into_owned());
+        }
+        candidate = candidate
+            .split_once('.')
+            .map(|(_, suffix)| suffix)
+            .filter(|suffix| suffix.contains('.'))
+            .context("cannot discover authoritative DNS-01 zone; configure zone and zone_id")?;
     }
 }
 
@@ -587,12 +708,16 @@ pub(crate) async fn validate_journal(config: Option<&Dns01>, state_dir: &Path) -
         return Ok(());
     };
     let journal: Journal = serde_json::from_slice(&bytes).context("read DNS-01 cleanup journal")?;
+    if journal.records.is_empty() {
+        return Ok(());
+    }
+    let config = config.context("pending DNS-01 records require the original API settings")?;
     ensure!(
-        journal.records.is_empty()
-            || config.is_some_and(|config| {
-                config.zone_id == journal.zone_id && config.api_base == journal.api_base
-            }),
-        "pending DNS-01 records require the original zone and API settings"
+        config.api_base == journal.api_base,
+        "pending DNS-01 records require the original API settings"
     );
+    for record in &journal.records {
+        config.record_zone(&journal, record)?;
+    }
     Ok(())
 }
