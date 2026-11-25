@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use http_body_util::{Either, Full};
+use http_body_util::{Either, Empty, Full};
 use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
@@ -28,13 +28,15 @@ use crate::{
     websocket::{Handshake, Tunnel},
 };
 
+pub(crate) type RequestBody = Either<DataBody, Empty<Bytes>>;
+
 type Reply = Response<Either<DataBody, Full<Bytes>>>;
 
 pub(crate) struct Proxy {
     routes: Routes,
-    client: Client<HttpsConnector<HttpConnector>, DataBody>,
-    upgrade_client: Client<HttpsConnector<HttpConnector>, DataBody>,
-    h2c_client: Client<HttpConnector, DataBody>,
+    client: Client<HttpsConnector<HttpConnector>, RequestBody>,
+    upgrade_client: Client<HttpsConnector<HttpConnector>, RequestBody>,
+    h2c_client: Client<HttpConnector, RequestBody>,
     response_header_timeout: Duration,
 }
 
@@ -75,6 +77,21 @@ impl Proxy {
             h2c_client: builder.http2_only(true).build(connector),
             response_header_timeout: milliseconds(settings.response_header_timeout_ms),
         }
+    }
+
+    pub async fn monitor_health(&self) {
+        crate::health::monitor(self, &self.routes).await;
+    }
+
+    pub async fn probe_http(&self, request: Request<RequestBody>, h2c: bool) -> bool {
+        let response = if h2c {
+            self.h2c_client.request(request)
+        } else {
+            self.client.request(request)
+        };
+        response
+            .await
+            .is_ok_and(|response| response.status().as_u16() < 400)
     }
 
     pub async fn forward(
@@ -149,7 +166,7 @@ impl Proxy {
             let Some(route) = self.routes.find(&host, target.path()) else {
                 return reply(StatusCode::NOT_FOUND);
             };
-            let Some(backend) = route.backends.select() else {
+            let Some(backend) = route.backends.select(route.health.is_some()) else {
                 return reply(StatusCode::SERVICE_UNAVAILABLE);
             };
             let uri = Uri::builder()
@@ -225,8 +242,8 @@ impl Proxy {
         } else {
             Version::HTTP_11
         };
-        let request =
-            request.map(|body| DataBody::new(body, downstream_h2 && upstream_h2_required));
+        let request = request
+            .map(|body| Either::Left(DataBody::new(body, downstream_h2 && upstream_h2_required)));
         let pending = if handshake.is_some() {
             self.upgrade_client.request(request)
         } else if route.upstream_h2c {
@@ -237,7 +254,7 @@ impl Proxy {
         let result = timeout(self.response_header_timeout, pending).await;
 
         match &result {
-            Ok(Ok(_)) => route.backends.connected(backend),
+            Ok(Ok(_)) => route.backends.connected(backend, route.health.is_some()),
             Ok(Err(error)) if error.is_connect() => route.backends.connection_failed(backend),
             _ => {}
         }

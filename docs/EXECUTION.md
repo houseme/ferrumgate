@@ -159,6 +159,22 @@ backup = true
 cargo test --locked -p ferrumgate --test gateway backends::selects_weighted_backends_and_switches_after_connect_failures
 ```
 
+### 主动健康检查
+
+在该路由下添加以下表，默认关闭。HTTP 检查默认访问 `/`，TCP 模式省略 `path`。
+
+```toml
+[routes.health]
+mode = "http"
+path = "/ready"
+interval_secs = 10
+timeout_secs = 3
+fails = 3
+passes = 2
+```
+
+`interval_secs` 允许 1–3600，`timeout_secs` 允许 1–60，`fails` 和 `passes` 允许 1–20。观察日志中 `upstream unavailable` 和 `upstream recovered`。使用真实探测路径返回 503 后再恢复 200，验证备用切换和恢复次数。
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
@@ -178,7 +194,7 @@ cargo test --locked -p ferrumgate --test gateway backends::selects_weighted_back
 
 1. C1 WebSocket 已接入路由开关和双向流式转发。当前测试覆盖握手校验、子协议、普通拒绝响应、两跳 TLS、连接名额、寿命和停机。
 2. C2 HTTP/2 和 h2c 已接入入口 ALPN、独立上游池、流控和 authority 校验。gRPC 验证双向流、客户端取消及 trailers。
-3. C3 已接入加权后端池、备用切换和被动冷却。主动探测采用独立并发预算与超时，需验证探测抖动、失败阈值和恢复。自动重试限制在能证明尚未写出请求的情形。
+3. C3 已接入加权后端池、备用切换和被动冷却。主动 HTTP/TCP 探测已验证失败阈值、备用和恢复。自动重试限制在能证明尚未写出请求的情形。
 4. 重定向目标由站点配置生成。静态文件使用明确根目录，验证符号链接、目录索引、HEAD、Range、路径编码和跨平台行为。SSE、WebDAV、大文件等依赖长时连接的场景需要独立的上传与响应超时策略。
 
 ### D 证书签发与续期
@@ -254,4 +270,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。C1 在 macOS arm64 上通过 workspace Clippy、5 项 Rust 单测、release 构建和 12 项 Rust 端到端测试。新增场景覆盖两跳握手校验、WebSocket over TLS、子协议、路由关闭后保留既有会话，以及连接名额、寿命和停机。
 - C2 在 macOS arm64 通过 3 项独立 HTTP/2 端到端用例，覆盖两条并行 gRPC 流、双向数据、取消传播、请求与响应 trailers、TLS 上游、WebSocket 回落及 HTTP/1.1 普通后端。
 - C3 在 macOS arm64 通过 workspace Clippy、6 项 Rust 单测、release 构建与 17 项 Rust 端到端测试。新增场景验证 2:1 权重、三次连接失败后的备用切换、冷却期边界及配置拒绝。
-- 下一切片为主动健康检查。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
+- 已接入主动 HTTP/TCP 健康检查。后续 Web 服务切片包含本地站点响应与静态文件。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。

@@ -61,3 +61,85 @@ async fn rejects_invalid_backend_pools() -> Result<()> {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn active_http_checks_fail_over_and_recover_after_the_configured_streak() -> Result<()> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering::Relaxed},
+    };
+
+    let is_healthy = Arc::new(AtomicBool::new(false));
+    let passed = Arc::new(tokio::sync::Notify::new());
+    let primary = Origin::spawn({
+        let (is_healthy, passed) = (is_healthy.clone(), passed.clone());
+        move |socket| {
+            let (is_healthy, passed) = (is_healthy.clone(), passed.clone());
+            async move {
+                serve_http(socket, move |request| {
+                    let passed = passed.clone();
+                    let healthy = is_healthy.load(Relaxed);
+                    async move {
+                        if request.uri().path() == "/ready" {
+                            assert_eq!(request.uri().query(), Some("probe=1"));
+                            assert!(!request.headers().contains_key("x-forwarded-for"));
+                            if healthy {
+                                passed.notify_one();
+                                hyper::Response::builder()
+                                    .status(204)
+                                    .body(full(""))
+                                    .unwrap()
+                            } else {
+                                hyper::Response::builder()
+                                    .status(503)
+                                    .body(full(""))
+                                    .unwrap()
+                            }
+                        } else {
+                            response("primary")
+                        }
+                    }
+                })
+                .await
+            }
+        }
+    })
+    .await?;
+    let standby = Origin::http("standby").await?;
+    let routes = "\n[[routes]]\nhost = \"app.test\"\n".to_owned()
+        + "[routes.health]\npath = \"/ready?probe=1\"\ninterval_secs = 1\nfails = 1\npasses = 2\n"
+        + &backend(primary.addr.port(), 1, false)
+        + &backend(standby.addr.port(), 1, true);
+    let mut gateway = Gateway::spawn(&config(&routes, "", "")).await?;
+    gateway.wait_log("upstream unavailable").await?;
+    let mut client = http_client(connect(gateway.addr).await?).await?;
+    assert_eq!(get(&mut client, "app.test", "/").await?.1, "standby");
+
+    is_healthy.store(true, Relaxed);
+    tokio::time::timeout(DEADLINE, passed.notified()).await?;
+    assert_eq!(get(&mut client, "app.test", "/").await?.1, "standby");
+    gateway.wait_log("upstream recovered").await?;
+    assert_eq!(get(&mut client, "app.test", "/").await?.1, "primary");
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_tcp_check_can_disable_a_single_backend() -> Result<()> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let address = listener.local_addr()?;
+    drop(listener);
+    let routes = route("app.test", address, "/")
+        + "[routes.health]\nmode = \"tcp\"\ninterval_secs = 1\ntimeout_secs = 1\nfails = 1\n";
+    let mut gateway = Gateway::spawn(&config(&routes, "", "")).await?;
+    gateway.wait_log("upstream unavailable").await?;
+    let mut client = http_client(connect(gateway.addr).await?).await?;
+    assert_eq!(get(&mut client, "app.test", "/").await?.0, 503);
+    assert!(
+        !Gateway::check(
+            gateway.dir.path(),
+            &config(&(routes + "path = \"/ignored\"\n"), "", "")
+        )
+        .await?
+    );
+    Ok(())
+}

@@ -45,6 +45,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     let settings = config.settings.clone();
     let state = Arc::new(ArcSwap::from_pointee(Generation::new(config)));
     let (drain, _) = watch::channel(false);
+    let (publications, mut generations) = watch::channel(state.load_full());
     let mut connections = JoinSet::new();
     let interrupt = tokio::signal::ctrl_c();
     tokio::pin!(interrupt);
@@ -72,7 +73,9 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             let candidate = async {
                 let next = config::load(&path).await?;
                 anyhow::ensure!(next.settings == settings, "server settings require restart");
-                state.store(Arc::new(Generation::new(next)));
+                let next = Arc::new(Generation::new(next));
+                state.store(next.clone());
+                publications.send_replace(next);
                 Ok::<_, anyhow::Error>(())
             };
             match candidate.await {
@@ -87,6 +90,20 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     let listener = TcpListener::bind(settings.listen)
         .await
         .context("bind business listener")?;
+    let mut health = JoinSet::new();
+    health.spawn(async move {
+        loop {
+            let current = generations.borrow_and_update().clone();
+            tokio::select! {
+                _ = current.proxy.monitor_health() => {
+                    if generations.changed().await.is_err() { break; }
+                }
+                next = generations.changed() => {
+                    if next.is_err() { break; }
+                }
+            }
+        }
+    });
     tracing::info!(listen = %listener.local_addr()?, tls = settings.tls, "gateway ready");
     let mut http = http1::Builder::new();
     http.timer(TokioTimer::new())
@@ -160,6 +177,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
 
     drop(listener);
     drain.send_replace(true);
+    health.shutdown().await;
     tracing::info!("gateway draining connections");
     if timeout(milliseconds(settings.shutdown_timeout_ms), async {
         while connections.join_next().await.is_some() {}

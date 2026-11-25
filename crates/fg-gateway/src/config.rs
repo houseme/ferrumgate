@@ -13,6 +13,7 @@ use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
     backend::{BackendPool, RawBackend},
+    health::{HealthCheck, RawHealthCheck},
     tls::{self, CertificateFiles, Tls},
 };
 
@@ -74,6 +75,7 @@ struct RawRoute {
     websocket: bool,
     #[serde(default)]
     upstream_h2c: bool,
+    health: Option<RawHealthCheck>,
 }
 
 pub(crate) struct Config {
@@ -91,9 +93,16 @@ pub(crate) struct Route {
     pub backends: BackendPool,
     pub websocket: bool,
     pub upstream_h2c: bool,
+    pub health: Option<HealthCheck>,
 }
 
 impl Routes {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Route)> {
+        self.by_host
+            .iter()
+            .flat_map(|(host, routes)| routes.iter().map(|route| (host.as_str(), route)))
+    }
+
     pub fn find(&self, host: &str, path: &str) -> Option<&Route> {
         self.by_host.get(host)?.iter().find(|route| {
             route.prefix == "/"
@@ -182,6 +191,11 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
                     .is_ok_and(|value| value.path() == prefix),
             "invalid routes[{index}].path_prefix"
         );
+        let health = route
+            .health
+            .map(HealthCheck::compile)
+            .transpose()
+            .with_context(|| format!("invalid routes[{index}].health"))?;
         let backends = BackendPool::compile(route.upstream, route.backends, route.upstream_h2c)
             .with_context(|| format!("invalid routes[{index}] backend pool"))?;
         backend_count += backends.len();
@@ -199,6 +213,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
             backends,
             websocket: route.websocket,
             upstream_h2c: route.upstream_h2c,
+            health,
         });
     }
     for list in by_host.values_mut() {

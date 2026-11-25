@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    sync::atomic::{AtomicU64, Ordering::Relaxed},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
     time::Instant,
 };
 
@@ -39,6 +39,7 @@ pub(crate) struct Backend {
     weight: u16,
     // Values below FAILURE_THRESHOLD count failures. Other values are deadlines.
     health: AtomicU64,
+    active_down: AtomicBool,
 }
 
 pub(crate) struct BackendPool {
@@ -116,6 +117,7 @@ impl BackendPool {
                 host,
                 weight: raw.weight,
                 health: AtomicU64::new(0),
+                active_down: AtomicBool::new(false),
             };
             if raw.backup {
                 backup.push(backend);
@@ -136,11 +138,15 @@ impl BackendPool {
         self.primary.len() + self.backup.len()
     }
 
-    pub fn select(&self) -> Option<&Backend> {
-        if self.len() == 1 {
+    pub fn iter(&self) -> impl Iterator<Item = &Backend> {
+        self.primary.iter().chain(&self.backup)
+    }
+
+    pub fn select(&self, active: bool) -> Option<&Backend> {
+        if !active && self.len() == 1 {
             return self.primary.first();
         }
-        let now = self.now_ms();
+        let now = if active { 0 } else { self.now_ms() };
         self.select_group(&self.primary, now)
             .or_else(|| self.select_group(&self.backup, now))
     }
@@ -150,7 +156,7 @@ impl BackendPool {
         let mut total = 0u64;
         for (index, backend) in group.iter().enumerate() {
             let health = backend.health.load(Relaxed);
-            if health < FAILURE_THRESHOLD || health <= now {
+            if !backend.active_down.load(Relaxed) && (health < FAILURE_THRESHOLD || health <= now) {
                 eligible |= 1 << index;
                 total += u64::from(backend.weight);
             }
@@ -176,9 +182,15 @@ impl BackendPool {
         })
     }
 
-    pub fn connected(&self, backend: &Backend) {
+    pub fn connected(&self, backend: &Backend, active: bool) {
         if self.len() > 1 {
-            backend.health.store(0, Relaxed);
+            if active {
+                let _ = backend.health.try_update(Relaxed, Relaxed, |value| {
+                    (value < FAILURE_THRESHOLD).then_some(0)
+                });
+            } else {
+                backend.health.store(0, Relaxed);
+            }
         }
     }
 
@@ -194,6 +206,15 @@ impl BackendPool {
 }
 
 impl Backend {
+    pub fn mark_active(&self, healthy: bool) -> bool {
+        if healthy {
+            let was_passively_down = self.health.swap(0, Relaxed) >= FAILURE_THRESHOLD;
+            self.active_down.swap(false, Relaxed) || was_passively_down
+        } else {
+            !self.active_down.swap(true, Relaxed)
+        }
+    }
+
     fn connection_failed(&self, now: u64) {
         let _ = self.health.try_update(Relaxed, Relaxed, |state| {
             if state < FAILURE_THRESHOLD - 1 {
@@ -231,12 +252,12 @@ mod tests {
             pool.select_group(&pool.primary, now + COOLDOWN_MS - 1)
                 .is_none()
         );
-        assert_eq!(pool.select().unwrap().authority.port_u16(), Some(8002));
+        assert_eq!(pool.select(false).unwrap().authority.port_u16(), Some(8002));
         assert!(
             pool.select_group(&pool.primary, now + COOLDOWN_MS)
                 .is_some()
         );
-        pool.connected(primary);
-        assert_eq!(pool.select().unwrap().authority.port_u16(), Some(8001));
+        pool.connected(primary, false);
+        assert_eq!(pool.select(false).unwrap().authority.port_u16(), Some(8001));
     }
 }

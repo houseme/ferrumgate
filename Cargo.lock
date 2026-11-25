@@ -350,6 +350,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "base64",
+ "futures-util",
  "http-body-util",
  "hyper",
  "hyper-rustls",

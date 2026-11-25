@@ -29,3 +29,5 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 根包 `ferrumgate` 生成 `fgate`，`crates/fg-gateway` 负责数据面。每个功能模块单独提交，同时更新本页的能力说明和相应验证记录。[架构设计](docs/DESIGN.md) · [贡献规范](AGENT.md)
 
 在根目录运行 `cargo test --workspace --locked`，可执行 Rust 单元测试和真实回环端到端测试。
+
+为代理路由添加 `[routes.health]` 可开启 HTTP 或 TCP 主动检查，探测按连续失败和成功次数摘除或恢复后端。[健康检查配置](docs/EXECUTION.md#主动健康检查)
