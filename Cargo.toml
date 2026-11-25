@@ -46,3 +46,4 @@ time = "0.3"
 tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+x509-parser = "0.18"

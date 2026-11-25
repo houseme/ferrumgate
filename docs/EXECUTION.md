@@ -140,6 +140,8 @@ hmac_key_file = "secrets/eab.key"
 
 文件包含 CA 提供的 base64url 编码 HMAC 密钥。Unix 上仅运行账户可读，例如 0600。EAB 只在创建账户时使用，账户状态文件保存注册后的凭据。首次注册成功后，可在后续启动配置移除 EAB 表，并沿用原状态目录。
 
+可在 `[acme]` 下设置 `profile = "shortlived"`，前提是 CA 支持该证书档位。更改或移除档位并重启后，已持有证书将被重新签发。具体有效期由 CA 决定。 [Gately 证书档位](https://gately.cn/en/docs/modules/ssl#short-lived-and-ip-address-certificates)
+
 本机测试使用 Pebble 和 pebble-challtestsrv。确保两者在 PATH 上，或通过 `FGATE_PEBBLE`、`FGATE_PEBBLE_DNS` 指定二进制路径。
 
 ```bash
@@ -450,3 +452,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - 本轮 ACME 验证使用本机 Pebble 实际完成两次 HTTP-01 授权、签发及 HTTPS 握手。重启复用了账户与未过续期窗口的证书，临近到期的测试证书自动替换。公开 staging CA 与 DNS-01 分开验收。
 - EAB 已通过要求绑定的本机 Pebble。首次注册并签发后，测试移除了 EAB 文件和配置，重启仍复用账户并成功续期。
 - Cloudflare DNS-01 通过本机 Pebble 与 HTTPS API 模拟的端到端测试，覆盖通配证书签发、实际 TXT 查询、历史未确认记录清理、删除失败后的重启恢复，以及保留外部 TXT。公开 CA 和真实 Cloudflare 托管区分开验收。
+- 证书档位通过本机 Pebble 验证。标准证书在档位变化时被重新签发为约六天的证书，保持档位重启后复用该证书。

@@ -52,6 +52,7 @@ const CHALLENGE_PATH: &str = "/.well-known/acme-challenge/";
 const STAGING_DIRECTORY: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 const ACCOUNT_FILE: &str = "account.json";
 const IDENTITY_FILE: &str = "identity.pem";
+const PROFILE_MARKER: &str = "# ferrumgate-acme-profile=";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -65,6 +66,7 @@ pub(crate) struct RawAcme {
     ca_file: Option<PathBuf>,
     challenge_listen: Option<SocketAddr>,
     renew_before_hours: Option<u32>,
+    profile: Option<String>,
     eab: Option<ExternalBinding>,
     dns01: Option<RawDns01>,
 }
@@ -85,6 +87,7 @@ pub(crate) struct AcmeConfig {
     directory: String,
     pub ca_file: Option<PathBuf>,
     renew_before_hours: u32,
+    profile: Option<String>,
     eab: Option<ExternalBinding>,
     dns01: Option<Dns01>,
 }
@@ -170,6 +173,16 @@ impl AcmeConfig {
             "ACME directory requires a valid HTTPS URL"
         );
         let renew_before_hours = raw.renew_before_hours.unwrap_or(720);
+        if let Some(profile) = &raw.profile {
+            ensure!(
+                (1..=64).contains(&profile.len())
+                    && profile
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'-' | b'_' | b'.')),
+                "invalid ACME profile name"
+            );
+        }
         ensure!(
             (1..=720).contains(&renew_before_hours),
             "ACME renew_before_hours must be in 1..=720"
@@ -246,6 +259,7 @@ impl AcmeConfig {
             directory,
             ca_file,
             renew_before_hours,
+            profile: raw.profile,
             eab,
         })
     }
@@ -277,7 +291,11 @@ impl AcmeConfig {
             Some(bytes) => match self.parse_identity(&bytes) {
                 Ok((key, renew_at)) => {
                     managed.certificate.store(Some(Arc::new(key)));
-                    renew_at
+                    if stored_profile(&bytes) == self.profile.as_deref() {
+                        renew_at
+                    } else {
+                        0
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, "stored ACME identity rejected");
@@ -385,7 +403,19 @@ impl AcmeConfig {
             None => None,
         };
         let names: Vec<_> = self.domains.iter().cloned().map(Identifier::Dns).collect();
-        let mut order = account.new_order(&NewOrder::new(&names)).await?;
+        let request = NewOrder::new(&names);
+        let request = if let Some(profile) = &self.profile {
+            request.profile(profile)
+        } else {
+            request
+        };
+        let mut order = account.new_order(&request).await?;
+        if let Some(profile) = &self.profile {
+            ensure!(
+                order.state().profile.as_deref() == Some(profile.as_str()),
+                "ACME order did not confirm the configured profile"
+            );
+        }
         let challenges = OrderChallenges(managed);
         let mut authorizations = order.authorizations();
         while let Some(auth) = authorizations.next().await {
@@ -436,7 +466,10 @@ impl AcmeConfig {
         drop(challenges);
         let key = order.finalize().await?;
         let chain = order.poll_certificate(&policy).await?;
-        let bundle = format!("{}\n{}", chain.trim_end(), key);
+        let bundle = match self.profile.as_deref() {
+            Some(profile) => format!("{PROFILE_MARKER}{profile}\n{}\n{key}", chain.trim_end()),
+            None => format!("{}\n{key}", chain.trim_end()),
+        };
         let (certificate, renew_at) = self.parse_identity(bundle.as_bytes())?;
         persist_private(&self.state_dir, IDENTITY_FILE, lock, bundle.into_bytes()).await?;
         managed.certificate.store(Some(Arc::new(certificate)));
@@ -545,6 +578,11 @@ pub(crate) fn unix_now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn stored_profile(bytes: &[u8]) -> Option<&str> {
+    let line = bytes.split(|byte| *byte == b'\n').next()?;
+    std::str::from_utf8(line.strip_prefix(PROFILE_MARKER.as_bytes())?).ok()
 }
 
 fn valid_token(token: &str) -> bool {

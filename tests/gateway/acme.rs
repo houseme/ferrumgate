@@ -46,6 +46,7 @@ challenge_listen = "127.0.0.1:0"
         valid.replace("accept_terms = true", "accept_terms = false"),
         valid.replace("127.0.0.1:0", "127.0.0.1:8080"),
         format!("{valid}\ndirectory = \"http://ca.test/directory\"\n"),
+        format!("{valid}\nprofile = \"invalid name\"\n"),
     ] {
         let text = config(&routes, "tls = true", &rejected).replace(
             "\nlisten = \"127.0.0.1:0\"",
@@ -60,16 +61,22 @@ challenge_listen = "127.0.0.1:0"
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_validates_http01_issues_restores_and_renews() -> Result<()> {
-    pebble_lifecycle(false).await
+    pebble_lifecycle(false, false).await
 }
 
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_requires_eab_then_reuses_the_account() -> Result<()> {
-    pebble_lifecycle(true).await
+    pebble_lifecycle(true, false).await
 }
 
-async fn pebble_lifecycle(eab: bool) -> Result<()> {
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_switches_from_default_to_short_lived_profile() -> Result<()> {
+    pebble_lifecycle(false, true).await
+}
+
+async fn pebble_lifecycle(eab: bool, switch_profile: bool) -> Result<()> {
     let Pebble {
         files,
         api,
@@ -145,12 +152,33 @@ challenge_listen = "{challenge}"
     );
     restored.signal("-TERM").await?;
     restored.wait_exit().await?;
-    install_near_expiry_fixture(&state.join("identity.pem"))?;
+    let renewed_settings = if switch_profile {
+        settings.replacen("\n[acme]\n", "\n[acme]\nprofile = \"shortlived\"\n", 1)
+    } else {
+        install_near_expiry_fixture(&state.join("identity.pem"))?;
+        settings
+    };
 
-    let mut renewed = Gateway::spawn(&settings).await?;
+    let mut renewed = Gateway::spawn(&renewed_settings).await?;
     renewed.wait_log("ACME certificate installed").await?;
-    assert_ne!(presented_certificate(renewed.addr, root).await?, initial);
+    let updated = presented_certificate(renewed.addr, root.clone()).await?;
+    assert_ne!(updated, initial);
     assert_eq!(std::fs::read(state.join("account.json"))?, account);
+    if switch_profile {
+        use x509_parser::prelude::{FromDer, X509Certificate};
+        let (_, leaf) = X509Certificate::from_der(updated.as_ref())
+            .map_err(|_| anyhow::anyhow!("read short-lived certificate"))?;
+        let lifetime =
+            leaf.validity().not_after.timestamp() - leaf.validity().not_before.timestamp();
+        assert!(
+            lifetime.abs_diff(6 * 24 * 3600) <= 2,
+            "expected a six-day certificate, got {lifetime} seconds"
+        );
+        renewed.signal("-TERM").await?;
+        renewed.wait_exit().await?;
+        let gateway = Gateway::spawn(&renewed_settings).await?;
+        assert_eq!(presented_certificate(gateway.addr, root).await?, updated);
+    }
     Ok(())
 }
 
@@ -209,7 +237,11 @@ async fn pebble(eab: bool) -> Result<Pebble> {
         "certificate": "{}",
         "privateKey": "{}",
         "httpPort": {},
-        "tlsPort": 5001{eab_registration}
+        "tlsPort": 5001,
+        "profiles": {{
+            "default": {{"description":"standard", "validityPeriod":7776000}},
+            "shortlived": {{"description":"short-lived", "validityPeriod":518400}}
+        }}{eab_registration}
     }}}}"#,
             files.path().join("api.pem").display(),
             files.path().join("api.key").display(),
