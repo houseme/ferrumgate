@@ -4,6 +4,7 @@
 
 mod backend;
 mod config;
+mod domains;
 mod health;
 mod proxy;
 mod server;

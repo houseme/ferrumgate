@@ -405,6 +405,7 @@ dependencies = [
  "toml",
  "tracing",
  "webpki-roots",
+ "x509-parser",
 ]
 
 [[package]]

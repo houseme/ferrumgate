@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     net::IpAddr,
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,11 +10,12 @@ use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
     crypto::ring,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
-    server::ResolvesServerCertUsingSni,
+    server::{ClientHello, ResolvesServerCert, ResolvesServerCertUsingSni},
     sign::CertifiedKey,
 };
 use serde::Deserialize;
 use tokio_rustls::TlsAcceptor;
+use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
 use crate::config::{canonical_host, read_file};
 
@@ -31,6 +32,22 @@ pub(crate) struct Tls {
     pub client: ClientConfig,
 }
 
+#[derive(Debug)]
+struct Resolver {
+    exact: ResolvesServerCertUsingSni,
+    wildcard: HashMap<String, Arc<CertifiedKey>>,
+}
+
+impl ResolvesServerCert for Resolver {
+    fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let wildcard = hello
+            .server_name()
+            .and_then(|name| name.split_once('.'))
+            .and_then(|(_, suffix)| self.wildcard.get(suffix));
+        self.exact.resolve(hello).or_else(|| wildcard.cloned())
+    }
+}
+
 pub(crate) async fn load<'a>(
     dir: &Path,
     enabled: bool,
@@ -44,14 +61,23 @@ pub(crate) async fn load<'a>(
     );
     let provider = Arc::new(ring::default_provider());
     let server = if enabled {
-        let mut resolver = ResolvesServerCertUsingSni::new();
+        let mut resolver = Resolver {
+            exact: ResolvesServerCertUsingSni::new(),
+            wildcard: HashMap::new(),
+        };
         let mut names = HashSet::new();
         for (index, entry) in certificates.into_iter().enumerate() {
             let load = async {
-                let name = canonical_host(&entry.host)
+                let wildcard = entry.host.strip_prefix("*.");
+                let domain = canonical_host(wildcard.unwrap_or(&entry.host))
                     .filter(|name| !name.starts_with('[') && name.parse::<IpAddr>().is_err())
-                    .context("expected an exact DNS name")?;
-                ensure!(names.insert(name.to_string()), "duplicate certificate host");
+                    .context("expected a DNS name or *.suffix")?;
+                let name = if wildcard.is_some() {
+                    format!("*.{domain}")
+                } else {
+                    domain.to_string()
+                };
+                ensure!(names.insert(name.clone()), "duplicate certificate host");
                 let chain = read_certificates(&dir.join(entry.cert_file)).await?;
                 let key_bytes = read_file(&dir.join(entry.key_file))
                     .await
@@ -66,17 +92,36 @@ pub(crate) async fn load<'a>(
                     .context("could not load certificate and key")?;
                 key.keys_match()
                     .context("verify certificate and private key match")?;
-                resolver
-                    .add(&name, key)
-                    .context("verify certificate DNS name")?;
+                if wildcard.is_some() {
+                    let (_, leaf) = X509Certificate::from_der(key.end_entity_cert()?.as_ref())
+                        .map_err(|_| anyhow::anyhow!("invalid leaf certificate"))?;
+                    let san = leaf
+                        .subject_alternative_name()
+                        .map_err(|_| anyhow::anyhow!("invalid certificate SAN"))?
+                        .context("wildcard certificate needs SAN")?;
+                    ensure!(san.value.general_names.iter().any(|entry| matches!(entry, GeneralName::DNSName(value) if value.eq_ignore_ascii_case(&name))),
+                        "certificate SAN does not include the wildcard name");
+                    resolver.wildcard.insert(domain.into_owned(), Arc::new(key));
+                } else {
+                    resolver
+                        .exact
+                        .add(&name, key)
+                        .context("verify certificate DNS name")?;
+                }
                 Ok::<_, anyhow::Error>(())
             };
             load.await
                 .with_context(|| format!("invalid certificates[{index}]"))?;
         }
         ensure!(
-            route_hosts.into_iter().all(|host| names.contains(host)),
-            "every HTTPS route host requires a certificate entry"
+            route_hosts.into_iter().all(|host| {
+                host.contains('*')
+                    || names.contains(host)
+                    || host
+                        .split_once('.')
+                        .is_some_and(|(_, suffix)| resolver.wildcard.contains_key(suffix))
+            }),
+            "every exact HTTPS route host requires a covering certificate entry"
         );
         let mut server = ServerConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()?

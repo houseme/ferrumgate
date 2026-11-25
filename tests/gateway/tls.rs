@@ -96,3 +96,50 @@ async fn rotates_leaf_and_rejects_mismatched_key() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn selects_wildcard_certificate_and_prefers_exact_sni() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let ca = Ca::new()?;
+    let wildcard = ca.identity("*.example.test")?;
+    let exact = ca.identity("app.example.test")?;
+    wildcard.write(dir.path(), "wildcard")?;
+    exact.write(dir.path(), "exact")?;
+    let backend = Origin::http("covered").await?;
+    let routes = route("*.example.test", backend.addr, "/")
+        + &route("strict.example.test", backend.addr, "/")
+        + &certificate("*.example.test", "wildcard")
+        + &certificate("app.example.test", "exact");
+    let settings = config(&routes, "tls = true", "");
+    assert!(
+        !Gateway::check(
+            dir.path(),
+            &settings
+                .replace("wildcard.pem", "exact.pem")
+                .replace("wildcard.key", "exact.key")
+        )
+        .await?
+    );
+    let gateway = Gateway::with_dir(&settings, dir).await?;
+    for (host, certificate) in [
+        ("app.example.test", &exact.cert),
+        ("other.example.test", &wildcard.cert),
+        ("strict.example.test", &wildcard.cert),
+    ] {
+        let stream = ca.connect(gateway.addr, host, b"http/1.1").await?;
+        assert_eq!(
+            stream.get_ref().1.peer_certificates().unwrap()[0],
+            *certificate.der()
+        );
+        assert_eq!(
+            get(&mut http_client(stream).await?, host, "/").await?.1,
+            "covered"
+        );
+    }
+    assert!(
+        ca.connect(gateway.addr, "two.deep.example.test", b"http/1.1")
+            .await
+            .is_err()
+    );
+    Ok(())
+}

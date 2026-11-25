@@ -245,3 +245,33 @@ async fn confines_static_files_to_the_published_root() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn chooses_exact_hosts_then_the_longest_wildcard_then_fallback() -> Result<()> {
+    let mut routes = String::new();
+    for (pattern, label) in [
+        ("*", "fallback"),
+        ("*.example.test", "suffix"),
+        ("api-*.example.test", "specific"),
+        ("store.*.example.test", "middle"),
+        ("tools.*", "leading"),
+        ("api-fixed.example.test", "exact"),
+    ] {
+        routes.push_str(&format!("\n[[routes]]\nhost = \"{pattern}\"\n[routes.response]\ntype = \"text\"\nbody = \"{label}\"\n"));
+    }
+    let gateway = Gateway::spawn(&config(&routes, "", "")).await?;
+    let mut client = http_client(connect(gateway.addr).await?).await?;
+    for (host, expected) in [
+        ("api-fixed.example.test", "exact"),
+        ("API-preview.example.test.", "specific"),
+        ("api.a.example.test", "suffix"),
+        ("store.one.example.test", "middle"),
+        ("store.one.two.example.test", "suffix"),
+        ("tools.home.lan", "leading"),
+        ("example.test", "fallback"),
+        ("other.test", "fallback"),
+    ] {
+        assert_eq!(get(&mut client, host, "/").await?.1, expected, "{host}");
+    }
+    Ok(())
+}

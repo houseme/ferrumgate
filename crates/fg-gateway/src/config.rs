@@ -13,6 +13,7 @@ use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
     backend::{BackendPool, RawBackend},
+    domains,
     health::{HealthCheck, RawHealthCheck},
     site::{RawResponse, SiteResponse},
     tls::{self, CertificateFiles, Tls},
@@ -88,6 +89,7 @@ pub(crate) struct Config {
 
 pub(crate) struct Routes {
     by_host: HashMap<String, Vec<Route>>,
+    wildcards: Vec<String>,
 }
 
 pub(crate) struct Route {
@@ -115,7 +117,14 @@ impl Routes {
     }
 
     pub fn find(&self, host: &str, path: &str) -> Option<&Route> {
-        self.by_host.get(host)?.iter().find(|route| {
+        let routes = self.by_host.get(host).or_else(|| {
+            let matching = self
+                .wildcards
+                .iter()
+                .find(|pattern| domains::matches(pattern, host))?;
+            self.by_host.get(matching)
+        })?;
+        routes.iter().find(|route| {
             route.prefix == "/"
                 || path
                     .strip_prefix(&route.prefix)
@@ -196,10 +205,13 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         .collect();
     let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();
     let mut backend_count = 0;
+    let mut wildcards = Vec::new();
     for (index, route) in raw.routes.into_iter().enumerate() {
-        let host = canonical_host(&route.host)
-            .with_context(|| format!("invalid routes[{index}].host"))?
-            .into_owned();
+        let host = domains::normalize(&route.host)
+            .with_context(|| format!("invalid routes[{index}].host"))?;
+        if host.contains('*') && !by_host.contains_key(&host) {
+            wildcards.push(host.clone());
+        }
         let prefix = route.path_prefix.unwrap_or_else(|| "/".into());
         ensure!(
             prefix.starts_with('/')
@@ -253,6 +265,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     for list in by_host.values_mut() {
         list.sort_unstable_by_key(|route| std::cmp::Reverse(route.prefix.len()));
     }
+    wildcards.sort_by_key(|pattern| std::cmp::Reverse(pattern.len()));
     let tls = tls::load(
         dir,
         settings.tls,
@@ -264,7 +277,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     Ok(Config {
         tls,
         settings,
-        routes: Routes { by_host },
+        routes: Routes { by_host, wildcards },
     })
 }
 

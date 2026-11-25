@@ -220,6 +220,23 @@ not_found = "404.html"
 cargo test --locked -p ferrumgate --test gateway site::
 ```
 
+### 通配域名与证书
+
+`routes[].host` 可使用 `*.example.test`、`api-*.example.test`、`shop.*.example.test`、`tools.*` 或 `*`。优先精确域名，再按通配表达式长度和配置顺序选择域名规则。选定域名后再按最长路径前缀路由。
+
+```toml
+[[routes]]
+host = "*.example.test"
+upstream = "http://127.0.0.1:9000"
+
+[[certificates]]
+host = "*.example.test"
+cert_file = "tls/wildcard.pem"
+key_file = "tls/wildcard.key"
+```
+
+示例要求 TLS 监听已开启。通配路由可以匹配多层子域；通配证书覆盖一个子域标签，更深的域名仍需匹配的证书。证书 SAN 必须包含配置的通配名称。精确证书优先。 [Gately 域名匹配](https://gately.cn/en/docs/modules/web#structure-listeners-sites-and-the-default-site)
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |

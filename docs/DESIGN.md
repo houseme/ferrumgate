@@ -47,14 +47,14 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 | `server.response_header_timeout_ms` | 30000 | 1–300000；覆盖解析 DNS、连接、TLS、上传等待和上游响应头 |
 | `server.connection_lifetime_ms` | 300000 | 1–86400000；从接受连接起计时 |
 | `server.shutdown_timeout_ms` | 10000 | 1–300000 |
-| `routes[].host` | 必填 | 精确匹配 ASCII DNS 名或 IP，无端口；DNS 大小写不敏感并容许一个末尾根点 |
+| `routes[].host` | 必填 | 精确 ASCII DNS 名或 IP，或含一个 `*` 的 DNS 规则，均无端口；DNS 大小写不敏感并容许一个末尾根点 |
 | `routes[].path_prefix` | `/` | 以斜杠开头；除根路径外无末尾斜杠，无查询 |
 | `routes[].upstream_h2c` | `false` | 为 `http://` 上游启用 HTTP/2 prior knowledge |
 | `routes[].websocket` | `false` | 为匹配该条路由的请求允许 HTTP/1.1 WebSocket 升级 |
 | `routes[].backends` | 可选 | 配置 1–32 个后端，与 `upstream` 二选一 |
 | `routes[].upstream` | 单后端形态必填 | `http://host[:port]` 或 `https://host[:port]`，可选末尾 `/`；无认证信息、路径前缀及查询 |
 
-至少配置一条路由。重复的规范化 Host 与路径组合在校验时报错。HTTP Host 可带端口，路由匹配使用其中的主机名。路径采用最长段边界前缀，`/api` 匹配 `/api` 和 `/api/v1`。匹配读取原始 URI 路径，转发保留路径与查询的编码。下游可接受的 URI 范围与上游归一化方式应一并考虑。若未来同一站点以路径隔离权限，必须在引入策略时收紧该契约。
+至少配置一条路由。域名优先级为精确匹配、较长通配规则、`*`；通配同长时以配置顺序为准。重复的规范化 Host 与路径组合在校验时报错。HTTP Host 可带端口，路由匹配使用其中的主机名。路径采用最长段边界前缀，`/api` 匹配 `/api` 和 `/api/v1`。匹配读取原始 URI 路径，转发保留路径与查询的编码。下游可接受的 URI 范围与上游归一化方式应一并考虑。若未来同一站点以路径隔离权限，必须在引入策略时收紧该契约。
 
 ### HTTP 转发
 
@@ -70,7 +70,7 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 ## 4. 阶段 B 手动 TLS
 
-`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。每个 HTTPS 路由 DNS 名都需要一条 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。未知或缺失的 SNI 会在握手时被拒绝。TLS 下的 Host 需与 SNI 一致，否则返回 421。
+`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。精确 HTTPS 路由须有覆盖其域名的 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。先选精确 SNI 证书，随后尝试覆盖单个子域标签的通配证书。通配证书的 SAN 必须包含配置的名称。未知或缺失的 SNI 会在握手时被拒绝。TLS 下的 Host 需与 SNI 一致，否则返回 421。
 
 外连 HTTPS 验证证书链和目标名称。默认信任 `webpki-roots` 的根证书集。根字段 `upstream_ca_file` 可追加私有 CA，添加后对当前所有 HTTPS 上游生效。指定的 TLS 文件相对配置文件目录解析，每个文件最多 1 MiB。Unix 热加载以一代提交路由、证书和上游信任配置。使用带版本的证书和密钥文件名，再替换 TOML。TLS 配置示例和轮换命令见 [EXECUTION.md](EXECUTION.md)。
 
