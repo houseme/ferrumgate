@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::Arc,
@@ -10,8 +11,11 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hickory_resolver::{
     TokioResolver,
     config::{NameServerConfig, ResolverConfig},
-    net::runtime::TokioRuntimeProvider,
-    proto::rr::RData,
+    net::{DnsError, NetError, runtime::TokioRuntimeProvider},
+    proto::{
+        op::ResponseCode,
+        rr::{RData, RecordType},
+    },
 };
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
@@ -48,6 +52,7 @@ pub(crate) struct RawDns01 {
     api_base: Option<String>,
     api_ca_file: Option<PathBuf>,
     propagation_timeout_secs: Option<u32>,
+    follow_cname: Option<bool>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -59,6 +64,7 @@ pub(crate) struct Dns01 {
     pub token_file: PathBuf,
     resolver: SocketAddr,
     propagation_timeout: Duration,
+    follow_cname: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,10 +120,12 @@ impl Dns01 {
             .filter(|zone| zone.contains('.') && zone.parse::<IpAddr>().is_err())
             .context("DNS-01 zone must be a DNS name")?
             .into_owned();
+        let follow_cname = raw.follow_cname.unwrap_or(true);
         ensure!(
-            domains
-                .iter()
-                .all(|domain| in_zone(domain.strip_prefix("*.").unwrap_or(domain), &zone)),
+            follow_cname
+                || domains
+                    .iter()
+                    .all(|domain| in_zone(domain.strip_prefix("*.").unwrap_or(domain), &zone)),
             "DNS-01 domains must be within the configured zone"
         );
         ensure!(
@@ -155,6 +163,7 @@ impl Dns01 {
             token_file: dir.join(raw.token_file),
             resolver: raw.resolver,
             propagation_timeout: Duration::from_secs(u64::from(propagation_timeout)),
+            follow_cname,
         };
         cfg.authorization().await?;
         cfg.token_file = tokio::fs::canonicalize(cfg.token_file)
@@ -209,11 +218,8 @@ impl Dns01 {
         let client = self.client().await?;
         while let Some(record) = journal.records.last() {
             ensure!(
-                record
-                    .name
-                    .strip_prefix("_acme-challenge.")
-                    .is_some_and(|name| in_zone(name, &self.zone))
-                    && safe_piece(&record.name)
+                valid_owner(&record.name)
+                    && in_zone(&record.name, &self.zone)
                     && record
                         .comment
                         .strip_prefix("ferrumgate-")
@@ -284,9 +290,15 @@ impl Dns01 {
 impl OrderDns<'_> {
     pub async fn provision(&mut self, domain: &str, content: String) -> Result<()> {
         let domain = domain.strip_prefix("*.").unwrap_or(domain);
-        let name = format!("_acme-challenge.{domain}");
+        let source = format!("_acme-challenge.{domain}");
+        ensure!(valid_owner(&source), "invalid DNS-01 challenge owner");
+        let name = if self.config.follow_cname {
+            delegated_owner(&self.resolver, &source).await?
+        } else {
+            source.clone()
+        };
         ensure!(
-            in_zone(domain, &self.config.zone) && name.len() <= 253,
+            in_zone(&name, &self.config.zone),
             "DNS-01 challenge name is outside the zone"
         );
         let mut random = [0; 16];
@@ -311,18 +323,28 @@ impl OrderDns<'_> {
         record.record_id = Some(created.id);
         self.save().await?;
         let record = self.journal.records.last().expect("saved journal record");
-        let fqdn = format!("{}.", record.name);
+        let fqdn = format!("{source}.");
         timeout(self.config.propagation_timeout, async {
             loop {
                 if let Ok(reply) = self.resolver.txt_lookup(fqdn.as_str()).await
-                    && reply.answers().iter().any(|answer| match &answer.data {
-                        RData::TXT(value) => value
-                            .txt_data
-                            .iter()
-                            .flat_map(|part| part.iter().copied())
-                            .eq(record.content.bytes()),
-                        _ => false,
-                    })
+                    && reply
+                        .answers()
+                        .iter()
+                        .filter(|answer| {
+                            answer
+                                .name
+                                .to_ascii()
+                                .trim_end_matches('.')
+                                .eq_ignore_ascii_case(&record.name)
+                        })
+                        .any(|answer| match &answer.data {
+                            RData::TXT(value) => value
+                                .txt_data
+                                .iter()
+                                .flat_map(|part| part.iter().copied())
+                                .eq(record.content.bytes()),
+                            _ => false,
+                        })
                 {
                     break;
                 }
@@ -452,6 +474,80 @@ impl Cloudflare {
         .await
         .context("DNS provider request timed out")?
     }
+}
+
+async fn delegated_owner(resolver: &TokioResolver, source: &str) -> Result<String> {
+    let mut owner = source.to_owned();
+    let mut visited = HashSet::from([owner.clone()]);
+    for depth in 0..=8 {
+        let Some(target) = cname(resolver, &owner).await? else {
+            return Ok(owner);
+        };
+        if depth == 0 {
+            let (_, parent) = owner.split_once('.').expect("challenge owner has a parent");
+            let mut random = [0; 4];
+            SystemRandom::new()
+                .fill(&mut random)
+                .map_err(|_| anyhow::anyhow!("generate CNAME probe label"))?;
+            let sibling = format!(
+                "fgate-{}.{parent}",
+                random
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            if cname(resolver, &sibling).await?.as_deref() == Some(target.as_str()) {
+                return Ok(owner);
+            }
+        }
+        ensure!(
+            depth < 8 && visited.insert(target.clone()),
+            "DNS-01 CNAME chain is cyclic or too long"
+        );
+        owner = target;
+    }
+    unreachable!("CNAME chain limit")
+}
+
+async fn cname(resolver: &TokioResolver, owner: &str) -> Result<Option<String>> {
+    let fqdn = format!("{owner}.");
+    let answer = match resolver.lookup(fqdn.as_str(), RecordType::CNAME).await {
+        Ok(answer) => answer,
+        Err(error) if dns_absence(&error) => return Ok(None),
+        Err(error) => return Err(error).context("lookup DNS-01 CNAME"),
+    };
+    let mut names = answer.answers().iter().filter_map(|record| {
+        if let RData::CNAME(name) = &record.data
+            && record
+                .name
+                .to_ascii()
+                .trim_end_matches('.')
+                .eq_ignore_ascii_case(owner)
+        {
+            return Some(name.0.to_ascii().trim_end_matches('.').to_ascii_lowercase());
+        }
+        None
+    });
+    let Some(target) = names.next() else {
+        return Ok(None);
+    };
+    ensure!(
+        names.next().is_none() && valid_owner(&target),
+        "invalid DNS-01 CNAME target"
+    );
+    Ok(Some(target))
+}
+
+fn dns_absence(error: &NetError) -> bool {
+    matches!(error, NetError::Dns(DnsError::NoRecordsFound(result))
+        if matches!(result.response_code, ResponseCode::NoError | ResponseCode::NXDomain))
+}
+
+fn valid_owner(name: &str) -> bool {
+    name.len() <= 253
+        && name.contains('.')
+        && safe_piece(name)
+        && name.split('.').all(|label| (1..=63).contains(&label.len()))
 }
 
 fn same_record(entry: &DnsRecord, pending: &Pending) -> bool {

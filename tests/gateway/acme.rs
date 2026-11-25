@@ -397,6 +397,7 @@ struct CloudflareFixture {
     refuse_delete: AtomicBool,
     retired_new_record: Notify,
     dns_admin: SocketAddr,
+    owner: &'static str,
 }
 
 impl CloudflareFixture {
@@ -414,7 +415,7 @@ impl CloudflareFixture {
                 let bytes = body.collect().await?.to_bytes();
                 let mut record: Value = serde_json::from_slice(&bytes)?;
                 assert_eq!(record["type"], "TXT");
-                assert_eq!(record["name"], DNS_HOST);
+                assert_eq!(record["name"], self.owner);
                 assert!(
                     record["comment"]
                         .as_str()
@@ -425,7 +426,7 @@ impl CloudflareFixture {
                     self.dns_admin,
                     "/set-txt",
                     json!({
-                        "host": format!("{DNS_HOST}."),
+                        "host": format!("{}.", self.owner),
                         "value": record["content"],
                     }),
                 )
@@ -436,7 +437,7 @@ impl CloudflareFixture {
             }
             (Method::GET, "") => {
                 let query = head.uri.query().context("record list query")?;
-                assert!(query.contains(&format!("name.exact={DNS_HOST}")));
+                assert!(query.contains(&format!("name.exact={}", self.owner)));
                 assert!(query.contains(&format!("comment.exact={ORPHAN_TAG}")));
                 Ok(cf_response(
                     200,
@@ -461,7 +462,7 @@ impl CloudflareFixture {
                 dns_admin(
                     self.dns_admin,
                     "/clear-txt",
-                    json!({"host": format!("{DNS_HOST}.")}),
+                    json!({"host": format!("{}.", self.owner)}),
                 )
                 .await?;
                 self.records
@@ -504,18 +505,39 @@ async fn dns_admin(address: SocketAddr, path: &str, payload: Value) -> Result<()
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_dns01_issues_a_wildcard_and_recovers_failed_provider_cleanup() -> Result<()> {
+    pebble_dns01_lifecycle(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_dns01_follows_cross_zone_cname_and_cleans_the_original_target() -> Result<()> {
+    pebble_dns01_lifecycle(true).await
+}
+
+async fn pebble_dns01_lifecycle(delegated: bool) -> Result<()> {
     let pebble = pebble(false).await?;
+    let (zone, owner) = if delegated {
+        dns_admin(
+            pebble.dns_admin,
+            "/set-cname",
+            json!({"host": format!("{DNS_HOST}."), "target": "proof.validation.test."}),
+        )
+        .await?;
+        ("validation.test", "proof.validation.test")
+    } else {
+        ("example.test", DNS_HOST)
+    };
     let ca = Ca::new()?;
     let acceptor = ca.identity("localhost")?.acceptor(b"http/1.1")?;
     let cf_ca = pebble.files.path().join("provider");
     std::fs::create_dir(&cf_ca)?;
     ca.write(&cf_ca)?;
     let foreign = json!({
-        "id": FOREIGN_RECORD, "type": "TXT", "name": DNS_HOST,
+        "id": FOREIGN_RECORD, "type": "TXT", "name": owner,
         "content": "preserved", "comment": "external",
     });
     let orphan = json!({
-        "id": ORPHAN_RECORD, "type": "TXT", "name": DNS_HOST,
+        "id": ORPHAN_RECORD, "type": "TXT", "name": owner,
         "content": "previous-proof", "comment": ORPHAN_TAG,
     });
     let provider = Arc::new(CloudflareFixture {
@@ -523,6 +545,7 @@ async fn pebble_dns01_issues_a_wildcard_and_recovers_failed_provider_cleanup() -
         refuse_delete: AtomicBool::new(true),
         retired_new_record: Notify::new(),
         dns_admin: pebble.dns_admin,
+        owner,
     });
     let cloudflare = Origin::spawn({
         let provider = provider.clone();
@@ -554,7 +577,7 @@ async fn pebble_dns01_issues_a_wildcard_and_recovers_failed_provider_cleanup() -
         &journal,
         json!({
             "zone_id": CF_ZONE, "api_base": api_base,
-            "records": [{"name": DNS_HOST, "content": "previous-proof", "comment": ORPHAN_TAG,
+            "records": [{"name": owner, "content": "previous-proof", "comment": ORPHAN_TAG,
                 "record_id": null, "created_at": 1}],
         })
         .to_string(),
@@ -579,7 +602,7 @@ directory = "https://localhost:{}/dir"
 ca_file = "{}"
 
 [acme.dns01]
-zone = "example.test"
+zone = "{zone}"
 zone_id = "{CF_ZONE}"
 token_file = "{}"
 api_base = "{api_base}"
@@ -595,6 +618,10 @@ propagation_timeout_secs = 10
             pebble.dns
         ),
     );
+    if delegated {
+        let overridden = settings.replace("[acme.dns01]", "[acme.dns01]\nfollow_cname = false");
+        assert!(!Gateway::check(pebble.files.path(), &overridden).await?);
+    }
     let mut gateway = Gateway::spawn(&settings).await?;
     gateway.wait_log("ACME certificate installed").await?;
     let issued = presented_certificate(gateway.addr, pebble.root.clone()).await?;
@@ -611,6 +638,14 @@ propagation_timeout_secs = 10
     gateway.signal("-TERM").await?;
     gateway.wait_exit().await?;
 
+    if delegated {
+        dns_admin(
+            pebble.dns_admin,
+            "/set-cname",
+            json!({"host": format!("{DNS_HOST}."), "target": "moved.validation.test."}),
+        )
+        .await?;
+    }
     let mut restored = Gateway::spawn(&settings).await?;
     assert_eq!(
         presented_certificate(restored.addr, pebble.root.clone()).await?,

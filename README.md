@@ -44,6 +44,6 @@ UDP 可用 `[[udp_forward]]` 按客户端维护独立会话，并配置会话上
 
 自动 HTTPS 支持 ACME HTTP-01、自主续期和在线换证。配置 `[acme]` 后，默认连接 Let's Encrypt staging；生产 CA 可显式指定。[ACME 配置与验证](docs/EXECUTION.md#acme-http-01-与自动续期)
 
-ACME DNS-01 支持 Cloudflare 托管区、通配证书、TXT 传播检查和重启后的记录清理。[DNS-01 配置](docs/EXECUTION.md#acme-dns-01-cloudflare)
+ACME DNS-01 支持 Cloudflare 托管区、CNAME 委托、通配证书、TXT 传播检查和重启后的记录清理。[DNS-01 配置](docs/EXECUTION.md#acme-dns-01-cloudflare)
 
 可通过 `acme.profile` 选择 CA 支持的证书档位，例如 `shortlived`。调整档位后重启会触发重新签发。[证书档位](docs/EXECUTION.md#acme-http-01-与自动续期)

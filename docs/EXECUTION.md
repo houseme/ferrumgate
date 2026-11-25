@@ -163,6 +163,8 @@ propagation_timeout_secs = 120
 
 删除 HTTP-01 专用的 `challenge_listen` 设置。签发验证通过 TXT 记录进行。当前每个 ACME 配置使用一个显式托管区。生产请求默认发送至 Cloudflare HTTPS API。本地测试可通过 `api_base` 和 `api_ca_file` 使用自有 HTTPS 测试端点。
 
+默认跟随 `_acme-challenge` 的 CNAME 委托。在跨区委托时，`zone` 与 `zone_id` 指向 TXT 最终落点所在的 Cloudflare 区域。设置 `follow_cname = false` 后改为在原始名称写入。DNS 查询失败或 CNAME 链有循环时，签发在写入 TXT 前停止。传播检查从原始挑战名称查询，清理以记录首次写入时的名称和 ID 为准。 [Gately DNS-01 验证](https://gately.cn/en/docs/modules/ssl#dns-01-validation)
+
 等待日志 `ACME certificate installed` 后核对预期域名的 HTTPS 证书。在发生 `ACME DNS cleanup will retry` 时，保留原托管区、令牌和 `dns-cleanup.json`，让网关重试清理。授权和记录审计仍可在提供商端确认。
 
 ## 4. 启用 WebSocket
@@ -453,3 +455,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - EAB 已通过要求绑定的本机 Pebble。首次注册并签发后，测试移除了 EAB 文件和配置，重启仍复用账户并成功续期。
 - Cloudflare DNS-01 通过本机 Pebble 与 HTTPS API 模拟的端到端测试，覆盖通配证书签发、实际 TXT 查询、历史未确认记录清理、删除失败后的重启恢复，以及保留外部 TXT。公开 CA 和真实 Cloudflare 托管区分开验收。
 - 证书档位通过本机 Pebble 验证。标准证书在档位变化时被重新签发为约六天的证书，保持档位重启后复用该证书。
+- 本机 Pebble 验证 DNS-01 可经 CNAME 跨区签发。签发后改变 CNAME 再重启，网关依照持久化日志清理原 TXT，而新目标和其他记录保持原样。
