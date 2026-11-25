@@ -98,3 +98,69 @@ async fn rejects_invalid_tcp_targets_and_conflicting_listeners() -> Result<()> {
     assert!(Gateway::check(dir.path(), &config(&rule, "http_enabled = false", "")).await?);
     Ok(())
 }
+
+#[tokio::test]
+async fn sends_proxy_v1_and_v2_before_the_client_payload() -> Result<()> {
+    let capture = Origin::spawn(|mut socket| async move {
+        let mut received = Vec::new();
+        socket.read_to_end(&mut received).await?;
+        socket.write_all(&received).await?;
+        socket.shutdown().await?;
+        Ok(())
+    })
+    .await?;
+
+    for (version, address) in [
+        ("v1", "127.0.0.1:0"),
+        ("v2", "127.0.0.1:0"),
+        ("v2", "[::1]:0"),
+    ] {
+        let rule = forwarding(
+            address,
+            &[capture.addr],
+            &format!("proxy_protocol = \"{version}\""),
+        );
+        let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+        let mut client = connect(gateway.addr).await?;
+        let source = client.local_addr()?;
+        client.write_all(b"application bytes").await?;
+        client.shutdown().await?;
+        let mut received = Vec::new();
+        timeout(DEADLINE, client.read_to_end(&mut received)).await??;
+
+        let header_len = if version == "v1" {
+            let expected = format!(
+                "PROXY TCP4 127.0.0.1 127.0.0.1 {} {}\r\n",
+                source.port(),
+                gateway.addr.port()
+            );
+            assert!(received.starts_with(expected.as_bytes()));
+            expected.len()
+        } else {
+            assert_eq!(&received[..13], b"\r\n\r\n\0\r\nQUIT\n\x21");
+            let ports_at = if source.is_ipv4() {
+                assert_eq!(
+                    &received[13..24],
+                    &[0x11, 0, 12, 127, 0, 0, 1, 127, 0, 0, 1]
+                );
+                24
+            } else {
+                assert_eq!(&received[13..16], &[0x21, 0, 36]);
+                assert_eq!(&received[16..32], &std::net::Ipv6Addr::LOCALHOST.octets());
+                assert_eq!(&received[32..48], &std::net::Ipv6Addr::LOCALHOST.octets());
+                48
+            };
+            assert_eq!(
+                &received[ports_at..ports_at + 2],
+                &source.port().to_be_bytes()
+            );
+            assert_eq!(
+                &received[ports_at + 2..ports_at + 4],
+                &gateway.addr.port().to_be_bytes()
+            );
+            ports_at + 4
+        };
+        assert_eq!(&received[header_len..], b"application bytes");
+    }
+    Ok(())
+}

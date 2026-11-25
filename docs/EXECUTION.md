@@ -364,6 +364,8 @@ connection_lifetime_ms = 300000
 cargo test --locked -p ferrumgate --test gateway tcp::
 ```
 
+TCP 目标支持匹配的 PROXY protocol 时，可在规则内设置 `proxy_protocol = "v1"` 或 `"v2"`。网关在转发应用数据前写入真实 TCP 对端和网关接收地址。启用后，后端需配置为从受信任的网关地址接收该版本。 [Gately 端口转发](https://gately.cn/en/docs/modules/portforward#proxy-protocol) · [PROXY protocol 规范](https://www.haproxy.org/download/2.9/doc/proxy-protocol.txt)
+
 ### UDP 端口转发
 
 ```toml
