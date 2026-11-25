@@ -94,8 +94,14 @@ pub(crate) struct AcmeConfig {
 
 #[derive(Default)]
 pub(crate) struct Managed {
-    pub certificate: ArcSwapOption<CertifiedKey>,
+    pub certificate: ArcSwapOption<ManagedCertificate>,
     challenges: RwLock<HashMap<String, (String, Bytes)>>,
+}
+
+pub(crate) struct ManagedCertificate {
+    pub key: Arc<CertifiedKey>,
+    pub starts: i64,
+    pub expires: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -135,7 +141,7 @@ impl AcmeConfig {
         );
         ensure!(
             (1..=20).contains(&raw.domains.len()),
-            "ACME supports 1..=20 exact DNS names"
+            "ACME supports 1..=20 identifiers"
         );
         let mut domains = Vec::with_capacity(raw.domains.len());
         for name in raw.domains {
@@ -145,10 +151,29 @@ impl AcmeConfig {
                 "ACME wildcard requires DNS-01"
             );
             let host = canonical_host(wildcard.unwrap_or(&name))
-                .filter(|host| {
-                    host.contains('.') && !host.starts_with('[') && host.parse::<IpAddr>().is_err()
-                })
-                .context("ACME requires valid DNS names")?;
+                .context("ACME needs a DNS name or an IP address")?;
+            if let Some(ip) = tls::ip_literal(&host) {
+                ensure!(
+                    wildcard.is_none() && raw.dns01.is_none(),
+                    "ACME IP addresses require HTTP-01"
+                );
+                ensure!(
+                    !ip.is_unspecified()
+                        && !ip.is_multicast()
+                        && ip != IpAddr::V4(std::net::Ipv4Addr::BROADCAST),
+                    "invalid ACME IP address"
+                );
+                ensure!(
+                    ip.to_canonical() == ip,
+                    "ACME IP addresses must not use mapped IPv6 notation"
+                );
+                ensure!(
+                    raw.profile.as_deref() == Some("shortlived"),
+                    "ACME IP addresses require profile = shortlived"
+                );
+            } else {
+                ensure!(host.contains('.'), "invalid ACME DNS name");
+            }
             domains.push(if wildcard.is_some() {
                 format!("*.{host}")
             } else {
@@ -172,7 +197,12 @@ impl AcmeConfig {
                 && !directory.contains('#'),
             "ACME directory requires a valid HTTPS URL"
         );
-        let renew_before_hours = raw.renew_before_hours.unwrap_or(720);
+        let default_lead = if raw.profile.as_deref() == Some("shortlived") {
+            24
+        } else {
+            720
+        };
+        let renew_before_hours = raw.renew_before_hours.unwrap_or(default_lead);
         if let Some(profile) = &raw.profile {
             ensure!(
                 (1..=64).contains(&profile.len())
@@ -402,7 +432,14 @@ impl AcmeConfig {
             Some(dns) => Some(dns.order(&self.state_dir, lock).await?),
             None => None,
         };
-        let names: Vec<_> = self.domains.iter().cloned().map(Identifier::Dns).collect();
+        let names: Vec<_> = self
+            .domains
+            .iter()
+            .map(|name| match tls::ip_literal(name) {
+                Some(ip) => Identifier::Ip(ip),
+                None => Identifier::Dns(name.clone()),
+            })
+            .collect();
         let request = NewOrder::new(&names);
         let request = if let Some(profile) = &self.profile {
             request.profile(profile)
@@ -432,7 +469,15 @@ impl AcmeConfig {
                     ChallengeType::Http01
                 })
                 .context("ACME server did not offer the configured challenge type")?;
-            let authorized = challenge.identifier().to_string();
+            let identifier = challenge.identifier();
+            let authorized = match identifier.identifier {
+                Identifier::Ip(ip) if !identifier.wildcard => match ip {
+                    IpAddr::V4(ip) => ip.to_string(),
+                    IpAddr::V6(ip) => format!("[{ip}]"),
+                },
+                Identifier::Dns(name) if tls::ip_literal(name).is_none() => identifier.to_string(),
+                _ => anyhow::bail!("unexpected ACME identifier type"),
+            };
             ensure!(
                 self.domains.contains(&authorized) && valid_token(&challenge.token),
                 "unexpected ACME challenge host or token"
@@ -476,7 +521,7 @@ impl AcmeConfig {
         Ok(renew_at)
     }
 
-    fn parse_identity(&self, bytes: &[u8]) -> Result<(CertifiedKey, i64)> {
+    fn parse_identity(&self, bytes: &[u8]) -> Result<(ManagedCertificate, i64)> {
         let chain =
             CertificateDer::pem_slice_iter(bytes).collect::<std::result::Result<Vec<_>, _>>()?;
         let key = PrivateKeyDer::from_pem_slice(bytes)?;
@@ -484,7 +529,10 @@ impl AcmeConfig {
         key.keys_match()?;
         let mut verifier = ResolvesServerCertUsingSni::new();
         for domain in &self.domains {
-            if domain.starts_with("*.") {
+            if let Some(ip) = tls::ip_literal(domain) {
+                tls::verify_ip(&key, ip)
+                    .context("ACME certificate does not cover a configured IP")?;
+            } else if domain.starts_with("*.") {
                 tls::verify_wildcard(&key, domain)
                     .context("ACME certificate does not cover a configured wildcard")?;
             } else {
@@ -503,7 +551,14 @@ impl AcmeConfig {
             "ACME certificate is outside its validity period"
         );
         let lead = i64::from(self.renew_before_hours) * 3600;
-        Ok((key, end - lead.min((end - start) / 3)))
+        Ok((
+            ManagedCertificate {
+                key: Arc::new(key),
+                starts: start,
+                expires: end,
+            },
+            end - lead.min((end - start) / 3),
+        ))
     }
 }
 

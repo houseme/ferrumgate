@@ -44,7 +44,13 @@ struct Resolver {
     exact: ResolvesServerCertUsingSni,
     wildcard: HashMap<String, Arc<CertifiedKey>>,
     ip: HashMap<IpAddr, IpCertificate>,
-    managed: Option<(Vec<String>, Arc<Managed>)>,
+    managed: Option<ManagedNames>,
+}
+
+struct ManagedNames {
+    dns: Vec<String>,
+    ips: Arc<[IpAddr]>,
+    store: Arc<Managed>,
 }
 
 #[derive(Clone)]
@@ -109,16 +115,34 @@ impl Resolver {
             IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4),
             IpAddr::V4(_) => None,
         };
+        let managed = self
+            .managed
+            .as_ref()
+            .filter(|entry| !entry.ips.is_empty())
+            .and_then(|entry| {
+                let certificate = entry.store.certificate.load_full()?;
+                Some(IpCertificate {
+                    key: certificate.key.clone(),
+                    starts: certificate.starts,
+                    expires: certificate.expires,
+                    hosts: entry.ips.clone(),
+                })
+            });
         let valid = |entry: &&IpCertificate| entry.starts <= now && entry.expires > now;
-        let preferred = self
-            .ip
-            .get(&local)
-            .filter(valid)
-            .or_else(|| mapped.and_then(|ip| self.ip.get(&ip)).filter(valid));
+        let match_ip = |ip| {
+            self.ip.get(&ip).filter(valid).or_else(|| {
+                managed
+                    .as_ref()
+                    .filter(valid)
+                    .filter(|entry| entry.hosts.contains(&ip))
+            })
+        };
+        let preferred = match_ip(local).or_else(|| mapped.and_then(match_ip));
         preferred
             .or_else(|| {
                 self.ip
                     .values()
+                    .chain(managed.as_ref())
                     .filter(valid)
                     .max_by_key(|entry| (entry.expires, std::cmp::Reverse(entry.hosts[0])))
             })
@@ -134,10 +158,10 @@ impl std::fmt::Debug for Resolver {
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let managed = self.managed.as_ref().filter(|(domains, _)| {
+        let managed = self.managed.as_ref().filter(|names| {
             hello
                 .server_name()
-                .is_some_and(|host| managed_covers(domains, host))
+                .is_some_and(|host| managed_covers(&names.dns, host))
         });
         let wildcard = hello
             .server_name()
@@ -145,7 +169,11 @@ impl ResolvesServerCert for Resolver {
             .and_then(|(_, suffix)| self.wildcard.get(suffix));
         self.exact
             .resolve(hello)
-            .or_else(|| managed.and_then(|(_, store)| store.certificate.load_full()))
+            .or_else(|| {
+                managed
+                    .and_then(|names| names.store.certificate.load_full())
+                    .map(|cert| cert.key.clone())
+            })
             .or_else(|| wildcard.cloned())
     }
 }
@@ -164,17 +192,30 @@ pub(crate) async fn load<'a>(
     );
     let provider = Arc::new(ring::default_provider());
     let server = if enabled {
+        let mut names: HashSet<String> = managed
+            .iter()
+            .flat_map(|(domains, _)| domains.iter().cloned())
+            .collect();
         let mut resolver = Resolver {
             exact: ResolvesServerCertUsingSni::new(),
             wildcard: HashMap::new(),
             ip: HashMap::new(),
-            managed,
+            managed: managed.map(|(domains, store)| {
+                let ips = domains
+                    .iter()
+                    .filter_map(|name| ip_literal(name))
+                    .collect::<Vec<_>>();
+                let dns = domains
+                    .into_iter()
+                    .filter(|name| ip_literal(name).is_none())
+                    .collect();
+                ManagedNames {
+                    dns,
+                    ips: Arc::from(ips),
+                    store,
+                }
+            }),
         };
-        let mut names: HashSet<String> = resolver
-            .managed
-            .iter()
-            .flat_map(|(domains, _)| domains.iter().cloned())
-            .collect();
         for (index, entry) in certificates.into_iter().enumerate() {
             let load = async {
                 let wildcard = entry.host.strip_prefix("*.");
@@ -238,7 +279,7 @@ pub(crate) async fn load<'a>(
                     || resolver
                         .managed
                         .as_ref()
-                        .is_some_and(|(names, _)| managed_covers(names, host))
+                        .is_some_and(|names| managed_covers(&names.dns, host))
                     || host
                         .split_once('.')
                         .is_some_and(|(_, suffix)| resolver.wildcard.contains_key(suffix))

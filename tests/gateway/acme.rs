@@ -753,3 +753,112 @@ async fn dns_with_soa(upstream: SocketAddr, zone: &str) -> Result<SocketAddr> {
     });
     Ok(address)
 }
+
+#[tokio::test]
+async fn acme_ip_configuration_requires_shortlived_http01() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+    let routes = route("::1", "127.0.0.1:9000".parse()?, "/");
+    let globals = format!(
+        r#"
+[acme]
+domains = ["::1"]
+email = "ops@example.test"
+accept_terms = true
+state_dir = "{}"
+challenge_listen = "127.0.0.1:0"
+"#,
+        dir.path().display()
+    );
+    assert!(!Gateway::check(dir.path(), &config(&routes, "tls = true", &globals)).await?);
+    let shortlived = format!("{globals}\nprofile = \"shortlived\"\n");
+    assert!(Gateway::check(dir.path(), &config(&routes, "tls = true", &shortlived)).await?);
+    for invalid in [
+        shortlived.replace("\"::1\"", "\"::\""),
+        shortlived.replace("\"::1\"", "\"::ffff:127.0.0.1\""),
+        format!(
+            "{shortlived}\n[acme.dns01]\nzone = \"example.test\"\nzone_id = \"{CF_ZONE}\"\ntoken_file = \"unused\"\nresolver = \"127.0.0.1:53\"\n"
+        ),
+    ] {
+        assert!(!Gateway::check(dir.path(), &config(&routes, "tls = true", &invalid)).await?);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_issues_and_serves_mixed_dns_and_ipv4_certificates() -> Result<()> {
+    pebble_ip_lifecycle("127.0.0.1", true).await
+}
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries and IPv6 loopback"]
+async fn pebble_issues_and_serves_ipv6_certificates() -> Result<()> {
+    pebble_ip_lifecycle("::1", false).await
+}
+
+async fn pebble_ip_lifecycle(ip: &'static str, mixed_dns: bool) -> Result<()> {
+    let pebble = pebble(false).await?;
+    let state = pebble.files.path().join("state-ip");
+    std::fs::create_dir(&state)?;
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))?;
+    let origin = Origin::http("IP certificate").await?;
+    let mut routes = route(ip, origin.addr, "/");
+    let mut identifiers = vec![ip];
+    if mixed_dns {
+        identifiers.push("acme.example.test");
+        routes.push_str(&route("acme.example.test", origin.addr, "/"));
+    }
+    let address = SocketAddr::new(ip.parse()?, pebble.challenge.port());
+    let settings = config(
+        &routes,
+        "tls = true",
+        &format!(
+            r#"
+[acme]
+domains = {}
+email = "ops@example.test"
+accept_terms = true
+profile = "shortlived"
+state_dir = "{}"
+directory = "https://localhost:{}/dir"
+ca_file = "{}"
+challenge_listen = "{address}"
+"#,
+            json!(identifiers),
+            state.display(),
+            pebble.api.port(),
+            pebble.files.path().join("ca.pem").display()
+        ),
+    );
+    let mut gateway = Gateway::spawn(&settings).await?;
+    gateway.wait_log("ACME certificate installed").await?;
+
+    let tls = connect_tls(gateway.addr, ip, pebble.root.clone()).await?;
+    let identity = tls.get_ref().1.peer_certificates().unwrap()[0].clone();
+    let host = if ip.contains(':') {
+        format!("[{ip}]")
+    } else {
+        ip.to_owned()
+    };
+    let mut client = http_client(tls).await?;
+    assert_eq!(get(&mut client, &host, "/").await?.1, "IP certificate");
+    assert_eq!(get(&mut client, "acme.example.test", "/").await?.0, 421);
+
+    if mixed_dns {
+        let dns = connect_tls(gateway.addr, "acme.example.test", pebble.root.clone()).await?;
+        assert_eq!(dns.get_ref().1.peer_certificates().unwrap()[0], identity);
+        assert_eq!(
+            get(&mut http_client(dns).await?, "acme.example.test", "/")
+                .await?
+                .1,
+            "IP certificate"
+        );
+    }
+    gateway.signal("-TERM").await?;
+    gateway.wait_exit().await?;
+    let restored = Gateway::spawn(&settings).await?;
+    let after = connect_tls(restored.addr, ip, pebble.root.clone()).await?;
+    assert_eq!(after.get_ref().1.peer_certificates().unwrap()[0], identity);
+    Ok(())
+}

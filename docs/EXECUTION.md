@@ -116,7 +116,7 @@ key_file = "tls/ip-key.pem"
 
 ### ACME HTTP-01 与自动续期
 
-先创建私有状态目录，再启用专用的 HTTP-01 明文端口。域名的 DNS 应解析到网关，CA 需要能通过公网 TCP 80 到达该端口。通过端口映射部署时，`challenge_listen` 使用对应的本地端口。 HTTP-01 只适用于精确 DNS 名。 [Gately 证书文档](https://gately.cn/en/docs/modules/ssl#http-01-validation)
+先创建私有状态目录，再启用专用的 HTTP-01 明文端口。域名的 DNS 应解析到网关，CA 需要能通过公网 TCP 80 到达该端口。通过端口映射部署时，`challenge_listen` 使用对应的本地端口。 HTTP-01 支持精确 DNS 名和带 shortlived 档位的 IP 地址。通配 DNS 名使用 DNS-01。 [Gately 证书文档](https://gately.cn/en/docs/modules/ssl#http-01-validation)
 
 ```bash
 mkdir -m 700 ./acme-state
@@ -145,7 +145,7 @@ upstream = "http://127.0.0.1:9000"
 
 通过 `fgate check` 后启动。看到 `ACME certificate installed` 后，用实际客户端检查域名、链和到期时间。配置代内的在线证书在文件持久化成功后切换。连接已建立时继续使用原会话。重启读取 `identity.pem` 和持久化账户。修改 ACME 设置需重启。
 
-默认提前 720 小时或证书寿命的三分之一续期，以较短者为准。失败后指数退避，初次间隔 30 秒，最长 1 小时。保留已有证书直到新身份验证并持久化。状态目录有进程锁，避免两个实例同时管理。
+标准档位默认提前 720 小时，shortlived 默认提前 24 小时。实际提前量取配置值与证书寿命三分之一中的较短者。失败后指数退避，初次间隔 30 秒，最长 1 小时。保留已有证书直到新身份验证并持久化。状态目录有进程锁，避免两个实例同时管理。
 
 CA 要求外部账户绑定时，在 `[acme]` 后添加：
 
@@ -164,6 +164,22 @@ hmac_key_file = "secrets/eab.key"
 ```bash
 cargo test --locked -p ferrumgate --test gateway pebble_ -- --ignored --test-threads=1
 ```
+
+### ACME 签发 IP 证书
+
+在 `[acme]` 的 `domains` 中加入 IP 地址，设置 `profile = "shortlived"` 并使用 HTTP-01。DNS 名和 IP 可以放在同一订单。 `[[routes]]` 的 `host` 填写相应 IP。IPv6 证书标识和配置可写裸 IPv6，HTTP Host 和访问 URL 使用方括号。
+
+```toml
+[acme]
+domains = ["192.0.2.10", "app.example.com"]
+profile = "shortlived"
+email = "ops@example.com"
+accept_terms = true
+state_dir = "acme-state"
+challenge_listen = "0.0.0.0:80"
+```
+
+示例地址用于演示。使用公开 CA 时，配置其可验证的公网 IP 和对应的 TCP 80 路径。自有 CA 可验证其能够访问的内网地址，需要支持 IP 标识与 shortlived 档位。签发后无 SNI 按本地地址或有效期选择，HTTP authority 与已选证书的配置地址一致。 [RFC 8738](https://www.rfc-editor.org/rfc/rfc8738) · [Gately IP 证书](https://gately.cn/en/docs/modules/ssl#short-lived-and-ip-address-certificates)
 
 ### ACME DNS-01 Cloudflare
 
@@ -474,3 +490,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - 证书档位通过本机 Pebble 验证。标准证书在档位变化时被重新签发为约六天的证书，保持档位重启后复用该证书。
 - 本机 Pebble 验证 DNS-01 可经 CNAME 跨区签发。签发后改变 CNAME 再重启，网关依照持久化日志清理原 TXT，而新目标和其他记录保持原样。
 - 已通过本机 Pebble 验证 CNAME 跨区后根据 SOA 阴性响应中的权威记录发现委托子区。HTTPS API 模拟确认只查询和使用该子区，重启清理不重新发现区域，旧显式日志仍可恢复。
+- 本机 Pebble 通过 IPv4 与 IPv6 的真实 HTTP-01、短寿命 IP 证书签发、数值地址 HTTPS 握手及重启复用，同时覆盖 DNS 名与 IPv4 混合订单。公开 CA 的公网地址签发分开验收。
