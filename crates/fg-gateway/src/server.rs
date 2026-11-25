@@ -7,8 +7,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use hyper::{server::conn::http1, service::service_fn};
-use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper::{
+    server::conn::{http1, http2},
+    service::service_fn,
+};
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpListener,
@@ -90,6 +93,13 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         .max_buf_size(32 * 1024)
         .header_read_timeout(milliseconds(settings.header_timeout_ms));
 
+    let mut h2 = http2::Builder::new(TokioExecutor::new());
+    h2.max_concurrent_streams(100)
+        .max_header_list_size(32 * 1024)
+        .initial_stream_window_size(65_535)
+        .initial_connection_window_size(1024 * 1024)
+        .max_send_buf_size(64 * 1024);
+
     let handshake_timeout = milliseconds(settings.tls_handshake_timeout_ms);
     let shutdown_result = loop {
         tokio::select! {
@@ -117,6 +127,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                 let state = state.clone();
                 let mut drain = drain.subscribe();
                 let http = http.clone();
+                let h2 = h2.clone();
                 connections.spawn(async move {
                     let _ = timeout_at(deadline, async {
                         if let Some(tls) = tls {
@@ -127,8 +138,14 @@ pub async fn serve(path: PathBuf) -> Result<()> {
                             };
                             match negotiated {
                                 Ok(Ok(stream)) => {
-                                    let name = stream.get_ref().1.server_name().map(str::to_owned);
-                                    serve_http(&http, stream, &state, peer, name.as_deref(), drain).await;
+                                    let session = stream.get_ref().1;
+                                    let http2 = session.alpn_protocol() == Some(b"h2");
+                                    let name = session.server_name().map(str::to_owned);
+                                    if http2 {
+                                        serve_h2(&h2, stream, &state, peer, name, drain).await;
+                                    } else {
+                                        serve_http(&http, stream, &state, peer, name.as_deref(), drain).await;
+                                    }
                                 }
                                 _ => tracing::debug!("TLS handshake failed or timed out"),
                             }
@@ -171,7 +188,7 @@ async fn serve_http(
             Ok::<_, std::convert::Infallible>(
                 current
                     .proxy
-                    .forward(request, peer, tls_name, &tunnel)
+                    .forward(request, peer, tls_name, Some(&tunnel))
                     .await,
             )
         });
@@ -199,5 +216,41 @@ async fn serve_http(
             _ = drain.wait_for(|draining| *draining) => {}
             _ = tunnel.relay() => {}
         }
+    }
+}
+
+async fn serve_h2(
+    http: &http2::Builder<TokioExecutor>,
+    stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>,
+    state: &ArcSwap<Generation>,
+    peer: SocketAddr,
+    tls_name: Option<String>,
+    mut drain: watch::Receiver<bool>,
+) {
+    let tls_name = tls_name.map(Arc::<str>::from);
+    let service = service_fn(|request| {
+        let current = state.load_full();
+        let tls_name = tls_name.clone();
+        async move {
+            Ok::<_, std::convert::Infallible>(
+                current
+                    .proxy
+                    .forward(request, peer, tls_name.as_deref(), None)
+                    .await,
+            )
+        }
+    });
+    let connection = http.serve_connection(TokioIo::new(stream), service);
+    tokio::pin!(connection);
+    let result = tokio::select! {
+        biased;
+        _ = drain.changed() => {
+            connection.as_mut().graceful_shutdown();
+            connection.await
+        }
+        result = &mut connection => result,
+    };
+    if let Err(error) = result {
+        tracing::debug!(%error, "HTTP/2 connection closed");
     }
 }

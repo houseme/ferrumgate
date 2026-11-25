@@ -49,6 +49,7 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 | `server.shutdown_timeout_ms` | 10000 | 1–300000 |
 | `routes[].host` | 必填 | 精确匹配 ASCII DNS 名或 IP，无端口；DNS 大小写不敏感并容许一个末尾根点 |
 | `routes[].path_prefix` | `/` | 以斜杠开头；除根路径外无末尾斜杠，无查询 |
+| `routes[].upstream_h2c` | `false` | 为 `http://` 上游启用 HTTP/2 prior knowledge |
 | `routes[].websocket` | `false` | 为匹配该条路由的请求允许 HTTP/1.1 WebSocket 升级 |
 | `routes[].upstream` | 必填 | `http://host[:port]` 或 `https://host[:port]`，可选末尾 `/`；无认证信息、路径前缀及查询 |
 
@@ -56,9 +57,9 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 ### HTTP 转发
 
-- 业务监听器接受 HTTP/1.1 origin-form 和单一合法 Host。未知网站或路径返回 404。无效 Host、无效请求目标或冲突的消息成帧字段返回 400。HTTP/1.0 返回 505，CONNECT 或当前路由不支持的 Upgrade 返回 501。
+- HTTP/1.1 监听接受 origin-form 和单一合法 Host。TLS 上的 HTTP/2 路由见 §6。未知网站或路径返回 404。无效 Host、无效请求目标或冲突的消息成帧字段返回 400。HTTP/1.0 返回 505，CONNECT 或当前路由不支持的 Upgrade 返回 501。
 - 出口 origin 完全来自已验证配置。上游请求的 `Host` 为配置中的上游 authority。清除客户端的 `Forwarded`、`X-Forwarded-*` 和 `X-Real-IP`，重新写入 TCP 对端地址、原 Host 和访问 scheme。部署在另一代理后时，地址仍为直接对端。
-- 双向清理 `Connection` 指定的字段及标准逐跳字段。代理保留端到端语义。仅支持无传输编码或单一 chunked，按照该跳重建 framing。普通 HTTP 转发丢弃 trailer frames。WebSocket 使用 §5 的独立升级约定。参考 [RFC 9110 §7.6.1](https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1) 与 [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112)。
+- 双向清理 `Connection` 指定的字段及标准逐跳字段。代理保留端到端语义。仅支持无传输编码或单一 chunked，按照该跳重建 framing。HTTP/1.1 代理丢弃 trailer frames。WebSocket 与 HTTP/2 见 §5–6。参考 [RFC 9110 §7.6.1](https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1) 与 [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112)。
 - 请求与响应按 frame 流式传递，利用连接读写反压，不缓存整包。连接池闲置保留每 origin 最多 8 条，空闲期限 30 秒。代理不额外重放请求。上游故障返回 502，响应头期限到达返回 504，响应开始后的读写错误终止流。
 - 接入主循环确认活跃任务数低于上限后调用 accept；达到上限时连接等待内核队列。HTTP/1 头部缓冲上限为 32 KiB，头部等待设期限。连接最大寿命约束长期占用，也会终止到期的慢上传、下载和持续连接。应用层带宽/请求体配额与精细化空闲超时在阶段 C 增加。
 
@@ -68,7 +69,7 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 ## 4. 阶段 B 手动 TLS
 
-`[server] tls = true` 让单个业务监听器按 HTTP/1.1 使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。每个 HTTPS 路由 DNS 名都需要一条 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。未知或缺失的 SNI 会在握手时被拒绝。TLS 下的 Host 需与 SNI 一致，否则返回 421。
+`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。每个 HTTPS 路由 DNS 名都需要一条 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。未知或缺失的 SNI 会在握手时被拒绝。TLS 下的 Host 需与 SNI 一致，否则返回 421。
 
 外连 HTTPS 验证证书链和目标名称。默认信任 `webpki-roots` 的根证书集。根字段 `upstream_ca_file` 可追加私有 CA，添加后对当前所有 HTTPS 上游生效。指定的 TLS 文件相对配置文件目录解析，每个文件最多 1 MiB。Unix 热加载以一代提交路由、证书和上游信任配置。使用带版本的证书和密钥文件名，再替换 TOML。TLS 配置示例和轮换命令见 [EXECUTION.md](EXECUTION.md)。
 
@@ -78,18 +79,26 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 成功后两端共享一条双向字节转发任务，使用有界缓冲并透传文本、二进制和控制帧。升级保持原连接的并发名额和寿命预算。服务停止或达到寿命期限时关闭两端连接。端点正常发出的 Close 帧照常通过。重载后已升级会话继续使用握手时的上游，新的升级请求读取新快照。
 
-## 6. 协议与策略演进
+## 6. 阶段 C2 HTTP/2 与原生 gRPC
+
+TLS 监听器公布 `h2` 和 `http/1.1` ALPN，明文入口使用 HTTP/1.1。HTTP/2 按 `:authority` 路由，要求 `:scheme` 为 `https`，同时提供 Host 时必须与 authority 一致，站点身份仍与 TLS SNI 绑定。服务端每连接最多 100 条并发流，设置 32 KiB 头部列表、65,535 字节流窗口、1 MiB 连接窗口及 64 KiB 每流发送缓冲。连接寿命与停机预算仍由监听器管理。
+
+HTTPS 上游自动通过 ALPN 协商。HTTP 明文上游可在路由显式设置 `upstream_h2c = true`，使用 HTTP/2 prior knowledge 连接池。WebSocket 升级使用独立 HTTP/1.1 池，可与 h2c 共用一个支持双协议的上游地址。入口 HTTP/2 的普通请求可转为 HTTP/1.1 上游请求。原生 gRPC 要求入口及上游均为 HTTP/2，后端不提供适配协议时返回 502。
+
+原生 gRPC 的请求和响应按 frame 流式转发，HTTP/2 两端之间保留业务 trailers 与 gRPC 状态。逐跳、成帧、凭据和转发身份相关字段按网关策略过滤。HTTP/2 取消由协议库向对应上游流传播。gRPC-Web、明文 HTTP/2 入口及 HTTP/2 扩展 CONNECT 留待后续。[Gately 后端设置](https://gately.cn/en/docs/modules/web) · [RFC 9113](https://www.rfc-editor.org/rfc/rfc9113) · [gRPC HTTP/2 协议](https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md)
+
+## 7. 协议与策略演进
 
 | 阶段 | 决策 | 接入条件 |
 |---|---|---|
-| C HTTP 扩展 | WebSocket 已有独立验收。HTTP/2 配置并发流与流量窗口。gRPC 端到端保留 `grpc-status` 等 trailers。静态文件基于根目录限制访问并覆盖符号链接语义。 | 按协议做双端 E2E；使用独立测试后端验证 HEAD、Range、SSE、升级以及大文件 |
+| C HTTP 扩展 | WebSocket、HTTP/2 与原生 gRPC 已接入。静态文件基于根目录限制访问并覆盖符号链接语义。 | 按协议做双端 E2E；使用独立测试后端验证 HEAD、Range、SSE、升级以及大文件 |
 | D ACME | 先 staging HTTP-01，再 DNS-01。以账户、域名集为幂等键，持久化任务并去重，校验外部 CA/区域配置，退避遵循服务端反馈。证书和密钥作为同一代更新。 | 本地 CA E2E 覆盖签发、续期、挑战清理、重启、服务端重试与旧证书继续工作 |
 | E 管理面 | 单独监听回环地址或本地 socket。随机一次性初始化凭据，校验权限，写 API 需要预期配置版本，浏览器写请求校验来源和 CSRF。 | 匿名、过期、越权访问有负向验证；业务站点无法路由到管理入口 |
 | F 可选安全策略 | 先确定可信客户端地址，再评估维护中的 ACL、认证、WAF 规则。WAF 以检测模式试运行，延迟、并发与可观察的失败模式按站点配置。主机规则由最小权限组件执行。 | 凭据与身份头处理、超载、引擎故障、策略优先级和规则回滚均有集成证据 |
 
 控制面提交过程采用校验、准备资源、持久化、发布的顺序。写入以版本比较防止覆盖并发修改。持久化原子性需要同目录替换与相应的目录同步。历史版本、审计和恢复步骤需要覆盖持久化完成但发布前崩溃的场景。监听变更涉及管理入口时，用独立连接验证新路径并设置确认期限。密钥保存引用，审计记录变更操作、结果和版本。每个外部调度器独立设置并发、退避、期限与关闭行为。
 
-## 7. 性能与运维契约
+## 8. 性能与运维契约
 
 - 热路径每请求只读取一次路由快照。Host 查询走哈希表，同一 Host 的前缀按长度降序匹配。优先测量在真实站点数量下的开销，确认热点后再考虑 radix tree。
 - 复用连接池、避免中间整包缓存和逐请求字符串日志。变更前后用相同后端、协议、连接复用与负载分布，比较吞吐、p50/p95/p99、超时、CPU、RSS 和打开文件数。

@@ -14,7 +14,7 @@ use hyper::{
         CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue,
         PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, VIA,
     },
-    http::uri::Authority,
+    http::uri::{Authority, Scheme},
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
@@ -33,6 +33,8 @@ type Reply = Response<Either<DataBody, Full<Bytes>>>;
 pub(crate) struct Proxy {
     routes: Routes,
     client: Client<HttpsConnector<HttpConnector>, DataBody>,
+    upgrade_client: Client<HttpsConnector<HttpConnector>, DataBody>,
+    h2c_client: Client<HttpConnector, DataBody>,
     response_header_timeout: Duration,
 }
 
@@ -42,21 +44,35 @@ impl Proxy {
         connector.enforce_http(false);
         connector.set_connect_timeout(Some(milliseconds(settings.connect_timeout_ms)));
         connector.set_nodelay(true);
-        let connector = HttpsConnectorBuilder::new()
+        let http1 = HttpsConnectorBuilder::new()
+            .with_tls_config(tls.clone())
+            .https_or_http()
+            .enable_http1()
+            .wrap_connector(connector.clone());
+        let negotiated = HttpsConnectorBuilder::new()
             .with_tls_config(tls)
             .https_or_http()
             .enable_http1()
-            .wrap_connector(connector);
-        let client = Client::builder(TokioExecutor::new())
+            .enable_http2()
+            .wrap_connector(connector.clone());
+        connector.enforce_http(true);
+
+        let mut builder = Client::builder(TokioExecutor::new());
+        builder
             .pool_timer(TokioTimer::new())
             .pool_idle_timeout(Duration::from_secs(30))
             .pool_max_idle_per_host(8)
             .retry_canceled_requests(false)
-            .build(connector);
+            .http2_initial_stream_window_size(65_535)
+            .http2_initial_connection_window_size(1024 * 1024)
+            .http2_max_header_list_size(32 * 1024)
+            .http2_max_send_buf_size(64 * 1024);
 
         Self {
             routes,
-            client,
+            client: builder.build(negotiated),
+            upgrade_client: builder.build(http1),
+            h2c_client: builder.http2_only(true).build(connector),
             response_header_timeout: milliseconds(settings.response_header_timeout_ms),
         }
     }
@@ -66,35 +82,65 @@ impl Proxy {
         mut request: Request<Incoming>,
         peer: SocketAddr,
         tls_name: Option<&str>,
-        tunnel: &OnceLock<Tunnel>,
+        tunnel: Option<&OnceLock<Tunnel>>,
     ) -> Reply {
-        if request.version() != Version::HTTP_11 {
+        let downstream_version = request.version();
+        let downstream_h2 = downstream_version == Version::HTTP_2;
+        if downstream_version != Version::HTTP_11 && !downstream_h2 {
             return reply(StatusCode::HTTP_VERSION_NOT_SUPPORTED);
         }
         if request.method() == Method::CONNECT {
             return reply(StatusCode::NOT_IMPLEMENTED);
         }
-        let Some(target) = request.uri().path_and_query().filter(|target| {
-            request.uri().scheme().is_none()
-                && request.uri().authority().is_none()
-                && target.path().starts_with('/')
-        }) else {
-            return reply(StatusCode::BAD_REQUEST);
-        };
-
-        let mut hosts = request.headers().get_all(HOST).iter();
-        let Some(original_host) = hosts.next().filter(|_| hosts.next().is_none()) else {
-            return reply(StatusCode::BAD_REQUEST);
-        };
-        let Some(authority) = original_host
-            .to_str()
-            .ok()
-            .and_then(|host| host.parse::<Authority>().ok())
-            .filter(config::valid_authority)
+        let uri = request.uri();
+        let Some(target) = uri
+            .path_and_query()
+            .filter(|target| target.path().starts_with('/'))
         else {
             return reply(StatusCode::BAD_REQUEST);
         };
-
+        let mut hosts = request.headers().get_all(HOST).iter();
+        let host_header = hosts.next();
+        if hosts.next().is_some() {
+            return reply(StatusCode::BAD_REQUEST);
+        }
+        let (authority, original_host) = if downstream_h2 {
+            let Some(authority) = uri
+                .authority()
+                .filter(|_| uri.scheme() == Some(&Scheme::HTTPS))
+            else {
+                return reply(StatusCode::BAD_REQUEST);
+            };
+            if host_header.is_some_and(|host| {
+                !host
+                    .as_bytes()
+                    .eq_ignore_ascii_case(authority.as_str().as_bytes())
+            }) {
+                return reply(StatusCode::BAD_REQUEST);
+            }
+            let Ok(host) = HeaderValue::from_str(authority.as_str()) else {
+                return reply(StatusCode::BAD_REQUEST);
+            };
+            (authority.clone(), host)
+        } else {
+            if uri.scheme().is_some() || uri.authority().is_some() {
+                return reply(StatusCode::BAD_REQUEST);
+            }
+            let Some(host) = host_header else {
+                return reply(StatusCode::BAD_REQUEST);
+            };
+            let Some(authority) = host
+                .to_str()
+                .ok()
+                .and_then(|value| value.parse::<Authority>().ok())
+            else {
+                return reply(StatusCode::BAD_REQUEST);
+            };
+            (authority, host.clone())
+        };
+        if !config::valid_authority(&authority) {
+            return reply(StatusCode::BAD_REQUEST);
+        }
         let (upstream_uri, route) = {
             let host = config::canonical_host(authority.host()).expect("validated authority");
             if tls_name.is_some_and(|sni| sni != host) {
@@ -111,8 +157,17 @@ impl Proxy {
                 .expect("validated authority and origin-form target");
             (uri, route)
         };
-        let original_host = original_host.clone();
+        let grpc = is_grpc(request.headers());
+        if grpc && !downstream_h2 {
+            return reply(StatusCode::HTTP_VERSION_NOT_SUPPORTED);
+        }
+        if grpc && !route.upstream_h2c && route.scheme != Scheme::HTTPS {
+            return reply(StatusCode::BAD_GATEWAY);
+        }
         let (handshake, chunked) = if request.headers().contains_key(UPGRADE) {
+            if downstream_h2 {
+                return reply(StatusCode::BAD_REQUEST);
+            }
             match Handshake::prepare(&mut request, route.websocket) {
                 Ok(handshake) => (Some(handshake), false),
                 Err(status) => return reply(status),
@@ -126,10 +181,7 @@ impl Proxy {
         let headers = request.headers_mut();
         let forwarding_headers: Vec<_> = headers
             .keys()
-            .filter(|name| {
-                matches!(name.as_str(), "forwarded" | "x-real-ip")
-                    || name.as_str().starts_with("x-forwarded-")
-            })
+            .filter(|name| is_forwarding_header(name))
             .cloned()
             .collect();
         for name in forwarding_headers {
@@ -145,21 +197,45 @@ impl Proxy {
             "x-forwarded-for",
             HeaderValue::from_str(&peer.ip().to_string()).expect("IP address is a header value"),
         );
-        headers.append(VIA, HeaderValue::from_static("1.1 ferrumgate"));
-        if chunked {
-            headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+        headers.append(
+            VIA,
+            HeaderValue::from_static(if downstream_h2 {
+                "2 ferrumgate"
+            } else {
+                "1.1 ferrumgate"
+            }),
+        );
+        let upstream_h2_required = handshake.is_none() && (route.upstream_h2c || grpc);
+        if downstream_h2 && upstream_h2_required {
+            headers.insert(TE, HeaderValue::from_static("trailers"));
+        }
+        let body_needs_framing =
+            !request.body().is_end_stream() && request.body().size_hint().exact().is_none();
+        if !upstream_h2_required && (chunked || body_needs_framing) {
+            request
+                .headers_mut()
+                .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
         }
         *request.uri_mut() = upstream_uri;
-
-        let result = timeout(
-            self.response_header_timeout,
-            self.client.request(request.map(DataBody)),
-        )
-        .await;
+        *request.version_mut() = if upstream_h2_required {
+            Version::HTTP_2
+        } else {
+            Version::HTTP_11
+        };
+        let request =
+            request.map(|body| DataBody::new(body, downstream_h2 && upstream_h2_required));
+        let pending = if handshake.is_some() {
+            self.upgrade_client.request(request)
+        } else if route.upstream_h2c {
+            self.h2c_client.request(request)
+        } else {
+            self.client.request(request)
+        };
+        let result = timeout(self.response_header_timeout, pending).await;
 
         match result {
             Ok(Ok(mut response)) if response.status() == StatusCode::SWITCHING_PROTOCOLS => {
-                let Some(handshake) = handshake else {
+                let (Some(handshake), Some(tunnel)) = (handshake, tunnel) else {
                     return reply(StatusCode::BAD_GATEWAY);
                 };
                 let Ok(upgraded) = handshake.complete(&mut response) else {
@@ -174,8 +250,9 @@ impl Proxy {
                 if strip_hop_headers(response.headers_mut()).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
                 }
-                *response.version_mut() = Version::HTTP_11;
-                response.map(|body| Either::Left(DataBody(body)))
+                let trailers = downstream_h2 && response.version() == Version::HTTP_2;
+                *response.version_mut() = downstream_version;
+                response.map(|body| Either::Left(DataBody::new(body, trailers)))
             }
             Ok(Ok(_)) => reply(StatusCode::BAD_GATEWAY),
             Ok(Err(error)) => {
@@ -256,7 +333,32 @@ fn reply(status: StatusCode) -> Reply {
     response
 }
 
-pub(crate) struct DataBody(Incoming);
+fn is_forwarding_header(name: &HeaderName) -> bool {
+    matches!(name.as_str(), "forwarded" | "x-real-ip") || name.as_str().starts_with("x-forwarded-")
+}
+
+fn is_grpc(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            let media_type = value.split(';').next().unwrap_or_default().trim();
+            let (base, suffix) = media_type.split_once('+').unwrap_or((media_type, ""));
+            base.eq_ignore_ascii_case("application/grpc")
+                && (media_type == base || !suffix.is_empty())
+        })
+}
+
+pub(crate) struct DataBody {
+    inner: Incoming,
+    trailers: bool,
+}
+
+impl DataBody {
+    fn new(inner: Incoming, trailers: bool) -> Self {
+        Self { inner, trailers }
+    }
+}
 
 impl Body for DataBody {
     type Data = Bytes;
@@ -267,19 +369,45 @@ impl Body for DataBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         loop {
-            match std::task::ready!(Pin::new(&mut self.0).poll_frame(cx)) {
-                Some(Ok(frame)) if frame.is_trailers() => {}
+            match std::task::ready!(Pin::new(&mut self.inner).poll_frame(cx)) {
+                Some(Ok(frame)) if frame.is_trailers() => {
+                    if self.trailers {
+                        let mut fields = frame.into_trailers().expect("trailer frame");
+                        if strip_hop_headers(&mut fields).is_ok() {
+                            for name in [
+                                HOST,
+                                CONTENT_LENGTH,
+                                CONTENT_TYPE,
+                                hyper::header::AUTHORIZATION,
+                                hyper::header::COOKIE,
+                                hyper::header::SET_COOKIE,
+                                hyper::header::CONTENT_ENCODING,
+                            ] {
+                                fields.remove(name);
+                            }
+                            let forwarding: Vec<_> = fields
+                                .keys()
+                                .filter(|name| is_forwarding_header(name))
+                                .cloned()
+                                .collect();
+                            for name in forwarding {
+                                fields.remove(name);
+                            }
+                            return Poll::Ready(Some(Ok(Frame::trailers(fields))));
+                        }
+                    }
+                }
                 frame => return Poll::Ready(frame),
             }
         }
     }
 
     fn is_end_stream(&self) -> bool {
-        self.0.is_end_stream()
+        self.inner.is_end_stream()
     }
 
     fn size_hint(&self) -> SizeHint {
-        self.0.size_hint()
+        self.inner.size_hint()
     }
 }
 

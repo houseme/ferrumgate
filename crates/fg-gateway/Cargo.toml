@@ -10,9 +10,9 @@ anyhow.workspace = true
 arc-swap = "1"
 base64 = "0.23"
 http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
-hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }

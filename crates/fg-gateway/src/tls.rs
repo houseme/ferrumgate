@@ -82,7 +82,7 @@ pub(crate) async fn load<'a>(
             .with_safe_default_protocol_versions()?
             .with_no_client_auth()
             .with_cert_resolver(Arc::new(resolver));
-        server.alpn_protocols = vec![b"http/1.1".to_vec()];
+        server.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Some(TlsAcceptor::from(Arc::new(server)))
     } else {
         None

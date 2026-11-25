@@ -70,6 +70,8 @@ struct RawRoute {
     upstream: String,
     #[serde(default)]
     websocket: bool,
+    #[serde(default)]
+    upstream_h2c: bool,
 }
 
 pub(crate) struct Config {
@@ -88,6 +90,7 @@ pub(crate) struct Route {
     pub authority: Authority,
     pub upstream_host: HeaderValue,
     pub websocket: bool,
+    pub upstream_h2c: bool,
 }
 
 impl Routes {
@@ -192,6 +195,10 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
             .filter(valid_authority)
             .with_context(|| format!("invalid routes[{index}].upstream authority"))?;
         let scheme = parts.scheme.context("missing upstream scheme")?;
+        ensure!(
+            !route.upstream_h2c || scheme == Scheme::HTTP,
+            "routes[{index}].upstream_h2c requires an http:// upstream"
+        );
         let upstream_host = HeaderValue::from_str(authority.as_str())?;
         let list = by_host.entry(host).or_default();
         ensure!(
@@ -204,6 +211,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
             authority,
             upstream_host,
             websocket: route.websocket,
+            upstream_h2c: route.upstream_h2c,
         });
     }
     for list in by_host.values_mut() {

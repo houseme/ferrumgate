@@ -1,6 +1,6 @@
 # FerrumGate
 
-FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证、Unix 配置热加载和按路由启用的 WebSocket（`ws` / `wss`）。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
+FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证、Unix 配置热加载、WebSocket（`ws` / `wss`）以及 HTTP/2 和原生 gRPC 代理。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
 
 ## 启动
 
@@ -15,6 +15,10 @@ cargo build --release --locked -p ferrumgate
 ## WebSocket
 
 在需要升级的 `[[routes]]` 内设置 `websocket = true`。TLS 入口使用 `wss://`。子协议、连接寿命和重连行为见 [WebSocket 配置](docs/EXECUTION.md#4-启用-websocket)。
+
+## HTTP/2 和 gRPC
+
+TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路由使用 `upstream_h2c = true`，HTTPS 后端通过 ALPN 协商。原生 gRPC 使用两端 HTTP/2，可转发双向数据及 `grpc-status` 等 trailers。[配置与实战验证](docs/EXECUTION.md#5-启用-http2-和-grpc)
 
 ## 工作区
 
