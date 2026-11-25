@@ -492,6 +492,7 @@ dependencies = [
  "libc",
  "mime",
  "mime_guess",
+ "pem",
  "percent-encoding",
  "ring",
  "rustls",

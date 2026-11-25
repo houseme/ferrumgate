@@ -43,6 +43,7 @@ use tokio::{
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{
+    cert_deploy::DeployTarget,
     config::{canonical_host, read_file, valid_authority},
     dns01::{Dns01, RawDns01},
     tls,
@@ -69,6 +70,8 @@ pub(crate) struct RawAcme {
     profile: Option<String>,
     eab: Option<ExternalBinding>,
     dns01: Option<RawDns01>,
+    #[serde(default)]
+    deploy: Vec<DeployTarget>,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
@@ -90,11 +93,14 @@ pub(crate) struct AcmeConfig {
     profile: Option<String>,
     eab: Option<ExternalBinding>,
     dns01: Option<Dns01>,
+    deploy: Vec<DeployTarget>,
 }
 
 #[derive(Default)]
 pub(crate) struct Managed {
     pub certificate: ArcSwapOption<ManagedCertificate>,
+    #[cfg(unix)]
+    deployment_changed: tokio::sync::Notify,
     challenges: RwLock<HashMap<String, (String, Bytes)>>,
 }
 
@@ -280,6 +286,22 @@ impl AcmeConfig {
             )
         };
         crate::dns01::validate_journal(dns01.as_ref(), &state_dir).await?;
+        ensure!(
+            raw.deploy.len() <= 16,
+            "ACME supports up to 16 deployment targets"
+        );
+        let mut deploy = Vec::<DeployTarget>::with_capacity(raw.deploy.len());
+        for target in raw.deploy {
+            let target = target.compile(dir, &state_dir).await?;
+            ensure!(
+                deploy
+                    .iter()
+                    .all(|old| !old.directory.starts_with(&target.directory)
+                        && !target.directory.starts_with(&old.directory)),
+                "ACME deployment directories must be separate"
+            );
+            deploy.push(target);
+        }
         Ok(Self {
             domains,
             challenge_listen,
@@ -291,6 +313,7 @@ impl AcmeConfig {
             renew_before_hours,
             profile: raw.profile,
             eab,
+            deploy,
         })
     }
 
@@ -298,6 +321,7 @@ impl AcmeConfig {
         std::iter::once(&self.state_dir)
             .chain(self.eab.iter().map(|eab| &eab.hmac_key_file))
             .chain(self.dns01.iter().map(|dns| &dns.token_file))
+            .chain(self.deploy.iter().map(|target| &target.directory))
     }
 
     pub async fn restore(&self, managed: &Managed) -> Result<(std::fs::File, i64)> {
@@ -364,6 +388,56 @@ impl AcmeConfig {
             sleep(delay).await;
             delay = (delay * 2).min(Duration::from_secs(3600));
         }
+    }
+
+    #[cfg(unix)]
+    pub async fn run_deployments(self, managed: Arc<Managed>, lock: Arc<std::fs::File>) {
+        if self.deploy.is_empty() {
+            return;
+        }
+        loop {
+            if let Err(error) = self.reconcile_deployments(&managed, &lock).await {
+                tracing::warn!(%error, "ACME certificate deployment will retry");
+            }
+            tokio::select! {
+                _ = managed.deployment_changed.notified() => {},
+                _ = sleep(Duration::from_secs(3600)) => {},
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn reconcile_deployments(
+        &self,
+        managed: &Managed,
+        lock: &Arc<std::fs::File>,
+    ) -> Result<()> {
+        let Some(installed) = managed.certificate.load_full() else {
+            return Ok(());
+        };
+        let bundle = read_saved(&self.state_dir.join(IDENTITY_FILE))
+            .await?
+            .context("missing installed ACME identity")?;
+        let (candidate, _) = self.parse_identity(&bundle)?;
+        // A newer issuance can become durable while the worker is reading.
+        if candidate.key.cert != installed.key.cert {
+            return Ok(());
+        }
+        let material = crate::cert_deploy::Materials::from_bundle(&bundle)?;
+        let targets = self.deploy.clone();
+        let state_dir = self.state_dir.clone();
+        let lock = lock.clone();
+        tokio::task::spawn_blocking(move || {
+            let _lock = lock;
+            for (index, target) in targets.iter().enumerate() {
+                match target.deploy(&material, &state_dir) {
+                    Ok(true) => tracing::info!(target = index, "ACME certificate deployed"),
+                    Ok(false) => {},
+                    Err(error) => tracing::warn!(target = index, %error, "ACME certificate deployment will retry"),
+                }
+            }
+        }).await.context("ACME deployment worker")?;
+        Ok(())
     }
 
     async fn cleanup_dns(&self, lock: &Arc<std::fs::File>) -> bool {
@@ -518,6 +592,8 @@ impl AcmeConfig {
         let (certificate, renew_at) = self.parse_identity(bundle.as_bytes())?;
         persist_private(&self.state_dir, IDENTITY_FILE, lock, bundle.into_bytes()).await?;
         managed.certificate.store(Some(Arc::new(certificate)));
+        #[cfg(unix)]
+        managed.deployment_changed.notify_one();
         Ok(renew_at)
     }
 

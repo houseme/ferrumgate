@@ -862,3 +862,111 @@ challenge_listen = "{address}"
     assert_eq!(after.get_ref().1.peer_certificates().unwrap()[0], identity);
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_deploys_a_key_pair_atomically_and_repairs_missing_files() -> Result<()> {
+    let pebble = pebble(false).await?;
+    let state = pebble.files.path().join("deploy-state");
+    let deployed = pebble.files.path().join("deployed");
+    for directory in [&state, &deployed] {
+        std::fs::create_dir(directory)?;
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))?;
+    }
+    let origin = Origin::http("secured").await?;
+    let settings = config(
+        &route("acme.example.test", origin.addr, "/"),
+        "tls = true",
+        &format!(
+            r#"
+[acme]
+domains = ["acme.example.test"]
+email = "ops@example.test"
+accept_terms = true
+state_dir = "{}"
+directory = "https://localhost:{}/dir"
+ca_file = "{}"
+challenge_listen = "{}"
+
+[[acme.deploy]]
+directory = "{}"
+fullchain_name = "chain.pem"
+key_name = "private.pem"
+"#,
+            state.display(),
+            pebble.api.port(),
+            pebble.files.path().join("ca.pem").display(),
+            pebble.challenge,
+            deployed.display()
+        ),
+    );
+    let forbidden = settings.replace("private.pem", "../private.pem");
+    assert!(!Gateway::check(pebble.files.path(), &forbidden).await?);
+
+    let current = deployed.join("current");
+    std::fs::write(&current, "external ownership")?;
+    let mut issuing = Gateway::spawn(&settings).await?;
+    issuing.wait_log("ACME certificate installed").await?;
+    let issued = presented_certificate(issuing.addr, pebble.root.clone()).await?;
+    issuing
+        .wait_log("ACME certificate deployment will retry")
+        .await?;
+    assert_eq!(std::fs::read_to_string(&current)?, "external ownership");
+    issuing.signal("-TERM").await?;
+    issuing.wait_exit().await?;
+    std::fs::remove_file(&current)?;
+
+    let mut first = Gateway::spawn(&settings).await?;
+    first.wait_log("ACME certificate deployed").await?;
+    let first_path = std::fs::canonicalize(&current)?;
+    assert_deployed_pair(&current, &issued)?;
+    first.signal("-TERM").await?;
+    first.wait_exit().await?;
+
+    std::fs::remove_file(first_path.join("chain.pem"))?;
+    let mut repaired = Gateway::spawn(&settings).await?;
+    repaired.wait_log("ACME certificate deployed").await?;
+    let repaired_path = std::fs::canonicalize(&current)?;
+    assert_ne!(repaired_path, first_path);
+    assert!(
+        first_path.is_dir(),
+        "previous generation must remain available"
+    );
+    assert_deployed_pair(&current, &issued)?;
+    repaired.signal("-TERM").await?;
+    repaired.wait_exit().await?;
+    install_near_expiry_fixture(&state.join("identity.pem"))?;
+
+    let mut renewed = Gateway::spawn(&settings).await?;
+    renewed.wait_log("ACME certificate installed").await?;
+    let rotated = presented_certificate(renewed.addr, pebble.root.clone()).await?;
+    assert_ne!(rotated, issued);
+    // The export worker can briefly publish the restored near-expiry identity first.
+    timeout(DEADLINE, async {
+        loop {
+            if assert_deployed_pair(&current, &rotated).is_ok() {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await?;
+    assert_ne!(std::fs::canonicalize(&current)?, repaired_path);
+    Ok(())
+}
+
+fn assert_deployed_pair(current: &Path, expected: &CertificateDer<'_>) -> Result<()> {
+    use rustls::{pki_types::PrivateKeyDer, sign::CertifiedKey};
+    let pinned = std::fs::canonicalize(current)?;
+    let chain = CertificateDer::pem_file_iter(pinned.join("chain.pem"))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    ensure!(
+        chain.first().is_some_and(|leaf| leaf == expected),
+        "deployed certificate has not switched"
+    );
+    let key_file = pinned.join("private.pem");
+    let key = PrivateKeyDer::from_pem_file(&key_file)?;
+    assert_eq!(key_file.metadata()?.permissions().mode() & 0o777, 0o600);
+    CertifiedKey::from_der(chain, key, &ring::default_provider())?.keys_match()?;
+    Ok(())
+}

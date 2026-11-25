@@ -4,6 +4,7 @@
 
 mod acme;
 mod backend;
+mod cert_deploy;
 mod config;
 mod dns01;
 mod domains;

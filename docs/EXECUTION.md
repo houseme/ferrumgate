@@ -181,6 +181,21 @@ challenge_listen = "0.0.0.0:80"
 
 示例地址用于演示。使用公开 CA 时，配置其可验证的公网 IP 和对应的 TCP 80 路径。自有 CA 可验证其能够访问的内网地址，需要支持 IP 标识与 shortlived 档位。签发后无 SNI 按本地地址或有效期选择，HTTP authority 与已选证书的配置地址一致。 [RFC 8738](https://www.rfc-editor.org/rfc/rfc8738) · [Gately IP 证书](https://gately.cn/en/docs/modules/ssl#short-lived-and-ip-address-certificates)
 
+### ACME 本地证书部署
+
+Unix 环境可创建独立部署目录，并向 `[acme]` 配置加入一个或多个目标。目录需要由运行账户管理，部署目录不能包含 ACME 状态目录，也不能由组或其他用户写入。
+
+```toml
+[[acme.deploy]]
+directory = "/var/lib/ferrumgate-deployed/app"
+fullchain_name = "fullchain.pem"
+key_name = "privkey.pem"
+```
+
+文件位于 `directory/current/`。每次发布先写完整的证书代，校验并同步后再原子更新 `current` 链接。需要读取证书和私钥两份文件时，先解析一次 `current`，再从同一代目录读取。私钥权限为 0600。网关保留上一代，同时修复缺失或改动的文件。
+
+部署工作在签发、续期、进程重启时触发，并按小时检查文件是否需要修复。通过 `ACME certificate deployed` 确认发布完成。目录中的 `current` 与 `.fgate-acme` 保留给网关，已有无关路径保持原样。部署失败会记录日志并重试，业务 TLS 继续由内部证书存储提供。 [Gately 本地部署](https://gately.cn/en/docs/modules/ssl#auto-deploy)
+
 ### ACME DNS-01 Cloudflare
 
 使用 Cloudflare 该托管区的 DNS 编辑 API Token，保存到运行账户可读的私有文件，例如 Unix 0600。为 `acme.domains` 配置精确域名或 `*.example.com`，提供以下表。 `zone_id` 是 Cloudflare 托管区的 ID，`resolver` 指定能读取该公开托管区的 DNS 解析器。
@@ -493,3 +508,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - 本机 Pebble 验证 DNS-01 可经 CNAME 跨区签发。签发后改变 CNAME 再重启，网关依照持久化日志清理原 TXT，而新目标和其他记录保持原样。
 - 已通过本机 Pebble 验证 CNAME 跨区后根据 SOA 阴性响应中的权威记录发现委托子区。HTTPS API 模拟确认只查询和使用该子区，重启清理不重新发现区域，旧显式日志仍可恢复。
 - 本机 Pebble 通过 IPv4 与 IPv6 的真实 HTTP-01、短寿命 IP 证书签发、数值地址 HTTPS 握手及重启复用，同时覆盖 DNS 名与 IPv4 混合订单。公开 CA 的公网地址签发分开验收。
+- 本机 Pebble 验证本地部署拒绝覆盖外部 current 文件、仍可使用已签发证书、重启部署、修复缺失链文件、私钥 0600 及续期发布新一代。

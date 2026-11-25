@@ -160,6 +160,8 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         }
         let acme = acme_config.clone().expect("ACME startup config");
         let lock = Arc::new(lock);
+        #[cfg(unix)]
+        acme_tasks.spawn(acme.clone().run_deployments(managed.clone(), lock.clone()));
         acme_tasks.spawn(acme.run(managed.clone(), lock.clone(), renew_at));
         Some(lock)
     } else {
