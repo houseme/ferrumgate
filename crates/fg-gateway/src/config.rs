@@ -1,0 +1,297 @@
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    net::{IpAddr, SocketAddr},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use anyhow::{Context, Result, ensure};
+use hyper::{
+    Uri,
+    header::HeaderValue,
+    http::uri::{Authority, PathAndQuery, Scheme},
+};
+use serde::Deserialize;
+use tokio::{fs, io::AsyncReadExt};
+
+use crate::tls::{self, CertificateFiles, Tls};
+
+const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const MAX_ROUTES: usize = 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    schema_version: u32,
+    #[serde(default)]
+    server: Settings,
+    routes: Vec<RawRoute>,
+    #[serde(default)]
+    certificates: Vec<CertificateFiles>,
+    upstream_ca_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct Settings {
+    pub listen: SocketAddr,
+    pub tls: bool,
+    pub tls_handshake_timeout_ms: u64,
+    pub max_connections: usize,
+    pub header_timeout_ms: u64,
+    pub connect_timeout_ms: u64,
+    pub response_header_timeout_ms: u64,
+    pub connection_lifetime_ms: u64,
+    pub shutdown_timeout_ms: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            tls: false,
+            tls_handshake_timeout_ms: 5_000,
+            max_connections: 1024,
+            header_timeout_ms: 5_000,
+            connect_timeout_ms: 2_000,
+            response_header_timeout_ms: 30_000,
+            connection_lifetime_ms: 300_000,
+            shutdown_timeout_ms: 10_000,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoute {
+    host: String,
+    path_prefix: Option<String>,
+    upstream: String,
+}
+
+pub(crate) struct Config {
+    pub settings: Settings,
+    pub routes: Routes,
+    pub tls: Tls,
+}
+
+pub(crate) struct Routes {
+    by_host: HashMap<String, Vec<Route>>,
+}
+
+pub(crate) struct Route {
+    prefix: String,
+    pub scheme: Scheme,
+    pub authority: Authority,
+    pub upstream_host: HeaderValue,
+}
+
+impl Routes {
+    pub fn find(&self, host: &str, path: &str) -> Option<&Route> {
+        self.by_host.get(host)?.iter().find(|route| {
+            route.prefix == "/"
+                || path
+                    .strip_prefix(&route.prefix)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+        })
+    }
+}
+
+pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
+    ensure!(
+        fs::metadata(path).await.context("inspect file")?.is_file(),
+        "expected a regular file"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .await
+        .context("open file")?
+        .take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .context("read file")?;
+    ensure!(bytes.len() as u64 <= MAX_CONFIG_BYTES, "file exceeds 1 MiB");
+    Ok(bytes)
+}
+
+pub(crate) async fn load(path: &Path) -> Result<Config> {
+    let bytes = read_file(path).await.context("read configuration")?;
+    let input = std::str::from_utf8(&bytes).context("config must be UTF-8")?;
+    let dir = path.parent().context("configuration must name a file")?;
+    let raw: RawConfig = toml::from_str(input).map_err(|error| {
+        let offset = error.span().map_or(0, |span| span.start);
+        let line = input.as_bytes()[..offset]
+            .iter()
+            .filter(|&&byte| byte == b'\n')
+            .count()
+            + 1;
+        anyhow::anyhow!("invalid configuration schema or TOML near line {line}")
+    })?;
+    ensure!(raw.schema_version == 1, "schema_version must be 1");
+    let settings = raw.server;
+    ensure!(
+        (1..=65_535).contains(&settings.max_connections),
+        "max_connections must be in 1..=65535"
+    );
+    for (field, value, max) in [
+        ("header_timeout_ms", settings.header_timeout_ms, 300_000),
+        (
+            "tls_handshake_timeout_ms",
+            settings.tls_handshake_timeout_ms,
+            300_000,
+        ),
+        ("connect_timeout_ms", settings.connect_timeout_ms, 300_000),
+        (
+            "response_header_timeout_ms",
+            settings.response_header_timeout_ms,
+            300_000,
+        ),
+        (
+            "connection_lifetime_ms",
+            settings.connection_lifetime_ms,
+            86_400_000,
+        ),
+        ("shutdown_timeout_ms", settings.shutdown_timeout_ms, 300_000),
+    ] {
+        ensure!((1..=max).contains(&value), "{field} must be in 1..={max}");
+    }
+    ensure!(
+        (1..=MAX_ROUTES).contains(&raw.routes.len()),
+        "routes must contain 1..={MAX_ROUTES} entries"
+    );
+
+    let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();
+    for (index, route) in raw.routes.into_iter().enumerate() {
+        let host = canonical_host(&route.host)
+            .with_context(|| format!("invalid routes[{index}].host"))?
+            .into_owned();
+        let prefix = route.path_prefix.unwrap_or_else(|| "/".into());
+        ensure!(
+            prefix.starts_with('/')
+                && (prefix == "/" || !prefix.ends_with('/'))
+                && prefix
+                    .parse::<PathAndQuery>()
+                    .is_ok_and(|value| value.path() == prefix),
+            "invalid routes[{index}].path_prefix"
+        );
+        let upstream = route.upstream.parse::<Uri>().ok().filter(|uri| {
+            matches!(uri.scheme_str(), Some("http" | "https"))
+                && uri.path() == "/"
+                && uri.query().is_none()
+                && !route.upstream.contains('#')
+        });
+        let parts = upstream.map(Uri::into_parts).with_context(|| {
+            format!("invalid routes[{index}].upstream (expected HTTP(S) origin)")
+        })?;
+        let authority = parts
+            .authority
+            .filter(valid_authority)
+            .with_context(|| format!("invalid routes[{index}].upstream authority"))?;
+        let scheme = parts.scheme.context("missing upstream scheme")?;
+        let upstream_host = HeaderValue::from_str(authority.as_str())?;
+        let list = by_host.entry(host).or_default();
+        ensure!(
+            !list.iter().any(|entry| entry.prefix == prefix),
+            "duplicate host and path_prefix at routes[{index}]"
+        );
+        list.push(Route {
+            prefix,
+            scheme,
+            authority,
+            upstream_host,
+        });
+    }
+    for list in by_host.values_mut() {
+        list.sort_unstable_by_key(|route| std::cmp::Reverse(route.prefix.len()));
+    }
+    let tls = tls::load(
+        dir,
+        settings.tls,
+        raw.certificates,
+        raw.upstream_ca_file.as_deref(),
+        by_host.keys(),
+    )
+    .await?;
+    Ok(Config {
+        tls,
+        settings,
+        routes: Routes { by_host },
+    })
+}
+
+pub(crate) fn valid_authority(authority: &Authority) -> bool {
+    let text = authority.as_str();
+    let host = authority.host();
+    canonical_host(host).is_some()
+        && (text == host
+            || text.strip_prefix(host).is_some_and(|port| {
+                port.starts_with(':') && authority.port_u16().is_some_and(|port| port != 0)
+            }))
+}
+
+pub(crate) fn canonical_host(host: &str) -> Option<Cow<'_, str>> {
+    if let Some(ipv6) = host.strip_prefix('[').and_then(|ip| ip.strip_suffix(']')) {
+        let ip = ipv6.parse::<std::net::Ipv6Addr>().ok()?;
+        return Some(Cow::Owned(format!("[{ip}]")));
+    }
+    if let Ok(IpAddr::V6(ip)) = host.parse() {
+        return Some(Cow::Owned(format!("[{ip}]")));
+    }
+    let host = host.strip_suffix('.').unwrap_or(host);
+    if host.len() > 253
+        || !host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return None;
+    }
+    if host.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Some(Cow::Owned(host.to_ascii_lowercase()))
+    } else {
+        Some(Cow::Borrowed(host))
+    }
+}
+
+pub(crate) fn milliseconds(value: u64) -> Duration {
+    Duration::from_millis(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_only_the_routing_hostname() {
+        assert_eq!(canonical_host("APP.Test.").as_deref(), Some("app.test"));
+        assert_eq!(
+            canonical_host("2001:0DB8::1").as_deref(),
+            Some("[2001:db8::1]")
+        );
+        assert_eq!(
+            canonical_host("[2001:db8::1]").as_deref(),
+            Some("[2001:db8::1]")
+        );
+        assert!(canonical_host("app.test..").is_none());
+        assert!(canonical_host("*.app.test").is_none());
+    }
+
+    #[test]
+    fn accepts_only_host_and_optional_nonzero_port_as_authority() {
+        for input in ["app.test", "app.test:8080", "[2001:db8::1]:8080"] {
+            assert!(valid_authority(&input.parse().unwrap()), "{input}");
+        }
+        for input in ["user@app.test", "app.test:", "app.test:0", "app.test:65536"] {
+            assert!(
+                !input.parse().is_ok_and(|value| valid_authority(&value)),
+                "{input}"
+            );
+        }
+    }
+}

@@ -1,0 +1,8 @@
+schema_version = 1
+
+[server]
+listen = "127.0.0.1:8080"
+
+[[routes]]
+host = "app.test"
+upstream = "http://127.0.0.1:9000"
