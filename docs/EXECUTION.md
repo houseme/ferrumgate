@@ -130,10 +130,20 @@ upstream = "http://127.0.0.1:9000"
 
 默认提前 720 小时或证书寿命的三分之一续期，以较短者为准。失败后指数退避，初次间隔 30 秒，最长 1 小时。保留已有证书直到新身份验证并持久化。状态目录有进程锁，避免两个实例同时管理。
 
+CA 要求外部账户绑定时，在 `[acme]` 后添加：
+
+```toml
+[acme.eab]
+key_id = "your-ca-issued-key-id"
+hmac_key_file = "secrets/eab.key"
+```
+
+文件包含 CA 提供的 base64url 编码 HMAC 密钥。Unix 上仅运行账户可读，例如 0600。EAB 只在创建账户时使用，账户状态文件保存注册后的凭据。首次注册成功后，可在后续启动配置移除 EAB 表，并沿用原状态目录。
+
 本机测试使用 Pebble 和 pebble-challtestsrv。确保两者在 PATH 上，或通过 `FGATE_PEBBLE`、`FGATE_PEBBLE_DNS` 指定二进制路径。
 
 ```bash
-cargo test --locked -p ferrumgate --test gateway pebble_validates_http01_issues_restores_and_renews -- --ignored --nocapture
+cargo test --locked -p ferrumgate --test gateway pebble_ -- --ignored --test-threads=1
 ```
 
 ## 4. 启用 WebSocket
@@ -347,7 +357,7 @@ cargo test --locked -p ferrumgate --test gateway udp::
 
 1. HTTP-01 已接入账户、订单、授权、签发、重启恢复和续期。证书和密钥以一个身份文件原子写入。未完成订单恢复与调度状态持久化作为后续切片。
 2. HTTP-01 challenge 按精确 Host 和 token 匹配，并随订单结束、错误和取消清理。下一切片实现 DNS-01，清理仅针对该订单建立的记录，传播检查与 provider 限流分开。
-3. 当前按证书有效期调度续期和退避，后续接入 ARI 和 EAB。未获得新证书时持续使用原证书，记录失败阶段和证书剩余寿命。
+3. 当前按证书有效期调度续期和退避，已支持 EAB 注册，后续接入 ARI。未获得新证书时持续使用原证书，记录失败阶段和证书剩余寿命。
 4. 在本地通过真实握手确认新旧证书切换，再独立运行公开 staging。记录域名、挑战类型、签发链、真实客户端验证和撤销/恢复演练。生产密钥和真实域名不进入测试 fixtures。
 
 ### E 管理、审计与观测
@@ -421,3 +431,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - 本轮独立验证覆盖 HTTP/TCP 探测、固定文本、重定向、目录受限静态文件、通配域名/SNI 和 TCP 字节和 UDP 报文转发。
 
 - 本轮 ACME 验证使用本机 Pebble 实际完成两次 HTTP-01 授权、签发及 HTTPS 握手。重启复用了账户与未过续期窗口的证书，临近到期的测试证书自动替换。公开 staging CA 与 DNS-01 分开验收。
+- EAB 已通过要求绑定的本机 Pebble。首次注册并签发后，测试移除了 EAB 文件和配置，重启仍复用账户并成功续期。

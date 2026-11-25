@@ -10,6 +10,10 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use arc_swap::ArcSwapOption;
+use base64::{
+    Engine,
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+};
 use http_body_util::Full;
 use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
@@ -21,8 +25,8 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use instant_acme::{
-    Account, AccountCredentials, AuthorizationStatus, ChallengeType, Identifier, NewAccount,
-    NewOrder, OrderStatus, RetryPolicy,
+    Account, AccountCredentials, AuthorizationStatus, ChallengeType, ExternalAccountKey,
+    Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use rustls::{
     crypto::ring,
@@ -57,6 +61,14 @@ pub(crate) struct RawAcme {
     ca_file: Option<PathBuf>,
     challenge_listen: Option<SocketAddr>,
     renew_before_hours: Option<u32>,
+    eab: Option<ExternalBinding>,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ExternalBinding {
+    key_id: String,
+    hmac_key_file: PathBuf,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -68,6 +80,7 @@ pub(crate) struct AcmeConfig {
     directory: String,
     pub ca_file: Option<PathBuf>,
     renew_before_hours: u32,
+    eab: Option<ExternalBinding>,
 }
 
 #[derive(Default)]
@@ -171,6 +184,22 @@ impl AcmeConfig {
             let bytes = read_file(file).await.context("read ACME CA file")?;
             CertificateDer::from_pem_slice(&bytes).context("parse ACME CA certificate")?;
         }
+        let eab = if let Some(mut eab) = raw.eab {
+            ensure!(
+                (1..=256).contains(&eab.key_id.len())
+                    && eab.key_id.bytes().all(|byte| byte.is_ascii_graphic()),
+                "invalid ACME EAB key ID"
+            );
+            ensure!(
+                !eab.hmac_key_file.as_os_str().is_empty(),
+                "ACME EAB HMAC key file is required"
+            );
+            eab.hmac_key_file = dir.join(eab.hmac_key_file);
+            eab.key().await?;
+            Some(eab)
+        } else {
+            None
+        };
         Ok(Self {
             domains,
             challenge_listen: raw
@@ -181,7 +210,12 @@ impl AcmeConfig {
             directory,
             ca_file,
             renew_before_hours,
+            eab,
         })
+    }
+
+    pub fn protected_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        std::iter::once(&self.state_dir).chain(self.eab.iter().map(|eab| &eab.hmac_key_file))
     }
 
     pub async fn restore(&self, managed: &Managed) -> Result<(std::fs::File, i64)> {
@@ -254,6 +288,11 @@ impl AcmeConfig {
             );
             return Ok(builder.from_credentials(account.credentials).await?);
         }
+        let external = if let Some(eab) = &self.eab {
+            Some(eab.key().await?)
+        } else {
+            None
+        };
         let contact = format!("mailto:{}", self.email);
         let (account, credentials) = builder
             .create(
@@ -263,7 +302,7 @@ impl AcmeConfig {
                     only_return_existing: false,
                 },
                 self.directory.clone(),
-                None,
+                external.as_ref(),
             )
             .await?;
         self.persist(
@@ -375,6 +414,31 @@ impl AcmeConfig {
         })
         .await??;
         Ok(())
+    }
+}
+
+impl ExternalBinding {
+    async fn key(&self) -> Result<ExternalAccountKey> {
+        let bytes = read_saved(&self.hmac_key_file)
+            .await
+            .context("read ACME EAB HMAC key file")?
+            .context("missing ACME EAB HMAC key file")?;
+        let encoded = std::str::from_utf8(&bytes)
+            .context("ACME EAB key must be base64url")?
+            .trim();
+        ensure!(
+            !encoded.is_empty() && encoded.len() <= 4096,
+            "invalid ACME EAB HMAC key length"
+        );
+        let key = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .or_else(|_| URL_SAFE.decode(encoded))
+            .map_err(|_| anyhow::anyhow!("invalid ACME EAB base64url key"))?;
+        ensure!(
+            key.len() >= 32,
+            "ACME EAB HS256 key needs at least 32 bytes"
+        );
+        Ok(ExternalAccountKey::new(self.key_id.clone(), &key))
     }
 }
 

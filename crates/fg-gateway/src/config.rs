@@ -283,7 +283,7 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         .iter()
         .flat_map(|entry| [&entry.cert_file, &entry.key_file])
         .chain(raw.upstream_ca_file.iter())
-        .chain(acme.iter().map(|acme| &acme.state_dir))
+        .chain(acme.iter().flat_map(AcmeConfig::protected_paths))
         .cloned()
         .collect();
     let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();

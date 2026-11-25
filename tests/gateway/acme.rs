@@ -15,6 +15,8 @@ use tokio_rustls::TlsConnector;
 
 use super::common::*;
 
+const EAB_KEY: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
 #[tokio::test]
 async fn rejects_invalid_acme_settings_at_config_check() -> Result<()> {
     let directory = tempfile::tempdir()?;
@@ -53,6 +55,16 @@ challenge_listen = "127.0.0.1:0"
 #[tokio::test]
 #[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
 async fn pebble_validates_http01_issues_restores_and_renews() -> Result<()> {
+    pebble_lifecycle(false).await
+}
+
+#[tokio::test]
+#[ignore = "requires the Pebble and pebble-challtestsrv binaries"]
+async fn pebble_requires_eab_then_reuses_the_account() -> Result<()> {
+    pebble_lifecycle(true).await
+}
+
+async fn pebble_lifecycle(eab: bool) -> Result<()> {
     let files = tempfile::tempdir()?;
     let api = free_tcp()?;
     let management = free_tcp()?;
@@ -75,6 +87,16 @@ async fn pebble_validates_http01_issues_restores_and_renews() -> Result<()> {
             .kill_on_drop(true)
             .spawn()?;
     let pebble_file = files.path().join("pebble.json");
+    let eab_key_file = files.path().join("binding.key");
+    let eab_registration = if eab {
+        std::fs::write(&eab_key_file, format!("{EAB_KEY}\n"))?;
+        std::fs::set_permissions(&eab_key_file, std::fs::Permissions::from_mode(0o600))?;
+        format!(
+            ",\"externalAccountBindingRequired\": true, \"externalAccountMACKeys\": {{\"fixture\": \"{EAB_KEY}\"}}"
+        )
+    } else {
+        String::new()
+    };
     std::fs::write(
         &pebble_file,
         format!(
@@ -84,7 +106,7 @@ async fn pebble_validates_http01_issues_restores_and_renews() -> Result<()> {
         "certificate": "{}",
         "privateKey": "{}",
         "httpPort": {},
-        "tlsPort": 5001
+        "tlsPort": 5001{eab_registration}
     }}}}"#,
             files.path().join("api.pem").display(),
             files.path().join("api.key").display(),
@@ -138,10 +160,22 @@ challenge_listen = "{challenge}"
             files.path().join("ca.pem").display()
         ),
     );
-    let mut gateway = Gateway::spawn(&settings).await?;
+    let with_binding = if eab {
+        let table = format!(
+            "\n[acme.eab]\nkey_id = \"fixture\"\nhmac_key_file = \"{}\"\n",
+            eab_key_file.display()
+        );
+        settings.replacen("\n[server]", &(table + "\n[server]"), 1)
+    } else {
+        settings.clone()
+    };
+    let mut gateway = Gateway::spawn(&with_binding).await?;
     gateway.wait_log("ACME certificate installed").await?;
     let initial = presented_certificate(gateway.addr, root.clone()).await?;
     let account = std::fs::read(state.join("account.json"))?;
+    if eab {
+        assert!(!String::from_utf8_lossy(&account).contains(EAB_KEY));
+    }
     assert!(
         !Gateway::spawn(&settings).await.is_ok(),
         "shared state directory must be locked"
@@ -156,6 +190,9 @@ challenge_listen = "{challenge}"
     gateway.signal("-TERM").await?;
     gateway.wait_exit().await?;
 
+    if eab {
+        std::fs::remove_file(&eab_key_file)?;
+    }
     let mut restored = Gateway::spawn(&settings).await?;
     assert_eq!(
         presented_certificate(restored.addr, root.clone()).await?,
@@ -232,5 +269,41 @@ fn install_near_expiry_fixture(path: &Path) -> Result<()> {
     let key = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key)?;
     std::fs::write(path, format!("{}\n{}", cert.pem(), key.serialize_pem()))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn validates_private_eab_key_file_before_binding() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))?;
+    let secret = dir.path().join("binding.key");
+    let routes = route("app.test", "127.0.0.1:9000".parse()?, "/");
+    let settings = config(
+        &routes,
+        "tls = true",
+        &format!(
+            r#"
+[acme]
+domains = ["app.test"]
+email = "ops@app.test"
+accept_terms = true
+state_dir = "{}"
+
+[acme.eab]
+key_id = "test"
+hmac_key_file = "{}"
+"#,
+            dir.path().display(),
+            secret.display()
+        ),
+    );
+    assert!(!Gateway::check(dir.path(), &settings).await?);
+    std::fs::write(&secret, EAB_KEY)?;
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644))?;
+    assert!(!Gateway::check(dir.path(), &settings).await?);
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600))?;
+    assert!(Gateway::check(dir.path(), &settings).await?);
+    std::fs::write(&secret, "short")?;
+    assert!(!Gateway::check(dir.path(), &settings).await?);
     Ok(())
 }
