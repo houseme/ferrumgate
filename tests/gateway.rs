@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+#[cfg(unix)]
+#[path = "gateway/acme.rs"]
+mod acme;
 #[path = "gateway/backends.rs"]
 mod backends;
 #[path = "gateway/common.rs"]

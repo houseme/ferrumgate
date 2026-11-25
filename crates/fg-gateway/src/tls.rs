@@ -17,7 +17,10 @@ use serde::Deserialize;
 use tokio_rustls::TlsAcceptor;
 use x509_parser::prelude::{FromDer, GeneralName, X509Certificate};
 
-use crate::config::{canonical_host, read_file};
+use crate::{
+    acme::Managed,
+    config::{canonical_host, read_file},
+};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,19 +35,35 @@ pub(crate) struct Tls {
     pub client: ClientConfig,
 }
 
-#[derive(Debug)]
 struct Resolver {
     exact: ResolvesServerCertUsingSni,
     wildcard: HashMap<String, Arc<CertifiedKey>>,
+    managed: Option<(Vec<String>, Arc<Managed>)>,
+}
+
+impl std::fmt::Debug for Resolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Resolver").finish_non_exhaustive()
+    }
 }
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        let managed = self.managed.as_ref().filter(|(domains, _)| {
+            hello.server_name().is_some_and(|host| {
+                domains
+                    .binary_search_by(|domain| domain.as_str().cmp(host))
+                    .is_ok()
+            })
+        });
         let wildcard = hello
             .server_name()
             .and_then(|name| name.split_once('.'))
             .and_then(|(_, suffix)| self.wildcard.get(suffix));
-        self.exact.resolve(hello).or_else(|| wildcard.cloned())
+        self.exact
+            .resolve(hello)
+            .or_else(|| managed.and_then(|(_, store)| store.certificate.load_full()))
+            .or_else(|| wildcard.cloned())
     }
 }
 
@@ -54,18 +73,24 @@ pub(crate) async fn load<'a>(
     certificates: Vec<CertificateFiles>,
     upstream_ca_file: Option<&Path>,
     route_hosts: impl Iterator<Item = &'a String>,
+    managed: Option<(Vec<String>, Arc<Managed>)>,
 ) -> Result<Tls> {
     ensure!(
-        enabled != certificates.is_empty() && certificates.len() <= 1024,
-        "server.tls requires 1..=1024 certificates; HTTP requires an empty certificate list"
+        enabled == (!certificates.is_empty() || managed.is_some()) && certificates.len() <= 1024,
+        "server.tls requires manual or managed certificates; HTTP requires an empty certificate list"
     );
     let provider = Arc::new(ring::default_provider());
     let server = if enabled {
         let mut resolver = Resolver {
             exact: ResolvesServerCertUsingSni::new(),
             wildcard: HashMap::new(),
+            managed,
         };
-        let mut names = HashSet::new();
+        let mut names: HashSet<String> = resolver
+            .managed
+            .iter()
+            .flat_map(|(domains, _)| domains.iter().cloned())
+            .collect();
         for (index, entry) in certificates.into_iter().enumerate() {
             let load = async {
                 let wildcard = entry.host.strip_prefix("*.");

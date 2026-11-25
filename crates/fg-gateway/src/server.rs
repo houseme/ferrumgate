@@ -21,6 +21,7 @@ use tokio::{
 };
 
 use crate::{
+    acme::{self, Managed},
     config::{self, Config, milliseconds},
     proxy::Proxy,
 };
@@ -41,7 +42,18 @@ impl Generation {
 
 /// Run the configured data plane until a process shutdown signal arrives.
 pub async fn serve(path: PathBuf) -> Result<()> {
-    let mut config = config::load(&path).await?;
+    let managed = Arc::new(Managed::default());
+    let mut config = config::load(&path, managed.clone()).await?;
+    let acme_config = config.acme.take();
+    let acme_boot = if let Some(acme) = &acme_config {
+        let (lock, renew_at) = acme.restore(&managed).await?;
+        let listener = TcpListener::bind(acme.challenge_listen)
+            .await
+            .context("bind ACME HTTP-01 listener")?;
+        Some((lock, renew_at, listener))
+    } else {
+        None
+    };
     let tcp_rules = std::mem::take(&mut config.tcp_forward);
     let udp_rules = std::mem::take(&mut config.udp_forward);
     let settings = config.settings.clone();
@@ -73,12 +85,13 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         #[cfg(unix)]
         while hangup.recv().await.is_some() {
             let candidate = async {
-                let next = config::load(&path).await?;
+                let next = config::load(&path, managed.clone()).await?;
                 anyhow::ensure!(
                     next.settings == settings
                         && next.tcp_forward == tcp_rules
-                        && next.udp_forward == udp_rules,
-                    "server and forwarding settings require restart"
+                        && next.udp_forward == udp_rules
+                        && next.acme == acme_config,
+                    "server, forwarding, and ACME settings require restart"
                 );
                 let next = Arc::new(Generation::new(next));
                 state.store(next.clone());
@@ -133,6 +146,17 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         tracing::info!(listen = %listener.local_addr()?, "TCP forward ready");
         forwarding.spawn(rule.serve(listener, drain.subscribe()));
     }
+    let mut acme_tasks = JoinSet::new();
+    let _acme_lock = if let Some((lock, renew_at, listener)) = acme_boot {
+        tracing::info!(listen = %listener.local_addr()?, "ACME HTTP-01 listener ready");
+        let acme = acme_config.clone().expect("ACME startup config");
+        acme_tasks.spawn(acme::serve_challenges(listener, managed.clone()));
+        let lock = Arc::new(lock);
+        acme_tasks.spawn(acme.run(managed.clone(), lock.clone(), renew_at));
+        Some(lock)
+    } else {
+        None
+    };
     let mut health = JoinSet::new();
     health.spawn(async move {
         loop {
@@ -220,7 +244,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
 
     drop(listener);
     drain.send_replace(true);
-    health.shutdown().await;
+    tokio::join!(health.shutdown(), acme_tasks.shutdown());
     tracing::info!("gateway draining connections");
     if timeout(milliseconds(settings.shutdown_timeout_ms), async {
         tokio::join!(

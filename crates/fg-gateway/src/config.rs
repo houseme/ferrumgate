@@ -3,6 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 
@@ -12,6 +13,7 @@ use serde::Deserialize;
 use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
+    acme::{AcmeConfig, Managed, RawAcme},
     backend::{BackendPool, RawBackend},
     domains,
     health::{HealthCheck, RawHealthCheck},
@@ -40,6 +42,7 @@ struct RawConfig {
     #[serde(default)]
     certificates: Vec<CertificateFiles>,
     upstream_ca_file: Option<PathBuf>,
+    acme: Option<RawAcme>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -94,6 +97,7 @@ pub(crate) struct Config {
     pub settings: Settings,
     pub routes: Routes,
     pub tls: Tls,
+    pub acme: Option<AcmeConfig>,
     pub tcp_forward: Vec<TcpForward>,
     pub udp_forward: Vec<UdpForward>,
 }
@@ -161,7 +165,7 @@ pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-pub(crate) async fn load(path: &Path) -> Result<Config> {
+pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     let bytes = read_file(path).await.context("read configuration")?;
     let input = std::str::from_utf8(&bytes).context("config must be UTF-8")?;
     let dir = path.parent().context("configuration must name a file")?;
@@ -260,11 +264,26 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         );
         udp_forward.push(rule);
     }
+    let acme = if let Some(acme) = raw.acme {
+        ensure!(
+            settings.http_enabled && settings.tls,
+            "ACME requires the TLS business listener"
+        );
+        let acme = AcmeConfig::compile(acme, dir).await?;
+        ensure!(
+            acme.challenge_listen.port() == 0 || listens.insert(acme.challenge_listen),
+            "duplicate ACME HTTP challenge listener"
+        );
+        Some(acme)
+    } else {
+        None
+    };
     let protected: Vec<_> = raw
         .certificates
         .iter()
         .flat_map(|entry| [&entry.cert_file, &entry.key_file])
         .chain(raw.upstream_ca_file.iter())
+        .chain(acme.iter().map(|acme| &acme.state_dir))
         .cloned()
         .collect();
     let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();
@@ -336,10 +355,12 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         raw.certificates,
         raw.upstream_ca_file.as_deref(),
         by_host.keys(),
+        acme.as_ref().map(|acme| (acme.domains.clone(), managed)),
     )
     .await?;
     Ok(Config {
         tls,
+        acme,
         tcp_forward,
         udp_forward,
         settings,

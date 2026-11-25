@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod acme;
 mod backend;
 mod config;
 mod domains;
@@ -21,5 +22,7 @@ pub use server::serve;
 
 /// Load and validate the gateway configuration and referenced TLS material.
 pub async fn check_config(path: &Path) -> anyhow::Result<()> {
-    config::load(path).await.map(|_| ())
+    config::load(path, std::sync::Arc::new(acme::Managed::default()))
+        .await
+        .map(|_| ())
 }
