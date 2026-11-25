@@ -31,3 +31,5 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 在根目录运行 `cargo test --workspace --locked`，可执行 Rust 单元测试和真实回环端到端测试。
 
 为代理路由添加 `[routes.health]` 可开启 HTTP 或 TCP 主动检查，探测按连续失败和成功次数摘除或恢复后端。[健康检查配置](docs/EXECUTION.md#主动健康检查)
+
+本地站点响应支持 HTTP 重定向和带状态码、内容类型的固定文本。[配置示例](docs/EXECUTION.md#本地响应路由)

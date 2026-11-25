@@ -24,7 +24,7 @@ use hyper_util::{
 use tokio::time::timeout;
 
 use crate::{
-    config::{self, Routes, Settings, milliseconds},
+    config::{self, RouteAction, Routes, Settings, milliseconds},
     websocket::{Handshake, Tunnel},
 };
 
@@ -165,6 +165,18 @@ impl Proxy {
             }
             let Some(route) = self.routes.find(&host, target.path()) else {
                 return reply(StatusCode::NOT_FOUND);
+            };
+            let route = match &route.action {
+                RouteAction::Proxy(route) => route,
+                RouteAction::Response(site) => {
+                    if request.headers().contains_key(UPGRADE) {
+                        return reply(StatusCode::NOT_IMPLEMENTED);
+                    }
+                    return match site.serve(request.method(), &host, target) {
+                        Ok(response) => response.map(Either::Right),
+                        Err(status) => reply(status),
+                    };
+                }
             };
             let Some(backend) = route.backends.select(route.health.is_some()) else {
                 return reply(StatusCode::SERVICE_UNAVAILABLE);

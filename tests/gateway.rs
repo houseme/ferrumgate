@@ -8,6 +8,8 @@ mod common;
 mod http;
 #[path = "gateway/http2.rs"]
 mod http2;
+#[path = "gateway/site.rs"]
+mod site;
 #[path = "gateway/tls.rs"]
 mod tls;
 #[path = "gateway/websocket.rs"]

@@ -14,6 +14,7 @@ use tokio::{fs, io::AsyncReadExt};
 use crate::{
     backend::{BackendPool, RawBackend},
     health::{HealthCheck, RawHealthCheck},
+    site::{RawResponse, SiteResponse},
     tls::{self, CertificateFiles, Tls},
 };
 
@@ -76,6 +77,7 @@ struct RawRoute {
     #[serde(default)]
     upstream_h2c: bool,
     health: Option<RawHealthCheck>,
+    response: Option<RawResponse>,
 }
 
 pub(crate) struct Config {
@@ -90,6 +92,15 @@ pub(crate) struct Routes {
 
 pub(crate) struct Route {
     prefix: String,
+    pub action: RouteAction,
+}
+
+pub(crate) enum RouteAction {
+    Proxy(ProxyRoute),
+    Response(SiteResponse),
+}
+
+pub(crate) struct ProxyRoute {
     pub backends: BackendPool,
     pub websocket: bool,
     pub upstream_h2c: bool,
@@ -191,30 +202,45 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
                     .is_ok_and(|value| value.path() == prefix),
             "invalid routes[{index}].path_prefix"
         );
-        let health = route
-            .health
-            .map(HealthCheck::compile)
-            .transpose()
-            .with_context(|| format!("invalid routes[{index}].health"))?;
-        let backends = BackendPool::compile(route.upstream, route.backends, route.upstream_h2c)
-            .with_context(|| format!("invalid routes[{index}] backend pool"))?;
-        backend_count += backends.len();
-        ensure!(
-            backend_count <= MAX_BACKENDS,
-            "expected at most {MAX_BACKENDS} backends"
-        );
+        let action = if let Some(response) = route.response {
+            ensure!(
+                route.upstream.is_none()
+                    && route.backends.is_empty()
+                    && route.health.is_none()
+                    && !route.websocket
+                    && !route.upstream_h2c,
+                "routes[{index}].response cannot have proxy settings"
+            );
+            RouteAction::Response(
+                SiteResponse::compile(response)
+                    .with_context(|| format!("invalid routes[{index}].response"))?,
+            )
+        } else {
+            let health = route
+                .health
+                .map(HealthCheck::compile)
+                .transpose()
+                .with_context(|| format!("invalid routes[{index}].health"))?;
+            let backends = BackendPool::compile(route.upstream, route.backends, route.upstream_h2c)
+                .with_context(|| format!("invalid routes[{index}] backend pool"))?;
+            backend_count += backends.len();
+            ensure!(
+                backend_count <= MAX_BACKENDS,
+                "expected at most {MAX_BACKENDS} backends"
+            );
+            RouteAction::Proxy(ProxyRoute {
+                backends,
+                websocket: route.websocket,
+                upstream_h2c: route.upstream_h2c,
+                health,
+            })
+        };
         let list = by_host.entry(host).or_default();
         ensure!(
             !list.iter().any(|entry| entry.prefix == prefix),
             "duplicate host and path_prefix at routes[{index}]"
         );
-        list.push(Route {
-            prefix,
-            backends,
-            websocket: route.websocket,
-            upstream_h2c: route.upstream_h2c,
-            health,
-        });
+        list.push(Route { prefix, action });
     }
     for list in by_host.values_mut() {
         list.sort_unstable_by_key(|route| std::cmp::Reverse(route.prefix.len()));

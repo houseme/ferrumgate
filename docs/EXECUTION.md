@@ -175,6 +175,32 @@ passes = 2
 
 `interval_secs` 允许 1–3600，`timeout_secs` 允许 1–60，`fails` 和 `passes` 允许 1–20。观察日志中 `upstream unavailable` 和 `upstream recovered`。使用真实探测路径返回 503 后再恢复 200，验证备用切换和恢复次数。
 
+### 本地响应路由
+
+为选定的 Host 和路径直接生成重定向或固定文本。响应路由与后端、健康检查及 WebSocket 配置互斥。
+
+```toml
+[[routes]]
+host = "app.test"
+path_prefix = "/move"
+[routes.response]
+type = "redirect"
+target = "https://{host}:8443"
+status = 308
+keep_path = true
+
+[[routes]]
+host = "app.test"
+path_prefix = "/maintenance"
+[routes.response]
+type = "text"
+status = 503
+body = "服务维护中"
+content_type = "text/plain; charset=utf-8"
+```
+
+重定向支持 301、302、307 和 308，默认 302。目标须为绝对 HTTP(S) URL。目标 authority 中的 `{host}` 使用已匹配的主机名。保留原路径时，原始路径追加到目标路径。目标查询参数优先，未设置时保留请求查询。固定文本默认 200，接受 200–599，HEAD 只返回头部。 [Gately 站点类型](https://gately.cn/en/docs/modules/web#site-types)
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |

@@ -12,7 +12,7 @@ use tokio::{
 
 use crate::{
     backend::Backend,
-    config::{Route, Routes},
+    config::{ProxyRoute, RouteAction, Routes},
     proxy::Proxy,
 };
 
@@ -103,7 +103,9 @@ pub(crate) async fn monitor(proxy: &Proxy, routes: &Routes) {
     let slots = Semaphore::new(MAX_CONCURRENT_PROBES);
     let mut jobs = FuturesUnordered::new();
     for (host, route) in routes.iter() {
-        if let Some(check) = &route.health {
+        if let RouteAction::Proxy(route) = &route.action
+            && let Some(check) = &route.health
+        {
             for backend in route.backends.iter() {
                 jobs.push(run_check(proxy, host, route, backend, check, &slots));
             }
@@ -115,7 +117,7 @@ pub(crate) async fn monitor(proxy: &Proxy, routes: &Routes) {
 async fn run_check(
     proxy: &Proxy,
     host: &str,
-    route: &Route,
+    route: &ProxyRoute,
     backend: &Backend,
     check: &HealthCheck,
     slots: &Semaphore,

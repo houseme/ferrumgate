@@ -7,6 +7,7 @@ mod config;
 mod health;
 mod proxy;
 mod server;
+mod site;
 mod tls;
 mod websocket;
 
