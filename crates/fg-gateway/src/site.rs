@@ -1,18 +1,24 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result, ensure};
-use http_body_util::Full;
+use http_body_util::{Either, Full};
 use hyper::{
     Method, Response, StatusCode, Uri,
     body::Bytes,
-    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderValue, LOCATION},
+    header::{CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderValue, LOCATION},
     http::uri::{Authority, PathAndQuery},
 };
 use serde::Deserialize;
 
-use crate::config::valid_authority;
+use crate::{
+    config::valid_authority,
+    static_files::{LocalBody, RawStatic, StaticFiles},
+};
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum RawResponse {
+    Static(RawStatic),
     Redirect {
         target: String,
         status: Option<u16>,
@@ -27,6 +33,7 @@ pub(crate) enum RawResponse {
 }
 
 pub(crate) enum SiteResponse {
+    Static(StaticFiles),
     Redirect {
         target: Uri,
         status: StatusCode,
@@ -41,8 +48,15 @@ pub(crate) enum SiteResponse {
 }
 
 impl SiteResponse {
-    pub fn compile(config: RawResponse) -> Result<Self> {
+    pub async fn compile(
+        config: RawResponse,
+        config_dir: &Path,
+        protected: &[PathBuf],
+    ) -> Result<Self> {
         match config {
+            RawResponse::Static(config) => Ok(Self::Static(
+                StaticFiles::compile(config, config_dir, protected).await?,
+            )),
             RawResponse::Redirect {
                 target,
                 status,
@@ -117,13 +131,26 @@ impl SiteResponse {
         }
     }
 
-    pub fn serve(
+    pub async fn serve(
         &self,
         method: &Method,
         host: &str,
         request_path: &PathAndQuery,
-    ) -> std::result::Result<Response<Full<Bytes>>, StatusCode> {
+        prefix: &str,
+        headers: &HeaderMap,
+    ) -> std::result::Result<Response<LocalBody>, StatusCode> {
         match self {
+            Self::Static(site) => {
+                let path = if prefix == "/" {
+                    request_path.path()
+                } else {
+                    request_path
+                        .path()
+                        .strip_prefix(prefix)
+                        .expect("matched route prefix")
+                };
+                site.serve(method, path, headers).await
+            }
             Self::Redirect {
                 target,
                 status,
@@ -170,7 +197,7 @@ impl SiteResponse {
                     HeaderValue::from_str(&location.to_string())
                         .map_err(|_| StatusCode::BAD_REQUEST)?,
                 );
-                Ok(reply)
+                Ok(reply.map(Either::Left))
             }
             Self::Text {
                 status,
@@ -192,7 +219,7 @@ impl SiteResponse {
                         .headers_mut()
                         .insert(CONTENT_LENGTH, HeaderValue::from(body.len()));
                 }
-                Ok(reply)
+                Ok(reply.map(Either::Left))
             }
         }
     }

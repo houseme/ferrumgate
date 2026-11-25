@@ -91,7 +91,7 @@ pub(crate) struct Routes {
 }
 
 pub(crate) struct Route {
-    prefix: String,
+    pub prefix: String,
     pub action: RouteAction,
 }
 
@@ -187,6 +187,13 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         "routes must contain 1..={MAX_ROUTES} entries"
     );
 
+    let protected: Vec<_> = raw
+        .certificates
+        .iter()
+        .flat_map(|entry| [&entry.cert_file, &entry.key_file])
+        .chain(raw.upstream_ca_file.iter())
+        .cloned()
+        .collect();
     let mut by_host: HashMap<String, Vec<Route>> = HashMap::new();
     let mut backend_count = 0;
     for (index, route) in raw.routes.into_iter().enumerate() {
@@ -212,7 +219,8 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
                 "routes[{index}].response cannot have proxy settings"
             );
             RouteAction::Response(
-                SiteResponse::compile(response)
+                SiteResponse::compile(response, dir, &protected)
+                    .await
                     .with_context(|| format!("invalid routes[{index}].response"))?,
             )
         } else {

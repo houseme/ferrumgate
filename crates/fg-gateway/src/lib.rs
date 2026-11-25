@@ -8,6 +8,7 @@ mod health;
 mod proxy;
 mod server;
 mod site;
+mod static_files;
 mod tls;
 mod websocket;
 

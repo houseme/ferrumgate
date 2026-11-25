@@ -25,12 +25,13 @@ use tokio::time::timeout;
 
 use crate::{
     config::{self, RouteAction, Routes, Settings, milliseconds},
+    static_files::LocalBody,
     websocket::{Handshake, Tunnel},
 };
 
 pub(crate) type RequestBody = Either<DataBody, Empty<Bytes>>;
 
-type Reply = Response<Either<DataBody, Full<Bytes>>>;
+type Reply = Response<Either<DataBody, LocalBody>>;
 
 pub(crate) struct Proxy {
     routes: Routes,
@@ -172,7 +173,16 @@ impl Proxy {
                     if request.headers().contains_key(UPGRADE) {
                         return reply(StatusCode::NOT_IMPLEMENTED);
                     }
-                    return match site.serve(request.method(), &host, target) {
+                    return match site
+                        .serve(
+                            request.method(),
+                            &host,
+                            target,
+                            route.prefix.as_str(),
+                            request.headers(),
+                        )
+                        .await
+                    {
                         Ok(response) => response.map(Either::Right),
                         Err(status) => reply(status),
                     };
@@ -282,7 +292,7 @@ impl Proxy {
                 if tunnel.set(upgraded).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
                 }
-                response.map(|_| Either::Right(Full::default()))
+                response.map(|_| Either::Right(Either::Left(Full::default())))
             }
             Ok(Ok(mut response)) if !response.status().is_informational() => {
                 if strip_hop_headers(response.headers_mut()).is_err() {
@@ -357,12 +367,12 @@ pub(crate) fn strip_hop_headers(headers: &mut HeaderMap) -> Result<bool, ()> {
 }
 
 fn reply(status: StatusCode) -> Reply {
-    let mut response = Response::new(Either::Right(Full::new(Bytes::from_static(
+    let mut response = Response::new(Either::Right(Either::Left(Full::new(Bytes::from_static(
         status
             .canonical_reason()
             .unwrap_or("Gateway error")
             .as_bytes(),
-    ))));
+    )))));
     *response.status_mut() = status;
     response.headers_mut().insert(
         CONTENT_TYPE,

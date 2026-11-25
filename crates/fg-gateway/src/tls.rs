@@ -22,8 +22,8 @@ use crate::config::{canonical_host, read_file};
 #[serde(deny_unknown_fields)]
 pub(crate) struct CertificateFiles {
     host: String,
-    cert_file: PathBuf,
-    key_file: PathBuf,
+    pub(crate) cert_file: PathBuf,
+    pub(crate) key_file: PathBuf,
 }
 
 pub(crate) struct Tls {

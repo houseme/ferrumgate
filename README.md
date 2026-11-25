@@ -33,3 +33,5 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 为代理路由添加 `[routes.health]` 可开启 HTTP 或 TCP 主动检查，探测按连续失败和成功次数摘除或恢复后端。[健康检查配置](docs/EXECUTION.md#主动健康检查)
 
 本地站点响应支持 HTTP 重定向和带状态码、内容类型的固定文本。[配置示例](docs/EXECUTION.md#本地响应路由)
+
+静态站点支持目录索引、Clean URLs、自定义 404、HEAD 和单区间 Range，目录访问受配置根限制。[静态站点配置](docs/EXECUTION.md#静态站点)

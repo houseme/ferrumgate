@@ -201,6 +201,25 @@ content_type = "text/plain; charset=utf-8"
 
 重定向支持 301、302、307 和 308，默认 302。目标须为绝对 HTTP(S) URL。目标 authority 中的 `{host}` 使用已匹配的主机名。保留原路径时，原始路径追加到目标路径。目标查询参数优先，未设置时保留请求查询。固定文本默认 200，接受 200–599，HEAD 只返回头部。 [Gately 站点类型](https://gately.cn/en/docs/modules/web#site-types)
 
+### 静态站点
+
+```toml
+[[routes]]
+host = "app.test"
+path_prefix = "/assets"
+[routes.response]
+type = "static"
+root = "/srv/ferrumgate-site"
+clean_urls = true
+not_found = "404.html"
+```
+
+`root` 使用独立的绝对目录，与配置目录分开，目录中不能包含配置引用的 TLS 文件。该路由会移除匹配的路径前缀。目录以 `index.html` 为入口，Clean URLs 同时尝试 `name.html`，目录内容不列出。缺少文件时返回 404，可用 `not_found` 指定根目录内的文件。GET 流式读取文件，支持一个字节范围。HEAD 返回元数据。
+
+```bash
+cargo test --locked -p ferrumgate --test gateway site::
+```
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
@@ -296,4 +315,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。C1 在 macOS arm64 上通过 workspace Clippy、5 项 Rust 单测、release 构建和 12 项 Rust 端到端测试。新增场景覆盖两跳握手校验、WebSocket over TLS、子协议、路由关闭后保留既有会话，以及连接名额、寿命和停机。
 - C2 在 macOS arm64 通过 3 项独立 HTTP/2 端到端用例，覆盖两条并行 gRPC 流、双向数据、取消传播、请求与响应 trailers、TLS 上游、WebSocket 回落及 HTTP/1.1 普通后端。
 - C3 在 macOS arm64 通过 workspace Clippy、6 项 Rust 单测、release 构建与 17 项 Rust 端到端测试。新增场景验证 2:1 权重、三次连接失败后的备用切换、冷却期边界及配置拒绝。
-- 已接入主动 HTTP/TCP 健康检查。后续 Web 服务切片包含本地站点响应与静态文件。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
+- 已接入主动 HTTP/TCP 健康检查。Web 服务已接入重定向、固定文本和静态文件。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
