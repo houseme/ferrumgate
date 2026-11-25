@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::Entry},
     io,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering::Relaxed},
     time::Duration,
 };
 
@@ -18,6 +18,7 @@ use tokio::{
 };
 
 use crate::{
+    forward_metrics::ForwardStats,
     forward_ports,
     source_policy::{RawSourcePolicy, SourcePolicy},
 };
@@ -143,9 +144,11 @@ impl UdpForward {
         self,
         socket: UdpSocket,
         mut drain: watch::Receiver<bool>,
+        stats: Option<Arc<ForwardStats>>,
         permits: impl Fn(IpAddr) -> bool + Clone + Send + Sync + 'static,
     ) {
         let socket = Arc::new(socket);
+        let rule = Arc::new(self);
         let mut tasks = JoinSet::new();
         let mut sessions = HashMap::<SocketAddr, (Id, mpsc::Sender<Packet>)>::new();
         let mut buffer = vec![0; MAX_DATAGRAM];
@@ -172,20 +175,26 @@ impl UdpForward {
                             continue;
                         }
                     };
-                    if !permits(peer.ip()) { continue; }
+                    if !permits(peer.ip()) {
+                        if let Some(stats) = &stats {
+                            stats.denied.fetch_add(1, Relaxed);
+                        }
+                        continue;
+                    }
                     let Ok(reservation) = QUEUED_PACKETS.try_acquire() else { continue };
-                    let can_start = sessions.len() < self.max_sessions;
+                    let can_start = sessions.len() < rule.max_sessions;
                     let (_, queue) = match sessions.entry(peer) {
                         Entry::Occupied(entry) => entry.into_mut(),
                         Entry::Vacant(entry) if can_start => {
                             let (send, receive) = mpsc::channel(4);
                             let socket = socket.clone();
                             let permits = permits.clone();
-                            let targets = self.targets.clone();
+                            let rule = rule.clone();
+                            let stats = stats.clone();
                             let start = next_target;
-                            next_target = (start + 1) % targets.len();
+                            next_target = (start + 1) % rule.targets.len();
                             let task = tasks.spawn(async move {
-                                if let Err(error) = relay(socket, peer, receive, &targets, start, self.idle, permits).await {
+                                if let Err(error) = relay(socket, peer, receive, &rule, start, stats.as_deref(), permits).await {
                                     tracing::debug!(kind = ?error.kind(), "UDP relay ended");
                                 }
                                 peer
@@ -208,12 +217,12 @@ async fn relay(
     listener: Arc<UdpSocket>,
     peer: SocketAddr,
     mut packets: mpsc::Receiver<Packet>,
-    targets: &[SocketAddr],
+    rule: &UdpForward,
     start: usize,
-    idle: Duration,
+    stats: Option<&ForwardStats>,
     permits: impl Fn(IpAddr) -> bool + Send + Sync,
 ) -> io::Result<()> {
-    let mut candidates = targets[start..].iter().chain(&targets[..start]);
+    let mut candidates = rule.targets[start..].iter().chain(&rule.targets[..start]);
     let mut connected = connect(*candidates.next().expect("validated UDP target list")).await;
     for &target in candidates {
         if connected.is_ok() {
@@ -222,18 +231,25 @@ async fn relay(
         connected = connect(target).await;
     }
     let upstream = connected?;
+    let _active = stats.map(ForwardStats::open);
     loop {
-        let result = timeout(idle, async {
+        let result = timeout(rule.idle, async {
             tokio::select! {
                 packet = packets.recv() => {
                     let Some(packet) = packet else { return Ok(false) };
                     if !permits(peer.ip()) { return Ok(false); }
-                    upstream.send(&packet.data).await?;
+                    let sent = upstream.send(&packet.data).await?;
+                    if let Some(stats) = stats {
+                        stats.bytes_in.fetch_add(sent as u64, Relaxed);
+                    }
                 }
                 response = recv_reply(&upstream) => {
                     let (buffer, len) = response?;
                     if !permits(peer.ip()) { return Ok(false); }
-                    listener.send_to(&buffer.0[..len], peer).await?;
+                    let sent = listener.send_to(&buffer.0[..len], peer).await?;
+                    if let Some(stats) = stats {
+                        stats.bytes_out.fetch_add(sent as u64, Relaxed);
+                    }
                 }
             }
             Ok::<_, io::Error>(true)

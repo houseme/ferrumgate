@@ -448,6 +448,34 @@ max_sessions = 128
 
 需要同号映射时，在目标 IP 后重复监听端口表达式。每种协议最多展开 64 个监听器。配置校验拒绝重叠监听、无效范围和端口数量不匹配的目标。每个监听端口独立应用连接或会话上限，全部 UDP 监听端口的 `max_sessions` 之和不能超过 4096。调整映射需重启，来源规则可按原方式热重载。 [Gately 端口映射实现](https://github.com/wangwanjie/gately/blob/main/internal/l4proxy/ports.go)
 
+### 转发流量指标
+
+在现有 `[server]` 表中设置 `metrics_listen = "127.0.0.1:9090"` 后重启。省略该字段时关闭采集。也可使用 IPv6 回环地址 `[::1]:9090`。该监听独立于业务 HTTP 和转发监听，使用本机访问边界。可在同一主机运行 Prometheus，按以下配置采集。
+
+```yaml
+scrape_configs:
+  - job_name: ferrumgate
+    metrics_path: /api/metrics
+    static_configs:
+      - targets: ["127.0.0.1:9090"]
+```
+
+`GET /api/metrics` 返回 Prometheus 0.0.4 文本。每个实际绑定的端口以 `protocol` 和 `listen` 为标签。标签取自监听器，采集结果不含请求内容或客户端标识。
+
+| 指标 | 含义 |
+|---|---|
+| `ferrumgate_portforward_active_connections` | 当前运行的 TCP 连接任务或已连接上游的 UDP 会话 |
+| `ferrumgate_portforward_connections_total` | 已启动的 TCP 连接任务或已连接上游的 UDP 会话总数 |
+| `ferrumgate_portforward_bytes_total` | 双向成功写入套接字的应用字节。 `in` 是客户端到后端，`out` 是后端到客户端。出站 PROXY 头单独发送 |
+| `ferrumgate_portforward_source_denied_total` | 入站来源规则拒绝的 TCP 连接或 UDP 数据报数 |
+
+来源规则热重载保留累计值，进程重启重新计数。同一次采集独立读取各项值，持续传输时可看到实时进展。 [Gately 转发指标](https://github.com/wangwanjie/gately/blob/442162e4d0b64df119bc5fe6469a088adee844c4/internal/modules/portforward/metrics.go) · [Gately 监控文档](https://gately.cn/en/docs/reference/monitoring)
+
+```bash
+curl -fsS http://127.0.0.1:9090/api/metrics
+cargo test --locked -p ferrumgate --test gateway metrics::
+```
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |

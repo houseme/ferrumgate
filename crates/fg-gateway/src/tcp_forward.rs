@@ -2,6 +2,12 @@ use std::{
     collections::HashSet,
     io,
     net::{IpAddr, SocketAddr},
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering::Relaxed},
+    },
+    task::{Context as TaskContext, Poll},
     time::Duration,
 };
 
@@ -9,7 +15,7 @@ use anyhow::{Context, Result, ensure};
 use ipnet::IpNet;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncWriteExt, copy_bidirectional},
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::watch,
     task::JoinSet,
@@ -17,6 +23,7 @@ use tokio::{
 };
 
 use crate::{
+    forward_metrics::ForwardStats,
     forward_ports,
     source_policy::{RawSourcePolicy, SourcePolicy, compile_networks},
     source_quota::SourceQuota,
@@ -173,12 +180,13 @@ impl TcpForward {
         self,
         listener: TcpListener,
         mut drain: watch::Receiver<bool>,
+        stats: Option<Arc<ForwardStats>>,
         permits: impl Fn(IpAddr) -> bool + Send,
     ) {
-        let targets = std::sync::Arc::new(self.targets);
+        let targets = Arc::new(self.targets);
         let quota = self
             .source_limit
-            .map(|limit| (limit, std::sync::Arc::new(SourceQuota::default())));
+            .map(|limit| (limit, Arc::new(SourceQuota::default())));
         let mut connections = JoinSet::new();
         loop {
             tokio::select! {
@@ -199,6 +207,9 @@ impl TcpForward {
                         }
                     };
                     if !permits(peer.ip()) {
+                        if let Some(stats) = &stats {
+                            stats.denied.fetch_add(1, Relaxed);
+                        }
                         tracing::debug!(source = %peer.ip(), "TCP forward source denied");
                         continue;
                     }
@@ -214,9 +225,11 @@ impl TcpForward {
                         None
                     };
                     let targets = targets.clone();
+                    let stats = stats.clone();
                     connections.spawn(async move {
                         let _lease = lease;
-                        let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.first_data_timeout, self.proxy_protocol)).await;
+                        let _active = stats.as_deref().map(ForwardStats::open);
+                        let _ = timeout(self.connection_lifetime, relay(stream, peer, &targets, self.connect_timeout, self.first_data_timeout, self.proxy_protocol, stats.as_deref())).await;
                     });
                 }
             }
@@ -233,6 +246,7 @@ async fn relay(
     connect_timeout: Duration,
     first_data_timeout: Duration,
     proxy_protocol: Option<ProxyProtocol>,
+    stats: Option<&ForwardStats>,
 ) {
     let _ = client.set_nodelay(true);
     for &target in targets {
@@ -260,9 +274,16 @@ async fn relay(
             .await;
             let result = match first_data {
                 // EOF is readable too. Relay it so the other peer can still respond.
-                Ok(Ok(_)) => copy_bidirectional(&mut client, &mut upstream)
-                    .await
-                    .map(|_| ()),
+                Ok(Ok(_)) => match stats {
+                    Some(stats) => {
+                        copy_bidirectional(
+                            &mut CountWrites(&mut client, &stats.bytes_out),
+                            &mut CountWrites(&mut upstream, &stats.bytes_in),
+                        )
+                        .await
+                    }
+                    None => copy_bidirectional(&mut client, &mut upstream).await,
+                },
                 Ok(Err(error)) => Err(error),
                 Err(_) => {
                     tracing::debug!("TCP first data timed out");
@@ -276,6 +297,40 @@ async fn relay(
         }
     }
     tracing::debug!("all TCP forward targets failed to connect");
+}
+
+struct CountWrites<'a>(&'a mut TcpStream, &'a AtomicU64);
+
+impl AsyncRead for CountWrites<'_> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.0).poll_read(cx, buffer)
+    }
+}
+
+impl AsyncWrite for CountWrites<'_> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let result = Pin::new(&mut *self.0).poll_write(cx, buffer);
+        if let Poll::Ready(Ok(written)) = result {
+            self.1.fetch_add(written as u64, Relaxed);
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.0).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.0).poll_shutdown(cx)
+    }
 }
 
 impl ProxyProtocol {

@@ -23,6 +23,7 @@ use tokio::{
 use crate::{
     acme::{self, Managed},
     config::{self, Config, milliseconds},
+    forward_metrics::{self, ForwardStats, Series},
     proxy::Proxy,
     source_policy::SourcePolicy,
     tls::{ConnectionIdentity, ServerTls},
@@ -154,6 +155,19 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             .with_context(|| format!("bind udp_forward[{index}] listener"))?;
         udp_listeners.push((rule.clone(), socket));
     }
+    let metrics_listener = if let Some(listen) = settings.metrics_listen {
+        Some(
+            TcpListener::bind(listen)
+                .await
+                .context("bind metrics listener")?,
+        )
+    } else {
+        None
+    };
+    let metrics_addr = metrics_listener
+        .as_ref()
+        .map(TcpListener::local_addr)
+        .transpose()?;
     let ready_addr = if let Some(listener) = &listener {
         listener.local_addr()?
     } else if let Some((_, listener)) = tcp_listeners.first() {
@@ -162,18 +176,34 @@ pub async fn serve(path: PathBuf) -> Result<()> {
         udp_listeners[0].1.local_addr()?
     };
     let mut forwarding = JoinSet::new();
+    let mut series = Vec::new();
+    let mut counters = |protocol, listen| {
+        metrics_listener.as_ref().map(|_| {
+            let stats = Arc::new(ForwardStats::default());
+            series.push(Series {
+                protocol,
+                listen,
+                stats: stats.clone(),
+            });
+            stats
+        })
+    };
     for (index, (rule, socket)) in udp_listeners.into_iter().enumerate() {
         let slot = tcp_rules.len() + index;
         let source_state = state.clone();
-        tracing::info!(listen = %socket.local_addr()?, "UDP forward ready");
-        forwarding.spawn(rule.serve(socket, drain.subscribe(), move |ip| {
+        let listen = socket.local_addr()?;
+        let stats = counters("udp", listen);
+        tracing::info!(%listen, "UDP forward ready");
+        forwarding.spawn(rule.serve(socket, drain.subscribe(), stats, move |ip| {
             source_state.load().forward_sources[slot].permits(ip)
         }));
     }
     for (index, (rule, listener)) in tcp_listeners.into_iter().enumerate() {
         let source_state = state.clone();
-        tracing::info!(listen = %listener.local_addr()?, "TCP forward ready");
-        forwarding.spawn(rule.serve(listener, drain.subscribe(), move |ip| {
+        let listen = listener.local_addr()?;
+        let stats = counters("tcp", listen);
+        tracing::info!(%listen, "TCP forward ready");
+        forwarding.spawn(rule.serve(listener, drain.subscribe(), stats, move |ip| {
             source_state.load().forward_sources[index].permits(ip)
         }));
     }
@@ -192,8 +222,11 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     } else {
         None
     };
-    let mut health = JoinSet::new();
-    health.spawn(async move {
+    let mut background = JoinSet::new();
+    if let Some(listener) = metrics_listener {
+        background.spawn(forward_metrics::serve(listener, series));
+    }
+    background.spawn(async move {
         loop {
             let current = generations.borrow_and_update().clone();
             tokio::select! {
@@ -206,7 +239,13 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             }
         }
     });
-    tracing::info!(listen = %ready_addr, http = settings.http_enabled, tls = settings.tls, "gateway ready");
+    tracing::info!(
+        listen = %ready_addr,
+        http = settings.http_enabled,
+        tls = settings.tls,
+        metrics_listen = metrics_addr.map(tracing::field::display),
+        "gateway ready"
+    );
     let mut http = http1::Builder::new();
     http.timer(TokioTimer::new())
         .max_buf_size(32 * 1024)
@@ -277,7 +316,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
 
     drop(listener);
     drain.send_replace(true);
-    tokio::join!(health.shutdown(), acme_tasks.shutdown());
+    tokio::join!(background.shutdown(), acme_tasks.shutdown());
     tracing::info!("gateway draining connections");
     if timeout(milliseconds(settings.shutdown_timeout_ms), async {
         tokio::join!(

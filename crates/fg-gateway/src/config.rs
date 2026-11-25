@@ -50,6 +50,7 @@ struct RawConfig {
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub listen: SocketAddr,
+    pub metrics_listen: Option<SocketAddr>,
     pub http_enabled: bool,
     pub tls: bool,
     pub tls_handshake_timeout_ms: u64,
@@ -65,6 +66,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
+            metrics_listen: None,
             http_enabled: true,
             tls: false,
             tls_handshake_timeout_ms: 5_000,
@@ -232,6 +234,16 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     let mut listens = HashSet::new();
     if settings.http_enabled && settings.listen.port() != 0 {
         listens.insert(settings.listen);
+    }
+    if let Some(metrics) = settings.metrics_listen {
+        ensure!(
+            metrics.ip().is_loopback(),
+            "server.metrics_listen must use a loopback address"
+        );
+        ensure!(
+            metrics.port() == 0 || listens.insert(metrics),
+            "duplicate metrics listener"
+        );
     }
     let mut tcp_forward = Vec::with_capacity(raw.tcp_forward.len());
     for (index, raw) in raw.tcp_forward.into_iter().enumerate() {

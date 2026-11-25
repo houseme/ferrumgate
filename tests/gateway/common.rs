@@ -166,6 +166,7 @@ pub fn config(routes: &str, settings: &str, globals: &str) -> String {
 
 pub struct Gateway {
     pub addr: SocketAddr,
+    pub metrics_addr: Option<SocketAddr>,
     pub dir: TempDir,
     child: Child,
     logs: Lines<BufReader<ChildStderr>>,
@@ -190,6 +191,7 @@ impl Gateway {
         let logs = BufReader::new(child.stderr.take().context("gateway stderr")?).lines();
         let mut gateway = Self {
             addr: "127.0.0.1:0".parse()?,
+            metrics_addr: None,
             dir,
             child,
             logs,
@@ -200,6 +202,11 @@ impl Gateway {
             .find_map(|part| part.strip_prefix("listen="))
             .context("listen address")?
             .parse()?;
+        gateway.metrics_addr = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("metrics_listen="))
+            .map(str::parse)
+            .transpose()?;
         Ok(gateway)
     }
 

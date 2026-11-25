@@ -40,6 +40,8 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 
 TCP 端口转发通过 `[[tcp_forward]]` 配置，可独立运行或与 Web 监听并存，支持多个目标、连接失败时的顺序切换、首次数据超时及双向半关闭。[端口转发配置](docs/EXECUTION.md#tcp-端口转发) · [Gately 功能对齐状态](ARCHITECTURE_EXECUTION.md#当前对齐状态)
 
+可为 TCP/UDP 转发启用独立的回环 Prometheus 监听，采集连接、流量和来源规则拒绝计数。[转发流量指标](docs/EXECUTION.md#转发流量指标)
+
 UDP 可用 `[[udp_forward]]` 按客户端维护独立会话，支持多目标轮询、会话建立时切换和空闲回收。TCP 和 UDP 规则均支持端口列表和范围。[UDP 配置](docs/EXECUTION.md#udp-端口转发) · [多端口映射](docs/EXECUTION.md#tcp-与-udp-多端口映射)
 
 自动 HTTPS 支持 ACME HTTP-01、自主续期和在线换证。配置 `[acme]` 后，默认连接 Let's Encrypt staging；生产 CA 可显式指定。[ACME 配置与验证](docs/EXECUTION.md#acme-http-01-与自动续期)
