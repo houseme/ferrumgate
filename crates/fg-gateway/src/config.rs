@@ -18,6 +18,7 @@ use crate::{
     site::{RawResponse, SiteResponse},
     tcp_forward::{RawForward, TcpForward},
     tls::{self, CertificateFiles, Tls},
+    udp_forward::{RawUdpForward, UdpForward},
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -34,6 +35,8 @@ struct RawConfig {
     routes: Vec<RawRoute>,
     #[serde(default)]
     tcp_forward: Vec<RawForward>,
+    #[serde(default)]
+    udp_forward: Vec<RawUdpForward>,
     #[serde(default)]
     certificates: Vec<CertificateFiles>,
     upstream_ca_file: Option<PathBuf>,
@@ -92,6 +95,7 @@ pub(crate) struct Config {
     pub routes: Routes,
     pub tls: Tls,
     pub tcp_forward: Vec<TcpForward>,
+    pub udp_forward: Vec<UdpForward>,
 }
 
 pub(crate) struct Routes {
@@ -212,8 +216,8 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
             "HTTP and TLS route configuration requires server.http_enabled"
         );
         ensure!(
-            !raw.tcp_forward.is_empty(),
-            "enable HTTP or configure a TCP forward"
+            !raw.tcp_forward.is_empty() || !raw.udp_forward.is_empty(),
+            "enable HTTP or configure TCP/UDP forwarding"
         );
     }
     ensure!(
@@ -235,6 +239,27 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
         tcp_forward.push(rule);
     }
 
+    ensure!(
+        raw.udp_forward.len() <= 64,
+        "udp_forward supports up to 64 listeners"
+    );
+    let mut udp_listens = HashSet::new();
+    let mut udp_forward = Vec::with_capacity(raw.udp_forward.len());
+    let mut udp_sessions = 0;
+    for (index, raw) in raw.udp_forward.into_iter().enumerate() {
+        let rule =
+            UdpForward::compile(raw).with_context(|| format!("invalid udp_forward[{index}]"))?;
+        ensure!(
+            rule.listen.port() == 0 || udp_listens.insert(rule.listen),
+            "duplicate UDP listener at udp_forward[{index}]"
+        );
+        udp_sessions += rule.max_sessions;
+        ensure!(
+            udp_sessions <= 4096,
+            "udp_forward supports up to 4096 total sessions"
+        );
+        udp_forward.push(rule);
+    }
     let protected: Vec<_> = raw
         .certificates
         .iter()
@@ -316,6 +341,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
     Ok(Config {
         tls,
         tcp_forward,
+        udp_forward,
         settings,
         routes: Routes { by_host, wildcards },
     })

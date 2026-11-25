@@ -261,6 +261,27 @@ connection_lifetime_ms = 300000
 cargo test --locked -p ferrumgate --test gateway tcp::
 ```
 
+### UDP 端口转发
+
+```toml
+schema_version = 1
+
+[server]
+http_enabled = false
+
+[[udp_forward]]
+listen = "127.0.0.1:5354"
+target = "127.0.0.1:5353"
+max_sessions = 128
+idle_timeout_ms = 30000
+```
+
+每个客户端地址和端口获得一条独立的上游 UDP 会话，只接收已配置目标的响应。支持每规则会话上限和空闲回收，满载时丢弃超出预算的报文。当前使用一个固定目标，规则修改需重启。 [Gately 端口转发](https://gately.cn/en/docs/modules/portforward)
+
+```bash
+cargo test --locked -p ferrumgate --test gateway udp::
+```
+
 ## 7. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
@@ -358,4 +379,4 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 - C3 在 macOS arm64 通过 workspace Clippy、6 项 Rust 单测、release 构建与 17 项 Rust 端到端测试。新增场景验证 2:1 权重、三次连接失败后的备用切换、冷却期边界及配置拒绝。
 - 已接入主动 HTTP/TCP 健康检查。Web 服务已接入重定向、固定文本和静态文件。其余 C–J 功能、正式吞吐与尾延迟对照及 Linux/Windows 运行仍待验收。
 
-- 本轮独立验证覆盖 HTTP/TCP 探测、固定文本、重定向、目录受限静态文件、通配域名/SNI 和 TCP 字节转发。
+- 本轮独立验证覆盖 HTTP/TCP 探测、固定文本、重定向、目录受限静态文件、通配域名/SNI 和 TCP 字节和 UDP 报文转发。

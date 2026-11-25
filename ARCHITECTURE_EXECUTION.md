@@ -8,13 +8,13 @@
 |---|---|---|
 | Web 服务 | HTTP/1.1、HTTP/2、h2c、gRPC、WebSocket；精确域名、通配域名和路径；加权池、备用、被动和主动 HTTP/TCP 检查；重定向、固定文本和静态文件 | HTTP/3、多 Web 监听、导航面板、路径重写、访问策略、请求重试、其他负载策略、缓存、压缩、限流、拓扑 |
 | 证书 | PEM 手动加载、精确和通配 SNI、原子轮换、HTTPS 上游证书验证和私有 CA | ACME HTTP-01/DNS-01、账户及订单恢复、续期、证书部署和到期告警 |
-| 端口转发与协议分流 | 独立或 Web 并行的 TCP 转发、顺序目标切换、连接限额、半关闭和排空 | UDP、端口范围、每源配额、流量指标、PROXY 协议、SNI/ALPN 和其他协议分类 |
+| 端口转发与协议分流 | 独立或 Web 并行的 TCP/UDP 转发；TCP 顺序目标切换、半关闭和排空；UDP 单目标、独立会话与空闲回收 | UDP 多目标、端口范围、每源配额、流量指标、PROXY 协议、SNI/ALPN 和其他协议分类 |
 | 管理、认证与运维 | TOML、CLI 校验、Unix 原子重载、结构化运行日志、本地回滚步骤 | 独立管理 API、Web UI、会话与角色、OIDC/TOTP/Passkeys、审计、配置历史、备份、指标和通知 |
 | WAF 与入侵防护 | 按固定路由配置上游，逐跳字段与转发身份边界已实现 | 站点 ACL、CRS 检测与阻断、日志 jail、受限防火墙组件、端口敲门 |
 | DDNS、STUN 与隧道 | 当前路线记录了提供商和运行生命周期的验收要求 | DDNS 提供商与真实读回、STUN/TCP/UDP 穿透、frp、Cloudflare Tunnel、Tailscale、NetBird、EasyTier |
 | 外围服务与发布 | Cargo workspace 产出单进程 `fgate`，Rust 测试经 Cargo 执行 | Docker、终端、文件和任务工具、配置迁移、定制构建、软件包、签名与跨平台发行 |
 
-当前交付优先闭合核心模块中的 ACME 证书生命周期和 TCP/UDP 转发，再接通管理与安全策略。部署契约和复验命令见 [DESIGN.md](docs/DESIGN.md) 与 [EXECUTION.md](docs/EXECUTION.md)。以下保留原始架构规划。
+当前交付优先闭合核心模块中的 ACME 证书生命周期和端口转发的剩余能力，再接通管理与安全策略。部署契约和复验命令见 [DESIGN.md](docs/DESIGN.md) 与 [EXECUTION.md](docs/EXECUTION.md)。以下保留原始架构规划。
 
 # 项目命名
 

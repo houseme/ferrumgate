@@ -1,0 +1,103 @@
+use std::{net::SocketAddr, time::Duration};
+
+use anyhow::Result;
+use tokio::{net::UdpSocket, sync::mpsc, time::timeout};
+
+use super::common::*;
+
+async fn echo_target() -> Result<(SocketAddr, mpsc::UnboundedReceiver<SocketAddr>)> {
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let address = socket.local_addr()?;
+    let (send, receive) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut buffer = [0; 4096];
+        while let Ok((size, peer)) = socket.recv_from(&mut buffer).await {
+            if send.send(peer).is_err() || socket.send_to(&buffer[..size], peer).await.is_err() {
+                break;
+            }
+        }
+    });
+    Ok((address, receive))
+}
+
+fn rule(target: SocketAddr, options: &str) -> String {
+    format!("\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntarget = \"{target}\"\n{options}\n")
+}
+
+async fn client(address: SocketAddr) -> Result<UdpSocket> {
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(address).await?;
+    Ok(socket)
+}
+
+#[tokio::test]
+async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
+    let (target, mut peers) = echo_target().await?;
+    let gateway = Gateway::spawn(&config(&rule(target, ""), "http_enabled = false", "")).await?;
+    let first = client(gateway.addr).await?;
+    let second = client(gateway.addr).await?;
+    first.send(b"one\0").await?;
+    second.send(b"two\0").await?;
+    for (socket, expected) in [(&first, b"one\0"), (&second, b"two\0")] {
+        let mut buffer = [0; 16];
+        let received = timeout(DEADLINE, socket.recv(&mut buffer)).await??;
+        assert_eq!(&buffer[..received], expected);
+    }
+    let a = timeout(DEADLINE, peers.recv()).await?.unwrap();
+    let b = timeout(DEADLINE, peers.recv()).await?.unwrap();
+    assert_ne!(a, b);
+    Ok(())
+}
+
+#[tokio::test]
+async fn bounds_udp_associations_and_releases_idle_slots() -> Result<()> {
+    let (target, _peers) = echo_target().await?;
+    let gateway = Gateway::spawn(&config(
+        &rule(target, "max_sessions = 1\nidle_timeout_ms = 500"),
+        "http_enabled = false",
+        "",
+    ))
+    .await?;
+    let admitted = client(gateway.addr).await?;
+    let waiting = client(gateway.addr).await?;
+    admitted.send(b"first").await?;
+    let mut buffer = [0; 16];
+    let len = timeout(DEADLINE, admitted.recv(&mut buffer)).await??;
+    assert_eq!(&buffer[..len], b"first");
+    waiting.send(b"second").await?;
+    assert!(
+        timeout(Duration::from_millis(60), waiting.recv(&mut buffer))
+            .await
+            .is_err()
+    );
+    let received = timeout(DEADLINE, async {
+        loop {
+            waiting.send(b"second").await?;
+            if let Ok(result) = timeout(Duration::from_millis(70), waiting.recv(&mut buffer)).await
+            {
+                break result;
+            }
+        }
+    })
+    .await??;
+    assert_eq!(&buffer[..received], b"second");
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let addr = "127.0.0.1:9000".parse()?;
+    let repeated = rule(addr, "")
+        .replace("127.0.0.1:0", "127.0.0.1:9001")
+        .repeat(2);
+    for rules in [
+        rule("255.255.255.255:9000".parse()?, ""),
+        rule("127.0.0.1:0".parse()?, ""),
+        repeated,
+        rule(addr, "max_sessions = 4096") + &rule(addr, "max_sessions = 1"),
+    ] {
+        assert!(!Gateway::check(dir.path(), &config(&rules, "http_enabled = false", "")).await?);
+    }
+    Ok(())
+}

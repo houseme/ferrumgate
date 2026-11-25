@@ -12,6 +12,7 @@ mod site;
 mod static_files;
 mod tcp_forward;
 mod tls;
+mod udp_forward;
 mod websocket;
 
 use std::path::Path;

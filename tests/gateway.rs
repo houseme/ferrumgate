@@ -14,5 +14,7 @@ mod site;
 mod tcp;
 #[path = "gateway/tls.rs"]
 mod tls;
+#[path = "gateway/udp.rs"]
+mod udp;
 #[path = "gateway/websocket.rs"]
 mod websocket;

@@ -14,7 +14,7 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    net::TcpListener,
+    net::{TcpListener, UdpSocket},
     sync::watch,
     task::JoinSet,
     time::{Instant, sleep, timeout, timeout_at},
@@ -43,6 +43,7 @@ impl Generation {
 pub async fn serve(path: PathBuf) -> Result<()> {
     let mut config = config::load(&path).await?;
     let tcp_rules = std::mem::take(&mut config.tcp_forward);
+    let udp_rules = std::mem::take(&mut config.udp_forward);
     let settings = config.settings.clone();
     let state = Arc::new(ArcSwap::from_pointee(Generation::new(config)));
     let (drain, _) = watch::channel(false);
@@ -74,8 +75,10 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             let candidate = async {
                 let next = config::load(&path).await?;
                 anyhow::ensure!(
-                    next.settings == settings && next.tcp_forward == tcp_rules,
-                    "server and TCP listen settings require restart"
+                    next.settings == settings
+                        && next.tcp_forward == tcp_rules
+                        && next.udp_forward == udp_rules,
+                    "server and forwarding settings require restart"
                 );
                 let next = Arc::new(Generation::new(next));
                 state.store(next.clone());
@@ -107,11 +110,25 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             .with_context(|| format!("bind tcp_forward[{index}] listener"))?;
         tcp_listeners.push((rule.clone(), listener));
     }
-    let ready_addr = listener
-        .as_ref()
-        .unwrap_or_else(|| &tcp_listeners[0].1)
-        .local_addr()?;
+    let mut udp_listeners = Vec::with_capacity(udp_rules.len());
+    for (index, rule) in udp_rules.iter().enumerate() {
+        let socket = UdpSocket::bind(rule.listen)
+            .await
+            .with_context(|| format!("bind udp_forward[{index}] listener"))?;
+        udp_listeners.push((rule.clone(), socket));
+    }
+    let ready_addr = if let Some(listener) = &listener {
+        listener.local_addr()?
+    } else if let Some((_, listener)) = tcp_listeners.first() {
+        listener.local_addr()?
+    } else {
+        udp_listeners[0].1.local_addr()?
+    };
     let mut forwarding = JoinSet::new();
+    for (rule, socket) in udp_listeners {
+        tracing::info!(listen = %socket.local_addr()?, "UDP forward ready");
+        forwarding.spawn(rule.serve(socket, drain.subscribe()));
+    }
     for (rule, listener) in tcp_listeners {
         tracing::info!(listen = %listener.local_addr()?, "TCP forward ready");
         forwarding.spawn(rule.serve(listener, drain.subscribe()));
