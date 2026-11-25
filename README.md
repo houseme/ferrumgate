@@ -1,6 +1,6 @@
 # FerrumGate
 
-FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证与 Unix 配置热加载。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
+FerrumGate 是 Rust 编写的自托管网关，按模块参考 Gately 的公开行为。当前提供 HTTP/1.1 反向代理、Host 和路径路由、手动 TLS、HTTPS 上游验证、Unix 配置热加载和按路由启用的 WebSocket（`ws` / `wss`）。参考 [Gately 源码仓库](https://github.com/wangwanjie/gately)和 [Gately Web 服务文档](https://gately.cn/en/docs/modules/web)。
 
 ## 启动
 
@@ -11,6 +11,10 @@ cargo build --release --locked -p ferrumgate
 ```
 
 样例监听 `127.0.0.1:8080`，将 `app.test` 转发至 `127.0.0.1:9000`。完整演练包含测试后端、curl 和证书轮换命令。[执行手册](docs/EXECUTION.md)
+
+## WebSocket
+
+在需要升级的 `[[routes]]` 内设置 `websocket = true`。TLS 入口使用 `wss://`。子协议、连接寿命和重连行为见 [WebSocket 配置](docs/EXECUTION.md#4-启用-websocket)。
 
 ## 工作区
 

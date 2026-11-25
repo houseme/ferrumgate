@@ -68,6 +68,8 @@ struct RawRoute {
     host: String,
     path_prefix: Option<String>,
     upstream: String,
+    #[serde(default)]
+    websocket: bool,
 }
 
 pub(crate) struct Config {
@@ -85,6 +87,7 @@ pub(crate) struct Route {
     pub scheme: Scheme,
     pub authority: Authority,
     pub upstream_host: HeaderValue,
+    pub websocket: bool,
 }
 
 impl Routes {
@@ -200,6 +203,7 @@ pub(crate) async fn load(path: &Path) -> Result<Config> {
             scheme,
             authority,
             upstream_host,
+            websocket: route.websocket,
         });
     }
     for list in by_host.values_mut() {

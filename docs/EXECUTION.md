@@ -97,7 +97,23 @@ curl --noproxy '*' --fail --cacert /path/to/tls-demo/tls/app.pem \
 
 轮换时写入新的证书和私钥文件，以不同文件名作为一组。在候选 TOML 改引用，执行 `fgate check`，随后按第 2 节替换和重载。复验新连接看到的证书、SAN 和到期时间，旧连接保留已协商状态。保留旧版本文件直到回滚窗口结束。TLS PEM 配置需要可读文件和兼容密钥，部署前在实际 TLS 客户端核验证书链。
 
-## 4. 交付阶段与退出标准
+## 4. 启用 WebSocket
+
+为上游 WebSocket 接口添加更长的路径匹配。保留第 1 节的根路由以代理普通请求。两个路由都可使用 HTTP 或 HTTPS 上游。
+
+```toml
+[[routes]]
+host = "app.test"
+path_prefix = "/ws"
+upstream = "http://127.0.0.1:9001"
+websocket = true
+```
+
+在替换配置前运行 `fgate check`，再按第 2 节重载。用真实 WebSocket 客户端连接 `ws://app.test:8080/ws`，设置 DNS 或主机映射使其指向网关。TLS 监听器使用 `wss://`。浏览器客户端的来源授权由上游处理。连接默认仍受 300 秒寿命限制，预期长期保持连接的部署应按业务调整 `connection_lifetime_ms`，并验证客户端重连。
+
+可运行 `cargo test --locked -p ferrumgate --test gateway websocket::validates_upgrades_and_relays_text_binary_ping_and_close` 使用测试自带的独立上游及客户端，核验子协议、文本、二进制、Ping/Pong 和 Close，避免依赖另外安装 WebSocket 测试工具。
+
+## 5. 交付阶段与退出标准
 
 | 阶段 | 实施步骤 | 退出证据 |
 |---|---|---|
@@ -114,7 +130,7 @@ curl --noproxy '*' --fail --cacert /path/to/tls-demo/tls/app.pem \
 
 ### C 代理协议与站点能力
 
-1. WebSocket 从按路由开关开始。验证两跳握手、子协议、普通拒绝响应、TLS、连接名额、寿命和停机。
+1. C1 WebSocket 已接入路由开关和双向流式转发。当前测试覆盖握手校验、子协议、普通拒绝响应、两跳 TLS、连接名额、寿命和停机。
 2. 逐步启用 HTTP/2 和 h2c，分别限制连接数、流数、头表和流控窗口。以统一的 URI、authority、身份头和每跳字段规则处理两种协议。客户端取消时取消相应上游流。端到端验收 gRPC unary、双向流、取消和 trailers。
 3. 后端定义使用稳定标识。主动探测有自己的并发和超时。被动失败只统计约定故障，健康快照原子发布。测试权重比例、探测抖动、失败阈值、摘除后的恢复以及单个后端失败时的在途请求。自动重试限制在能证明尚未写出请求的情形。
 4. 重定向目标由站点配置生成。静态文件使用明确根目录，验证符号链接、目录索引、HEAD、Range、路径编码和跨平台行为。SSE、WebDAV、大文件等依赖长时连接的场景需要独立的上传与响应超时策略。
@@ -161,7 +177,7 @@ curl --noproxy '*' --fail --cacert /path/to/tls-demo/tls/app.pem \
 
 Docker、终端、文件服务、定时任务和诊断工具先各自明确哪些操作需要访问宿主机、凭据或网络。每项独立设置授权、资源预算、日志与关闭路径。以单模块完成安装、撤销权限、崩溃、并发和卸载演练作为启用条件。对同一机器上的已有系统服务优先采用可独立关闭的适配方式。
 
-## 5. 校验与性能验收
+## 6. 校验与性能验收
 
 ```bash
 cargo fmt --all --check
@@ -185,8 +201,9 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 
 预热后按 A1、B1、B2、A2 对照运行。本项目将 5% 的吞吐漂移、10% 的 p99 漂移作为首轮实验的暂停归因阈值，第一组稳定样本建立基线后再修订。记录 CPU/RSS、FD、二进制大小、错误率和原始输出。用流式大响应、慢连接和重载分别做资源上限验证。正式性能结论需要附全部环境与样本记录。
 
-## 6. 当前交付记录
+## 7. 当前交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
 - 依赖已用注册表索引核对，当前 15 个直接 crate 均采用最新稳定版，传递依赖按兼容约束求解。重点版本为 Tokio 1.54.1、Hyper 1.13.0、rustls 0.23.46、Clap 4.6.10 和 TOML 1.2.3。rustls 0.24 当前发布的是开发预览，HTTP/TLS 适配器使用 0.23 系列。精确版本见 [Cargo.lock](../Cargo.lock)。
-- Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。下一阶段为 C1 WebSocket。
+- Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。C1 在 macOS arm64 上通过 workspace Clippy、5 项 Rust 单测、release 构建和 12 项 Rust 端到端测试。新增场景覆盖两跳握手校验、WebSocket over TLS、子协议、路由关闭后保留既有会话，以及连接名额、寿命和停机。
+- 下一阶段为 C2 HTTP/2 和 gRPC trailers。其余 C–J 功能、正式吞吐与尾延迟对照、Linux/Windows 运行及供应商环境仍待验收。

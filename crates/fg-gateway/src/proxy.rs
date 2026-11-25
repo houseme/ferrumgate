@@ -1,6 +1,7 @@
 use std::{
     net::SocketAddr,
     pin::Pin,
+    sync::OnceLock,
     task::{Context, Poll},
     time::Duration,
 };
@@ -22,7 +23,10 @@ use hyper_util::{
 };
 use tokio::time::timeout;
 
-use crate::config::{self, Routes, Settings, milliseconds};
+use crate::{
+    config::{self, Routes, Settings, milliseconds},
+    websocket::{Handshake, Tunnel},
+};
 
 type Reply = Response<Either<DataBody, Full<Bytes>>>;
 
@@ -62,14 +66,12 @@ impl Proxy {
         mut request: Request<Incoming>,
         peer: SocketAddr,
         tls_name: Option<&str>,
+        tunnel: &OnceLock<Tunnel>,
     ) -> Reply {
         if request.version() != Version::HTTP_11 {
             return reply(StatusCode::HTTP_VERSION_NOT_SUPPORTED);
         }
         if request.method() == Method::CONNECT {
-            return reply(StatusCode::NOT_IMPLEMENTED);
-        }
-        if request.headers().contains_key(UPGRADE) {
             return reply(StatusCode::NOT_IMPLEMENTED);
         }
         let Some(target) = request.uri().path_and_query().filter(|target| {
@@ -110,10 +112,18 @@ impl Proxy {
             (uri, route)
         };
         let original_host = original_host.clone();
-        let headers = request.headers_mut();
-        let Ok(chunked) = strip_hop_headers(headers) else {
-            return reply(StatusCode::BAD_REQUEST);
+        let (handshake, chunked) = if request.headers().contains_key(UPGRADE) {
+            match Handshake::prepare(&mut request, route.websocket) {
+                Ok(handshake) => (Some(handshake), false),
+                Err(status) => return reply(status),
+            }
+        } else {
+            match strip_hop_headers(request.headers_mut()) {
+                Ok(chunked) => (None, chunked),
+                Err(()) => return reply(StatusCode::BAD_REQUEST),
+            }
         };
+        let headers = request.headers_mut();
         let forwarding_headers: Vec<_> = headers
             .keys()
             .filter(|name| {
@@ -148,6 +158,18 @@ impl Proxy {
         .await;
 
         match result {
+            Ok(Ok(mut response)) if response.status() == StatusCode::SWITCHING_PROTOCOLS => {
+                let Some(handshake) = handshake else {
+                    return reply(StatusCode::BAD_GATEWAY);
+                };
+                let Ok(upgraded) = handshake.complete(&mut response) else {
+                    return reply(StatusCode::BAD_GATEWAY);
+                };
+                if tunnel.set(upgraded).is_err() {
+                    return reply(StatusCode::BAD_GATEWAY);
+                }
+                response.map(|_| Either::Right(Full::default()))
+            }
             Ok(Ok(mut response)) if !response.status().is_informational() => {
                 if strip_hop_headers(response.headers_mut()).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
@@ -171,7 +193,7 @@ impl Proxy {
     }
 }
 
-fn strip_hop_headers(headers: &mut HeaderMap) -> Result<bool, ()> {
+pub(crate) fn strip_hop_headers(headers: &mut HeaderMap) -> Result<bool, ()> {
     // Each HTTP connection is framed independently. Hyper decodes chunked data.
     let mut encodings = headers.get_all(TRANSFER_ENCODING).iter();
     let chunked = match encodings.next() {

@@ -6,3 +6,5 @@ mod common;
 mod http;
 #[path = "gateway/tls.rs"]
 mod tls;
+#[path = "gateway/websocket.rs"]
+mod websocket;

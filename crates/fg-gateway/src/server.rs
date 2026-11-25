@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -153,27 +158,46 @@ pub async fn serve(path: PathBuf) -> Result<()> {
 
 async fn serve_http(
     http: &http1::Builder,
-    stream: impl AsyncRead + AsyncWrite + Unpin,
+    stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     state: &ArcSwap<Generation>,
     peer: SocketAddr,
     tls_name: Option<&str>,
     mut drain: watch::Receiver<bool>,
 ) {
-    let service = service_fn(|request| async {
-        let current = state.load_full();
-        Ok::<_, std::convert::Infallible>(current.proxy.forward(request, peer, tls_name).await)
-    });
-    let connection = http.serve_connection(TokioIo::new(stream), service);
-    tokio::pin!(connection);
-    let result = tokio::select! {
-        biased;
-        _ = drain.changed() => {
-            connection.as_mut().graceful_shutdown();
-            connection.await
+    let tunnel = OnceLock::new();
+    let result = {
+        let service = service_fn(|request| async {
+            let current = state.load_full();
+            Ok::<_, std::convert::Infallible>(
+                current
+                    .proxy
+                    .forward(request, peer, tls_name, &tunnel)
+                    .await,
+            )
+        });
+        let connection = http
+            .serve_connection(TokioIo::new(stream), service)
+            .with_upgrades();
+        tokio::pin!(connection);
+        tokio::select! {
+            biased;
+            _ = drain.changed() => {
+                connection.as_mut().graceful_shutdown();
+                connection.await
+            }
+            result = &mut connection => result,
         }
-        result = &mut connection => result,
     };
     if let Err(error) = result {
         tracing::debug!(%error, "HTTP connection closed");
+        return;
+    }
+    if let Some(tunnel) = tunnel.into_inner() {
+        // Keep the tunnel inside the accepted connection's task and deadline.
+        tokio::select! {
+            biased;
+            _ = drain.wait_for(|draining| *draining) => {}
+            _ = tunnel.relay() => {}
+        }
     }
 }

@@ -28,7 +28,7 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 客户端 → TCP 接入 → Hyper → Host / path → 代理 → 连接池 → 上游
 ```
 
-根包 `ferrumgate` 生成 `fgate`，处理命令行、运行时和日志初始化。`crates/fg-gateway` 承担配置和数据面逻辑，对根包只暴露 `check_config` 和 `serve`。包内按 `config`、`proxy`、`server`和 `tls` 划分。根 workspace 共享锁文件、构建目录和公共依赖版本。后续拆分依据实际编译、权限或复用需求，新增可选能力由消费它的 crate 声明 feature，根二进制负责组合。
+根包 `ferrumgate` 生成 `fgate`，处理命令行、运行时和日志初始化。`crates/fg-gateway` 承担配置和数据面逻辑，对根包只暴露 `check_config` 和 `serve`。包内按 `config`、`proxy`、`server`、`tls` 和 `websocket` 划分。根 workspace 共享锁文件、构建目录和公共依赖版本。后续拆分依据实际编译、权限或复用需求，新增可选能力由消费它的 crate 声明 feature，根二进制负责组合。
 
 ## 3. 阶段 A 数据面契约
 
@@ -49,15 +49,16 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 | `server.shutdown_timeout_ms` | 10000 | 1–300000 |
 | `routes[].host` | 必填 | 精确匹配 ASCII DNS 名或 IP，无端口；DNS 大小写不敏感并容许一个末尾根点 |
 | `routes[].path_prefix` | `/` | 以斜杠开头；除根路径外无末尾斜杠，无查询 |
+| `routes[].websocket` | `false` | 为匹配该条路由的请求允许 HTTP/1.1 WebSocket 升级 |
 | `routes[].upstream` | 必填 | `http://host[:port]` 或 `https://host[:port]`，可选末尾 `/`；无认证信息、路径前缀及查询 |
 
 至少配置一条路由。重复的规范化 Host 与路径组合在校验时报错。HTTP Host 可带端口，路由匹配使用其中的主机名。路径采用最长段边界前缀，`/api` 匹配 `/api` 和 `/api/v1`。匹配读取原始 URI 路径，转发保留路径与查询的编码。下游可接受的 URI 范围与上游归一化方式应一并考虑。若未来同一站点以路径隔离权限，必须在引入策略时收紧该契约。
 
 ### HTTP 转发
 
-- 业务监听器接受 HTTP/1.1 origin-form 和单一合法 Host。未知网站或路径返回 404。无效 Host、无效请求目标或冲突的消息成帧字段返回 400。HTTP/1.0 返回 505，CONNECT 和 Upgrade 返回 501。
+- 业务监听器接受 HTTP/1.1 origin-form 和单一合法 Host。未知网站或路径返回 404。无效 Host、无效请求目标或冲突的消息成帧字段返回 400。HTTP/1.0 返回 505，CONNECT 或当前路由不支持的 Upgrade 返回 501。
 - 出口 origin 完全来自已验证配置。上游请求的 `Host` 为配置中的上游 authority。清除客户端的 `Forwarded`、`X-Forwarded-*` 和 `X-Real-IP`，重新写入 TCP 对端地址、原 Host 和访问 scheme。部署在另一代理后时，地址仍为直接对端。
-- 双向清理 `Connection` 指定的字段及标准逐跳字段。代理保留端到端语义。仅支持无传输编码或单一 chunked，按照该跳重建 framing。普通 HTTP 转发丢弃 trailer frames。升级协议和 HTTP/2 trailers 按阶段 C 实现。参考 [RFC 9110 §7.6.1](https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1) 与 [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112)。
+- 双向清理 `Connection` 指定的字段及标准逐跳字段。代理保留端到端语义。仅支持无传输编码或单一 chunked，按照该跳重建 framing。普通 HTTP 转发丢弃 trailer frames。WebSocket 使用 §5 的独立升级约定。参考 [RFC 9110 §7.6.1](https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1) 与 [RFC 9112](https://www.rfc-editor.org/rfc/rfc9112)。
 - 请求与响应按 frame 流式传递，利用连接读写反压，不缓存整包。连接池闲置保留每 origin 最多 8 条，空闲期限 30 秒。代理不额外重放请求。上游故障返回 502，响应头期限到达返回 504，响应开始后的读写错误终止流。
 - 接入主循环确认活跃任务数低于上限后调用 accept；达到上限时连接等待内核队列。HTTP/1 头部缓冲上限为 32 KiB，头部等待设期限。连接最大寿命约束长期占用，也会终止到期的慢上传、下载和持续连接。应用层带宽/请求体配额与精细化空闲超时在阶段 C 增加。
 
@@ -71,18 +72,24 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 外连 HTTPS 验证证书链和目标名称。默认信任 `webpki-roots` 的根证书集。根字段 `upstream_ca_file` 可追加私有 CA，添加后对当前所有 HTTPS 上游生效。指定的 TLS 文件相对配置文件目录解析，每个文件最多 1 MiB。Unix 热加载以一代提交路由、证书和上游信任配置。使用带版本的证书和密钥文件名，再替换 TOML。TLS 配置示例和轮换命令见 [EXECUTION.md](EXECUTION.md)。
 
-## 5. 协议与策略演进
+## 5. 阶段 C1 WebSocket
+
+命中精确 Host 和路径规则后，`websocket = true` 允许 HTTP/1.1 GET 升级。网关校验 `Connection`、`Upgrade`、版本 13、16 字节握手 nonce 和请求体边界。每一跳重建 Upgrade 头，保留 `Origin` 供上游执行来源策略，并按配置验证 HTTPS 上游。上游返回 101 时，网关再核对升级类型、握手证明和已选子协议。握手请求无效返回 400，上游 101 不符合契约返回 502，上游普通拒绝响应按 HTTP 路径透传。该阶段停用 WebSocket 扩展协商。SHA-1 仅用于 RFC 6455 规定的握手证明。[RFC 6455 §4](https://www.rfc-editor.org/rfc/rfc6455#section-4) · [Hyper Upgrade](https://docs.rs/hyper/latest/hyper/upgrade/index.html)
+
+成功后两端共享一条双向字节转发任务，使用有界缓冲并透传文本、二进制和控制帧。升级保持原连接的并发名额和寿命预算。服务停止或达到寿命期限时关闭两端连接。端点正常发出的 Close 帧照常通过。重载后已升级会话继续使用握手时的上游，新的升级请求读取新快照。
+
+## 6. 协议与策略演进
 
 | 阶段 | 决策 | 接入条件 |
 |---|---|---|
-| C HTTP 扩展 | WebSocket 采用按路由启用的双向流式转发。HTTP/2 配置并发流与流量窗口。gRPC 端到端保留 `grpc-status` 等 trailers。静态文件基于根目录限制访问并覆盖符号链接语义。 | 按协议做双端 E2E；使用独立测试后端验证 HEAD、Range、SSE、升级以及大文件 |
+| C HTTP 扩展 | WebSocket 已有独立验收。HTTP/2 配置并发流与流量窗口。gRPC 端到端保留 `grpc-status` 等 trailers。静态文件基于根目录限制访问并覆盖符号链接语义。 | 按协议做双端 E2E；使用独立测试后端验证 HEAD、Range、SSE、升级以及大文件 |
 | D ACME | 先 staging HTTP-01，再 DNS-01。以账户、域名集为幂等键，持久化任务并去重，校验外部 CA/区域配置，退避遵循服务端反馈。证书和密钥作为同一代更新。 | 本地 CA E2E 覆盖签发、续期、挑战清理、重启、服务端重试与旧证书继续工作 |
 | E 管理面 | 单独监听回环地址或本地 socket。随机一次性初始化凭据，校验权限，写 API 需要预期配置版本，浏览器写请求校验来源和 CSRF。 | 匿名、过期、越权访问有负向验证；业务站点无法路由到管理入口 |
 | F 可选安全策略 | 先确定可信客户端地址，再评估维护中的 ACL、认证、WAF 规则。WAF 以检测模式试运行，延迟、并发与可观察的失败模式按站点配置。主机规则由最小权限组件执行。 | 凭据与身份头处理、超载、引擎故障、策略优先级和规则回滚均有集成证据 |
 
 控制面提交过程采用校验、准备资源、持久化、发布的顺序。写入以版本比较防止覆盖并发修改。持久化原子性需要同目录替换与相应的目录同步。历史版本、审计和恢复步骤需要覆盖持久化完成但发布前崩溃的场景。监听变更涉及管理入口时，用独立连接验证新路径并设置确认期限。密钥保存引用，审计记录变更操作、结果和版本。每个外部调度器独立设置并发、退避、期限与关闭行为。
 
-## 6. 性能与运维契约
+## 7. 性能与运维契约
 
 - 热路径每请求只读取一次路由快照。Host 查询走哈希表，同一 Host 的前缀按长度降序匹配。优先测量在真实站点数量下的开销，确认热点后再考虑 radix tree。
 - 复用连接池、避免中间整包缓存和逐请求字符串日志。变更前后用相同后端、协议、连接复用与负载分布，比较吞吐、p50/p95/p99、超时、CPU、RSS 和打开文件数。

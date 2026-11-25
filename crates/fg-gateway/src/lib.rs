@@ -6,6 +6,7 @@ mod config;
 mod proxy;
 mod server;
 mod tls;
+mod websocket;
 
 use std::path::Path;
 
