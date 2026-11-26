@@ -106,6 +106,28 @@ pub async fn serve(
         // Snapshot every configuration change except credential and
         // runtime state, so offline rollback requests have versions to use.
         store.enable_history(30, &HISTORY_SKIP);
+        // Roll back an unconfirmed save before any configuration is read:
+        // this is WP-04's recover step, so modules never start on doomed
+        // configuration.
+        match fg_config::confirm::recover(store.dir(), std::time::SystemTime::now()) {
+            Ok(recovery) => {
+                if !recovery.rolled_back.is_empty() {
+                    tracing::warn!(
+                        target: "fgate::bootstrap",
+                        reason = recovery.reason.map(|reason| reason.as_str()).unwrap_or(""),
+                        configs = ?recovery.rolled_back,
+                        errors = ?recovery.errors,
+                        "unconfirmed save rolled back on startup"
+                    );
+                }
+            }
+            // A partial rollback retries on the next boot; refuse a half-
+            // restored directory rather than serve mixed configuration.
+            Err(error) => {
+                let _ = error;
+                anyhow::bail!("pending-confirm rollback is incomplete; startup refuses to continue until it succeeds");
+            }
+        }
         // Declarative files state the operator's intent: apply them before
         // any configuration, account or settings is read.
         if let Some(apply_dir) = &apply_dir {
@@ -117,6 +139,17 @@ pub async fn serve(
                 skipped = report.skipped,
                 names = ?report.names,
                 "declarative configuration applied"
+            );
+        }
+        // A restart-required registration begins its confirmation window
+        // now that the process is starting with the new settings.
+        if let Some(pending) =
+            fg_config::confirm::start_wait_restart(store.dir(), std::time::SystemTime::now())
+        {
+            tracing::info!(
+                target: "fgate::bootstrap",
+                deadline = ?pending.deadline,
+                "restart-required confirmation window started"
             );
         }
         let initial = std::env::var("FERRUMGATE_INITIAL_PASSWORD");

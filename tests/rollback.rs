@@ -195,3 +195,84 @@ async fn nix_kill(id: u32) -> Result<()> {
 async fn nix_kill(_id: u32) -> Result<()> {
     Ok(())
 }
+
+#[tokio::test]
+async fn unconfirmed_save_restores_on_next_start() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let accounts = directory.path().join("accounts");
+    let config_path = directory.path().join("gateway.toml");
+    let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let backend_addr = backend.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            let _ = backend.accept().await;
+        }
+    });
+    std::fs::write(
+        &config_path,
+        format!(
+            "schema_version = 1\n\n[server]\nlisten = \"127.0.0.1:0\"\n\n\
+             [[routes]]\nhost = \"app.test\"\npath_prefix = \"/\"\n\
+             upstream = \"http://{backend_addr}\"\n"
+        ),
+    )?;
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        store.enable_history(20, &[]);
+        store.save("ferrumgate", &json!({"language":"en"}))?;
+    }
+    // Forge a pending-confirm state whose deadline already passed, as if a
+    // save went unconfirmed and the process died before rolling back.
+    let expired = fg_config::confirm::PendingConfirm {
+        id: "fixture000000000001".to_owned(),
+        created: time::OffsetDateTime::now_utc().into(),
+        deadline: std::time::SystemTime::now() - std::time::Duration::from_secs(5),
+        timeout: 90,
+        wait_restart: false,
+        rollback: false,
+        hold: false,
+        applied: std::time::SystemTime::now(),
+        errors: Vec::new(),
+        boots: 0,
+        files: std::collections::BTreeMap::from([(
+            "ferrumgate".to_owned(),
+            Some("{\"language\":\"zh\"}\n".to_owned()),
+        )]),
+    };
+    fg_config::confirm::write_state(&accounts, &expired)?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+        .arg(&accounts)
+        .env_remove("FERRUMGATE_LOG_LEVEL")
+        .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stderr = child.stderr.take().expect("management output");
+    tokio::time::timeout(DEADLINE, async {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let mut lines = BufReader::new(&mut stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.contains("management ready") {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+        anyhow::bail!("management listener did not start")
+    })
+    .await??;
+    // The rollback already happened before the listener came up.
+    let store = fg_config::ConfigStore::open(&accounts)?;
+    let raw = store.load_raw("ferrumgate")?.expect("restored settings");
+    let value: serde_json::Value = serde_json::from_slice(&raw)?;
+    assert_eq!(value["language"], "zh", "the pre-save content won");
+    assert!(
+        !accounts.join("pending-confirm.state").exists(),
+        "state removed after rollback"
+    );
+    let id = child.id().expect("gateway PID");
+    nix_kill(id).await?;
+    let _ = tokio::time::timeout(DEADLINE, child.wait()).await?;
+    Ok(())
+}
