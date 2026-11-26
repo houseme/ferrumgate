@@ -11,6 +11,8 @@ mod common;
 mod http;
 #[path = "gateway/http2.rs"]
 mod http2;
+#[path = "gateway/logging.rs"]
+mod logging;
 #[path = "gateway/metrics.rs"]
 mod metrics;
 #[path = "gateway/modules.rs"]

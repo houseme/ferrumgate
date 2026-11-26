@@ -127,6 +127,15 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     };
     let metrics_addr = l4.as_ref().map(L4::metrics_addr).transpose()?.flatten();
 
+    // All listeners are bound. Publish readiness before module tasks can emit their first event.
+    tracing::info!(
+        listen = ready_addr.map(tracing::field::display),
+        http = http_addr.is_some(),
+        tls = http_addr.is_some() && settings.tls,
+        metrics_listen = metrics_addr.map(tracing::field::display),
+        "gateway ready"
+    );
+
     let (drain, drain_rx) = watch::channel(false);
     let mut modules = JoinSet::new();
     if let Some(certificates) = certificates {
@@ -145,13 +154,6 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     if let Some(l4) = l4 {
         start(l4, drain_rx, &mut modules);
     }
-    tracing::info!(
-        listen = ready_addr.map(tracing::field::display),
-        http = http_addr.is_some(),
-        tls = http_addr.is_some() && settings.tls,
-        metrics_listen = metrics_addr.map(tracing::field::display),
-        "gateway ready"
-    );
 
     let reload = async {
         #[cfg(unix)]

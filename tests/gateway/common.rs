@@ -178,11 +178,16 @@ impl Gateway {
     }
 
     pub async fn with_dir(config: &str, dir: TempDir) -> Result<Self> {
+        Self::with_args(config, dir, &[]).await
+    }
+
+    pub async fn with_args(config: &str, dir: TempDir, args: &[&std::ffi::OsStr]) -> Result<Self> {
         let path = dir.path().join("live.toml");
         std::fs::write(&path, config)?;
         let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
             .args(["serve", "--log-level", "info", "--config"])
             .arg(path)
+            .args(args)
             .env("TOKIO_WORKER_THREADS", "2")
             .stdin(Stdio::null())
             .stderr(Stdio::piped())

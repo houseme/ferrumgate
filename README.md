@@ -32,6 +32,8 @@ P0 已实现模块 JSON 配置存储。`fg-config` 负责原子读写，`fg-core
 
 `fgate serve` 按模块运行 Web、证书和 TCP/UDP 转发。TOML 顶层 `disabled_modules` 可在启动时关闭已编译模块。模块间依赖由 `fgate check` 校验。[模块框架](docs/DESIGN.md#11-模块框架与注册表wp-01)
 
+为 `fgate serve --config <TOML>` 加上 `--log-dir <绝对路径>` 可启用运行日志落盘，保存当前和上一份日志，并在重启后恢复近期记录。[运行日志验证](docs/EXECUTION.md#wp-09-运行日志基础链路)
+
 在根目录运行 `cargo test --workspace --locked`，可执行 Rust 单元测试和真实回环端到端测试。
 
 为代理路由添加 `[routes.health]` 可开启 HTTP 或 TCP 主动检查，探测按连续失败和成功次数摘除或恢复后端。[健康检查配置](docs/EXECUTION.md#主动健康检查)
