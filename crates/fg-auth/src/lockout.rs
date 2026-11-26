@@ -73,6 +73,19 @@ impl std::error::Error for LoginError {
 pub(super) struct LoginLimiter(Mutex<State>);
 
 impl LoginLimiter {
+    pub fn for_passkeys() -> Self {
+        let mut state = State::new(Instant::now());
+        state.limits.unknown_failures = None;
+        state.track_known = false;
+        Self(Mutex::new(state))
+    }
+
+    pub fn remember_success(&self, address: IpAddr) -> bool {
+        let mut state = self.state();
+        state.remember(source_key(address), Instant::now());
+        state.known_dirty
+    }
+
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let mut state = State::new(Instant::now());
         if let Loaded::Found(entries) = store.load::<Vec<KnownSource>>(KNOWN_FILE)? {
@@ -215,6 +228,7 @@ struct State {
     last_sweep: Instant,
     last_known_save: Instant,
     known_dirty: bool,
+    track_known: bool,
 }
 
 impl State {
@@ -233,6 +247,7 @@ impl State {
             last_sweep: now,
             last_known_save: now,
             known_dirty: false,
+            track_known: true,
         }
     }
 
@@ -329,8 +344,10 @@ impl State {
             Some(true) => {
                 source.started = now;
                 source.failed = 0;
-                self.remember(key, now);
-                completion.save_known = self.known_dirty;
+                if self.track_known {
+                    self.remember(key, now);
+                    completion.save_known = self.known_dirty;
+                }
             }
             Some(false) if now >= source.locked_until => {
                 source.failed += 1;
@@ -390,7 +407,7 @@ impl State {
     }
 }
 
-fn source_key(address: IpAddr) -> IpAddr {
+pub(super) fn source_key(address: IpAddr) -> IpAddr {
     match address.to_canonical() {
         IpAddr::V4(ip) => IpAddr::V4(ip),
         IpAddr::V6(ip) => IpAddr::V6(Ipv6Addr::from_bits(ip.to_bits() & (!0_u128 << 64))),

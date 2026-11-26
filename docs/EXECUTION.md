@@ -853,6 +853,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 167 项工作区测试和 9 项本机 Pebble ACME 测试。新增用例覆盖 RFC 6238 SHA-1 向量、验证码前导零与时钟偏差、写入失败时拒发会话、并发与跨重启防重放、缺少验证码时保留失败计数，以及绑定会话限制和启停后的旧会话失效。[RFC 6238 附录 B](https://www.rfc-editor.org/rfc/rfc6238#appendix-B)
 
+### WP-12 管理员 Passkey
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth passkey
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login::login_passkey
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 171 项工作区测试和 9 项本机 Pebble ACME 测试。四项新增用例验证 Origin 限制、挑战容量与过期、软件认证器注册、挑战重放、签名计数回退、重启恢复、独立登录限流，以及 HTTP 层的密码登录开关、最后一把 Passkey 保护和删除后会话失效。物理认证器和生产管理监听待实测，上游已有 Passkey 记录的迁移待实现。[WebAuthn Level 3](https://www.w3.org/TR/webauthn-3/)
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

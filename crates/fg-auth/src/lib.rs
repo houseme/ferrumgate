@@ -2,6 +2,7 @@
 
 mod account;
 mod lockout;
+pub mod passkey;
 mod password;
 mod session;
 mod totp;

@@ -2,6 +2,7 @@ use anyhow::Context;
 use data_encoding::BASE32_NOPAD;
 use fg_auth::{AccountManager, LoginLimits};
 use ring::hmac;
+use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
 use super::*;
 
@@ -20,6 +21,144 @@ fn cookie_pair(cookie: &str) -> &str {
 
 fn credentials(username: &str, password: &str) -> String {
     json!({"username": username, "password": password}).to_string()
+}
+
+#[tokio::test]
+async fn login_passkey_http_uses_existing_session_and_cookie_boundaries() -> Result<()> {
+    use fg_auth::passkey::{CreationChallengeResponse, RequestChallengeResponse, Url};
+
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    let password = "fixture-administrator-password";
+    store.save(
+        "account",
+        &json!({
+            "username":"operator",
+            "passwordHash":bcrypt::hash(password, 4)?,
+            "sessionSecret":"fixture-session-secret-for-tests-only",
+        }),
+    )?;
+    let (accounts, _) = AccountManager::open(store, None)?;
+    let origin = Url::parse("https://admin.test")?;
+    let admin = ApiRouter::default()
+        .with_passkey_accounts(Arc::new(accounts), "/panel", &origin)?
+        .finish();
+    assert_eq!(
+        admin.document()["paths"]["/api/account/passkeys"]["post"]["x-token-allowed"],
+        false
+    );
+    assert!(admin.document()["paths"]["/api/login/passkey/begin"].is_null());
+    let server = Server::start(admin.router).await?;
+    let login = credentials("operator", password);
+    let (_, headers, _) = server
+        .call("POST", "/api/login", &[JSON], login.clone())
+        .await?;
+    let first = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    let (status, _, options) = server
+        .call("POST", "/api/account/passkeys/begin", &first, Body::empty())
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let challenge = options["challenge"]
+        .as_str()
+        .context("enrollment challenge")?
+        .to_owned();
+    let options: CreationChallengeResponse = serde_json::from_value(json!({"publicKey":options}))?;
+    let mut authenticator = SoftPasskey::new(true);
+    let proof = authenticator.do_registration(origin.clone(), options)?;
+    let body = json!({"challenge":challenge, "password":password, "name":"Existing hardware", "credential":proof});
+    let (status, _, passkeys) = server
+        .call(
+            "POST",
+            "/api/account/passkeys",
+            &[JSON, first[0]],
+            body.to_string(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let id = passkeys[0]["id"].as_str().context("credential id")?;
+    assert_eq!(passkeys[0]["name"], "Existing hardware");
+    assert!(passkeys[0]["credential"].is_null());
+    let (status, _, _) = server
+        .call(
+            "PUT",
+            "/api/account/password-login",
+            &[JSON, first[0]],
+            json!({"password":password,"disabled":true}).to_string(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        server.call("POST", "/api/login", &[JSON], login).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, _, options) = server
+        .call("POST", "/api/login/passkey/begin", &[], Body::empty())
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let challenge = options["challenge"]
+        .as_str()
+        .context("assertion challenge")?
+        .to_owned();
+    let options: RequestChallengeResponse = serde_json::from_value(json!({"publicKey":options}))?;
+    let proof = authenticator.do_authentication(origin, options)?;
+    let assertion = json!({"challenge":challenge,"credential":proof}).to_string();
+    let (status, headers, info) = server
+        .call(
+            "POST",
+            "/api/login/passkey/finish",
+            &[JSON],
+            assertion.clone(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info["username"], "operator");
+    let cookie = cookie_header(&headers)?;
+    assert!(cookie.contains("Path=/panel/; HttpOnly; SameSite=Strict; Secure"));
+    assert_eq!(
+        server
+            .call("POST", "/api/login/passkey/finish", &[JSON], assertion)
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let auth = [JSON, ("cookie", cookie_pair(cookie))];
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &auth, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    let path = format!("/api/account/passkeys/{id}");
+    let payload = json!({"password":password}).to_string();
+    assert_eq!(
+        server
+            .call("DELETE", &path, &auth, payload.clone())
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, _, _) = server
+        .call(
+            "PUT",
+            "/api/account/password-login",
+            &auth,
+            json!({"password":password,"disabled":false}).to_string(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let (status, headers, response) = server.call("DELETE", &path, &auth, payload).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response, json!([]));
+    assert!(cookie_header(&headers)?.contains("Max-Age=0"));
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &auth, Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
 }
 
 #[tokio::test]

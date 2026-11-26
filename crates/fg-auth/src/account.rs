@@ -17,6 +17,7 @@ use serde_json::Value;
 
 use crate::{
     lockout::{KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
+    passkey::StoredPasskey,
     password::{self, MAX_PASSWORD_BYTES, check_password_strength},
     session::{Identity, Session, Snapshot, unix_seconds},
     totp::{PendingTotp, Totp},
@@ -41,7 +42,9 @@ pub(super) struct Account {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     users: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    passkeys: Vec<Value>,
+    pub(super) passkeys: Vec<StoredPasskey>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) passkey_user_id: Option<webauthn_rs::prelude::Uuid>,
     #[serde(skip_serializing_if = "is_false")]
     onboarding_pending: bool,
     #[serde(skip_serializing_if = "is_false")]
@@ -49,7 +52,7 @@ pub(super) struct Account {
     #[serde(skip_serializing_if = "is_false")]
     pub weak_password: bool,
     #[serde(skip_serializing_if = "is_false")]
-    password_login_off: bool,
+    pub(super) password_login_off: bool,
     pub session_epoch: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<Revoked>,
@@ -81,9 +84,9 @@ impl std::error::Error for CredentialChangeRejected {}
 /// Owns the only active writer for one account file.
 pub struct AccountManager {
     store: Arc<ConfigStore>,
-    snapshot: ArcSwap<Snapshot>,
-    writer: Mutex<Option<PendingTotp>>,
-    limiter: LoginLimiter,
+    pub(super) snapshot: ArcSwap<Snapshot>,
+    pub(super) writer: Mutex<Option<PendingTotp>>,
+    pub(super) limiter: LoginLimiter,
     login_events: Option<EventBus>,
     _owner: File,
 }
@@ -325,7 +328,7 @@ impl AccountManager {
         Ok(())
     }
 
-    fn save_login_sources(&self) {
+    pub(super) fn save_login_sources(&self) {
         let _writer = self.writer.lock().expect("account writer poisoned");
         if let Some(mut sources) = self.limiter.take_known() {
             sources.sort_unstable_by_key(|source| Reverse(source.last));
@@ -426,7 +429,7 @@ impl AccountManager {
         self.save(next)
     }
 
-    fn save(&self, account: Account) -> Result<()> {
+    pub(super) fn save(&self, account: Account) -> Result<()> {
         let next = Snapshot::new(account)?;
         let mut bytes =
             serde_json::to_vec_pretty(&next.account).context("encode administrator account")?;
@@ -441,7 +444,7 @@ impl AccountManager {
 }
 
 impl Account {
-    fn invalidate_sessions(&mut self) -> Result<()> {
+    pub(super) fn invalidate_sessions(&mut self) -> Result<()> {
         self.session_epoch = self
             .session_epoch
             .checked_add(1)

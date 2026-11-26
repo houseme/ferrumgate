@@ -11,7 +11,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{MethodFilter, on},
 };
-use fg_auth::{AccountManager, Identity};
+use fg_auth::{
+    AccountManager, Identity,
+    passkey::{Passkeys, Url},
+};
 use fg_core::registry::{CATALOG, Enabled, Registry, Status};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -152,10 +155,36 @@ impl ApiRouter {
     /// Installs account routes before other routes. Set `secure` for an externally HTTPS listener.
     /// The listener must supply `ConnectInfo<SocketAddr>`. Other authenticators supply API tokens.
     pub fn with_accounts(
+        self,
+        accounts: Arc<AccountManager>,
+        external_prefix: &str,
+        secure: bool,
+    ) -> Result<Self> {
+        self.mount_accounts(accounts, external_prefix, secure, None)
+    }
+
+    /// Installs account and Passkey routes for the configured public origin.
+    pub fn with_passkey_accounts(
+        self,
+        accounts: Arc<AccountManager>,
+        external_prefix: &str,
+        origin: &Url,
+    ) -> Result<Self> {
+        let passkeys = Passkeys::new(accounts.clone(), origin)?;
+        self.mount_accounts(
+            accounts,
+            external_prefix,
+            origin.scheme() == "https",
+            Some(passkeys),
+        )
+    }
+
+    fn mount_accounts(
         mut self,
         accounts: Arc<AccountManager>,
         external_prefix: &str,
         secure: bool,
+        passkeys: Option<Passkeys>,
     ) -> Result<Self> {
         assert!(
             self.operations.is_empty(),
@@ -185,7 +214,9 @@ impl ApiRouter {
                 }
             }
         }
-        Ok(login::mount(self, accounts, cookies, disabled, absent))
+        Ok(login::mount(
+            self, accounts, cookies, disabled, absent, passkeys,
+        ))
     }
 
     pub fn route<H, T>(

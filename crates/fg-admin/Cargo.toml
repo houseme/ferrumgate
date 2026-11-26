@@ -34,3 +34,4 @@ hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 ring = "0.17"
 tokio = { workspace = true, features = ["macros", "net", "test-util"] }
+webauthn-authenticator-rs = { version = "0.6", default-features = false, features = ["softpasskey"] }

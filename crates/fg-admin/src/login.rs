@@ -13,7 +13,7 @@ use axum::{
 };
 use fg_auth::{
     AccountManager, CredentialChangeRejected, Identity, LoginError, PasswordIssue, Session,
-    check_password_strength,
+    check_password_strength, passkey::Passkeys,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -44,7 +44,11 @@ impl SessionCookies {
         })
     }
 
-    fn response(&self, session: Session, username: String) -> Result<Response, ApiError> {
+    pub(super) fn response(
+        &self,
+        session: Session,
+        username: String,
+    ) -> Result<Response, ApiError> {
         let timestamp = session
             .expires_at
             .duration_since(UNIX_EPOCH)
@@ -71,12 +75,12 @@ impl SessionCookies {
             .into_response())
     }
 
-    fn clear(&self) -> Response {
-        (
-            [(header::SET_COOKIE, self.expired.clone())],
-            Json(OkResponse { ok: true }),
-        )
-            .into_response()
+    pub(super) fn clear(&self) -> Response {
+        self.invalidated(OkResponse { ok: true })
+    }
+
+    pub(super) fn invalidated(&self, body: impl Serialize) -> Response {
+        ([(header::SET_COOKIE, self.expired.clone())], Json(body)).into_response()
     }
 }
 
@@ -121,14 +125,14 @@ pub(super) fn password_fix_allowed(method: &Method, path: &str) -> bool {
     )
 }
 
-struct Sessions {
+pub(super) struct Sessions {
     accounts: Arc<AccountManager>,
-    cookies: SessionCookies,
+    pub(super) cookies: SessionCookies,
     workers: Arc<Semaphore>,
 }
 
 impl Sessions {
-    async fn work<T: Send + 'static>(
+    pub(super) async fn work<T: Send + 'static>(
         &self,
         operation: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, ApiError> {
@@ -258,6 +262,7 @@ pub(super) fn mount(
     cookies: SessionCookies,
     disabled: Vec<&'static str>,
     absent: Vec<&'static str>,
+    passkeys: Option<Passkeys>,
 ) -> ApiRouter {
     let state = Arc::new(Sessions {
         accounts,
@@ -271,64 +276,135 @@ pub(super) fn mount(
     let totp_status = state.clone();
     let totp_setup = state.clone();
     let totp_enable = state.clone();
+    let totp_disable = state.clone();
     let disabled = Arc::new(disabled);
     let absent = Arc::new(absent);
-    router
-        .public_route(Method::POST, "/api/login", "Sign in with an administrator password",
-            move |peer, ApiJson(request)| login.login(peer, request))
-        .public_route(Method::POST, "/api/logout", "Sign out of the current session",
-            move |headers| logout.logout(headers))
-        .modeled_route(Method::GET, "/api/session", "Get the current identity",
-            RouteModels::default().response::<SessionView>(),
-            move |identity: Option<Extension<Identity>>| async move {
-                let identity = identity.map(|Extension(identity)| identity);
-                let password_issue = identity.as_ref().map_or("", Identity::password_issue);
-                Json(SessionView {
-                    username: identity.map_or_else(String::new, |identity| identity.username),
-                    role: "admin",
-                    default_password: password_issue == "default",
-                    password_issue,
-                    disabled_modules: disabled,
-                    absent_modules: absent,
-                })
-            })
-        .modeled_route(Method::POST, "/api/account/sessions/revoke", "Sign out of every session",
-            RouteModels::default().response::<OkResponse>(), move || revoke.revoke())
-        .modeled_route(Method::PUT, "/api/account", "Change administrator credentials",
-            RouteModels::default().request::<ChangePassword>().response::<OkResponse>(),
-            move |ApiJson(request)| change.change(request))
-        .modeled_route(Method::POST, "/api/account/password-check", "Check a proposed password",
-            RouteModels::default().request::<PasswordCheck>().response::<PasswordFeedback>(),
-            |Extension(identity): Extension<Identity>, ApiJson(request): ApiJson<PasswordCheck>| async move {
-                let username = request.username.as_deref().filter(|username| !username.trim().is_empty()).unwrap_or(&identity.username);
-                let code = check_password_strength(username, &request.password).err().map(PasswordIssue::code);
-                Json(PasswordFeedback { ok: code.is_none(), code })
-            })
-        .modeled_route(Method::GET, "/api/account/totp", "Get two-step verification status",
-            RouteModels::default().response::<TotpStatus>(),
-            move || async move { Json(TotpStatus { enabled: totp_status.accounts.totp_enabled() }) })
-        .modeled_route(Method::POST, "/api/account/totp/setup", "Prepare two-step verification",
-            RouteModels::default().response::<TotpSetup>(),
-            move |headers, Extension(identity)| totp_setup.prepare_totp(headers, identity))
-        .modeled_route(Method::POST, "/api/account/totp/enable", "Enable two-step verification",
-            RouteModels::default().request::<TotpRequest>().response::<OkResponse>(),
-            move |headers, ApiJson(request)| totp_enable.set_totp(headers, request, true))
-        .modeled_route(Method::POST, "/api/account/totp/disable", "Disable two-step verification",
-            RouteModels::default().request::<TotpRequest>().response::<OkResponse>(),
-            move |headers, ApiJson(request)| state.set_totp(headers, request, false))
+    let router =
+        router
+            .public_route(
+                Method::POST,
+                "/api/login",
+                "Sign in with an administrator password",
+                move |peer, ApiJson(request)| login.login(peer, request),
+            )
+            .public_route(
+                Method::POST,
+                "/api/logout",
+                "Sign out of the current session",
+                move |headers| logout.logout(headers),
+            )
+            .modeled_route(
+                Method::GET,
+                "/api/session",
+                "Get the current identity",
+                RouteModels::default().response::<SessionView>(),
+                move |identity: Option<Extension<Identity>>| async move {
+                    let identity = identity.map(|Extension(identity)| identity);
+                    let password_issue = identity.as_ref().map_or("", Identity::password_issue);
+                    Json(SessionView {
+                        username: identity.map_or_else(String::new, |identity| identity.username),
+                        role: "admin",
+                        default_password: password_issue == "default",
+                        password_issue,
+                        disabled_modules: disabled,
+                        absent_modules: absent,
+                    })
+                },
+            )
+            .modeled_route(
+                Method::POST,
+                "/api/account/sessions/revoke",
+                "Sign out of every session",
+                RouteModels::default().response::<OkResponse>(),
+                move || revoke.revoke(),
+            )
+            .modeled_route(
+                Method::PUT,
+                "/api/account",
+                "Change administrator credentials",
+                RouteModels::default()
+                    .request::<ChangePassword>()
+                    .response::<OkResponse>(),
+                move |ApiJson(request)| change.change(request),
+            )
+            .modeled_route(
+                Method::POST,
+                "/api/account/password-check",
+                "Check a proposed password",
+                RouteModels::default()
+                    .request::<PasswordCheck>()
+                    .response::<PasswordFeedback>(),
+                |Extension(identity): Extension<Identity>,
+                 ApiJson(request): ApiJson<PasswordCheck>| async move {
+                    let username = request
+                        .username
+                        .as_deref()
+                        .filter(|username| !username.trim().is_empty())
+                        .unwrap_or(&identity.username);
+                    let code = check_password_strength(username, &request.password)
+                        .err()
+                        .map(PasswordIssue::code);
+                    Json(PasswordFeedback {
+                        ok: code.is_none(),
+                        code,
+                    })
+                },
+            )
+            .modeled_route(
+                Method::GET,
+                "/api/account/totp",
+                "Get two-step verification status",
+                RouteModels::default().response::<TotpStatus>(),
+                move || async move {
+                    Json(TotpStatus {
+                        enabled: totp_status.accounts.totp_enabled(),
+                    })
+                },
+            )
+            .modeled_route(
+                Method::POST,
+                "/api/account/totp/setup",
+                "Prepare two-step verification",
+                RouteModels::default().response::<TotpSetup>(),
+                move |headers, Extension(identity)| totp_setup.prepare_totp(headers, identity),
+            )
+            .modeled_route(
+                Method::POST,
+                "/api/account/totp/enable",
+                "Enable two-step verification",
+                RouteModels::default()
+                    .request::<TotpRequest>()
+                    .response::<OkResponse>(),
+                move |headers, ApiJson(request)| totp_enable.set_totp(headers, request, true),
+            )
+            .modeled_route(
+                Method::POST,
+                "/api/account/totp/disable",
+                "Disable two-step verification",
+                RouteModels::default()
+                    .request::<TotpRequest>()
+                    .response::<OkResponse>(),
+                move |headers, ApiJson(request)| totp_disable.set_totp(headers, request, false),
+            );
+    match passkeys {
+        Some(passkeys) => crate::passkey_routes::mount(router, state, passkeys),
+        None => router,
+    }
 }
 
-fn credential_error(error: anyhow::Error) -> ApiError {
+pub(super) fn credential_error(error: anyhow::Error) -> ApiError {
     if let Some(issue) = error.downcast_ref::<PasswordIssue>() {
         ApiError::new(StatusCode::BAD_REQUEST, issue.code())
     } else if let Some(rejection) = error.downcast_ref::<CredentialChangeRejected>() {
         ApiError::new(StatusCode::BAD_REQUEST, rejection.0)
+    } else if matches!(error.downcast_ref::<LoginError>(), Some(LoginError::Busy)) {
+        BUSY
     } else {
         ApiError::internal()
     }
 }
 
-fn login_error(error: LoginError) -> Response {
+pub(super) fn login_error(error: LoginError) -> Response {
     match error {
         LoginError::TotpRequired => (
             StatusCode::UNAUTHORIZED,
