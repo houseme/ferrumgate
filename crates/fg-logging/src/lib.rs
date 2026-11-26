@@ -16,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
+use arc_swap::ArcSwapOption;
 pub use archive::ArchiveOptions;
 pub use filter::Filter;
 use persist::{Disk, DiskView};
@@ -171,14 +172,22 @@ struct Record(Module, Arc<Entry>);
 struct Shared {
     buffers: [Mutex<Buffer>; MODULES.len()],
     lines: usize,
-    disk: Option<Arc<Queue<Record>>>,
+    disk: ArcSwapOption<Queue<Record>>,
+}
+
+struct ActiveDisk {
+    worker: Worker<Record>,
+    view: Arc<DiskView>,
+    imported_through: [u64; MODULES.len()],
 }
 
 pub struct Logs {
     layer: LogLayer,
     echo: Worker<Vec<u8>>,
-    disk: Option<Worker<Record>>,
-    disk_view: Option<Arc<DiskView>>,
+    disk: Option<ActiveDisk>,
+    draining_disk: Option<Worker<Record>>,
+    file_bytes: u64,
+    web_archive: Option<ArchiveOptions>,
 }
 
 impl Logs {
@@ -208,7 +217,6 @@ impl Logs {
                 )
             })
             .transpose()?;
-        let disk_view = disk.as_ref().map(|disk| disk.view.clone());
         let mut output = BufWriter::with_capacity(64 << 10, echo);
         let echo = Worker::<Vec<u8>>::spawn(
             "fg-log-echo",
@@ -226,54 +234,20 @@ impl Logs {
             },
         )?;
         let disk = disk
-            .map(|mut sink| {
-                let echo = echo.queue.clone();
-                Worker::spawn(
-                    "fg-log-disk",
-                    DISK_BYTES,
-                    256 << 10,
-                    Duration::from_secs(1),
-                    move |batch, lost| {
-                        if lost != 0 {
-                            let notice =
-                                format!("ferrumgate: dropped {lost} pending disk log entries\n")
-                                    .into_bytes();
-                            let bytes = notice.capacity();
-                            echo.push(notice, bytes);
-                        }
-                        sink.write(batch).inspect_err(|error| {
-                            let notice = format!(
-                                "ferrumgate: runtime log persistence stopped ({:?})\n",
-                                error.kind()
-                            )
-                            .into_bytes();
-                            let bytes = notice.capacity();
-                            echo.push(notice, bytes);
-                        })?;
-                        if let Err(error) = sink.maintain_archives() {
-                            let notice = format!(
-                                "ferrumgate: Web log archive maintenance failed ({:?})\n",
-                                error.kind()
-                            )
-                            .into_bytes();
-                            let bytes = notice.capacity();
-                            echo.push(notice, bytes);
-                        }
-                        Ok(())
-                    },
-                )
-            })
+            .map(|sink| start_disk(sink, echo.queue.clone()))
             .transpose()?;
         let layer = LogLayer(Arc::new(Shared {
             buffers: buffers.map(Mutex::new),
             lines: options.lines,
-            disk: disk.as_ref().map(|worker| worker.queue.clone()),
+            disk: ArcSwapOption::new(disk.as_ref().map(|disk| disk.worker.queue.clone())),
         }));
         Ok(Self {
             layer,
             echo,
             disk,
-            disk_view,
+            draining_disk: None,
+            file_bytes: options.file_bytes,
+            web_archive: options.web_archive,
         })
     }
 
@@ -283,6 +257,78 @@ impl Logs {
 
     pub fn echo(&self) -> Echo {
         Echo(self.echo.queue.clone())
+    }
+
+    /// Replaces the persistence destination while preserving the active tracing layer.
+    /// The caller must keep the new path outside any roots already published by the application.
+    pub fn set_directory(&mut self, directory: Option<PathBuf>) -> Result<()> {
+        if let Some(path) = &directory {
+            ensure!(path.is_absolute(), "log directory must be absolute");
+            if self
+                .disk
+                .as_ref()
+                .is_some_and(|disk| path.canonicalize().is_ok_and(|path| path == disk.view.dir))
+            {
+                return Ok(());
+            }
+        } else if self.disk.is_none() {
+            return Ok(());
+        }
+        if let Some(worker) = &self.draining_disk {
+            ensure!(
+                worker.finished(),
+                "previous log directory is still draining"
+            );
+            self.draining_disk = None;
+        }
+
+        // The destination scan only needs its latest sequence per stream and known sources.
+        let mut restored = std::array::from_fn(|_| Buffer::default());
+        let next = directory
+            .map(|dir| {
+                let sink = Disk::open(dir, self.file_bytes, 1, self.web_archive, &mut restored)?;
+                let mut disk = start_disk(sink, self.echo.queue.clone())?;
+                disk.imported_through = restored.each_ref().map(|buffer| buffer.latest);
+                Ok::<_, anyhow::Error>(disk)
+            })
+            .transpose()?;
+        let queue = next.as_ref().map(|disk| disk.worker.queue.clone());
+        {
+            // Producers choose a queue under their stream lock, so no old-directory enqueue
+            // can straddle this boundary.
+            let mut buffers = self
+                .layer
+                .0
+                .buffers
+                .each_ref()
+                .map(|buffer| buffer.lock().expect("log buffer poisoned"));
+            for (buffer, restored) in buffers.iter_mut().zip(restored) {
+                buffer.latest = buffer.latest.max(restored.latest);
+                for source in restored.sources {
+                    if buffer.sources.len() == MAX_SOURCES {
+                        break;
+                    }
+                    buffer.sources.insert(source);
+                }
+            }
+            self.layer.0.disk.store(queue);
+        }
+        if let Some(old) = std::mem::replace(&mut self.disk, next) {
+            old.worker.close();
+            if let Err(error) = old.worker.wait(Instant::now() + Duration::from_secs(3)) {
+                let notice = format!(
+                    "ferrumgate: previous log directory did not flush ({:?})\n",
+                    error.kind()
+                )
+                .into_bytes();
+                let bytes = notice.capacity();
+                self.echo.queue.push(notice, bytes);
+                if error.kind() == io::ErrorKind::TimedOut {
+                    self.draining_disk = Some(old.worker);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn recent(&self, module: Module, after: u64, before: u64, limit: usize) -> Vec<Arc<Entry>> {
@@ -311,11 +357,9 @@ impl Logs {
 
     /// Clears the selected stream and discards its already queued records.
     pub fn clear(&self, module: Module) -> io::Result<()> {
-        let mut files = self
-            .disk_view
-            .as_ref()
-            .map(|view| view.files.lock().expect("log file mutex poisoned"));
-        if let Some(view) = &self.disk_view {
+        let view = self.disk.as_ref().map(|disk| &disk.view);
+        let mut files = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
+        if let Some(view) = view {
             view.clear_files(module)?;
         }
         let mut buffer = self.layer.0.buffers[module as usize]
@@ -338,17 +382,64 @@ impl Logs {
     pub fn shutdown(self, timeout: Duration) -> io::Result<()> {
         let deadline = Instant::now() + timeout;
         if let Some(disk) = &self.disk {
-            disk.close();
+            disk.worker.close();
         }
         let disk = self
             .disk
+            .as_ref()
+            .map(|disk| disk.worker.wait(deadline))
+            .transpose();
+        let draining = self
+            .draining_disk
             .as_ref()
             .map(|worker| worker.wait(deadline))
             .transpose();
         self.echo.close();
         let echo = self.echo.wait(deadline);
-        disk.and(echo)
+        disk.and(draining).and(echo)
     }
+}
+
+fn start_disk(mut sink: Disk, echo: Arc<Queue<Vec<u8>>>) -> io::Result<ActiveDisk> {
+    let view = sink.view.clone();
+    let worker = Worker::spawn(
+        "fg-log-disk",
+        DISK_BYTES,
+        256 << 10,
+        Duration::from_secs(1),
+        move |batch, lost| {
+            if lost != 0 {
+                let notice =
+                    format!("ferrumgate: dropped {lost} pending disk log entries\n").into_bytes();
+                let bytes = notice.capacity();
+                echo.push(notice, bytes);
+            }
+            sink.write(batch).inspect_err(|error| {
+                let notice = format!(
+                    "ferrumgate: runtime log persistence stopped ({:?})\n",
+                    error.kind()
+                )
+                .into_bytes();
+                let bytes = notice.capacity();
+                echo.push(notice, bytes);
+            })?;
+            if let Err(error) = sink.maintain_archives() {
+                let notice = format!(
+                    "ferrumgate: Web log archive maintenance failed ({:?})\n",
+                    error.kind()
+                )
+                .into_bytes();
+                let bytes = notice.capacity();
+                echo.push(notice, bytes);
+            }
+            Ok(())
+        },
+    )?;
+    Ok(ActiveDisk {
+        worker,
+        view,
+        imported_through: [0; MODULES.len()],
+    })
 }
 
 #[derive(Clone)]
@@ -383,7 +474,7 @@ impl<S: Subscriber> Layer<S> for LogLayer {
         });
         let bytes = entry.bytes();
         buffer.add(entry.clone(), bytes, self.0.lines);
-        if let Some(disk) = &self.0.disk {
+        if let Some(disk) = &*self.0.disk.load() {
             disk.push(Record(module, entry), bytes);
         }
     }

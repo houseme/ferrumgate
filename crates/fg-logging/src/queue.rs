@@ -148,6 +148,10 @@ impl<T: Send + Sync + 'static> Worker<T> {
         self.queue.close();
     }
 
+    pub fn finished(&self) -> bool {
+        !matches!(self.done.try_recv(), Err(mpsc::TryRecvError::Empty))
+    }
+
     pub fn wait(&self, deadline: Instant) -> io::Result<()> {
         self.done
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))

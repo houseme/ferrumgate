@@ -79,6 +79,9 @@ impl Disk {
     ) -> Result<Self> {
         ensure!(dir.is_absolute(), "log directory must be absolute");
         ensure_dir(&dir).context("prepare runtime log directory")?;
+        let dir = dir
+            .canonicalize()
+            .context("resolve runtime log directory")?;
         let lock = open_regular(&dir.join(".ferrumgate-log.lock"), true)?
             .context("open runtime log lock")?;
         lock.try_lock().context("runtime log directory is in use")?;

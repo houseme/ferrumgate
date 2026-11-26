@@ -54,7 +54,12 @@ impl Logs {
         };
         let mut entries = self.recent(module, after, before, candidates);
         entries.retain(|entry| filter.matches(entry));
-        if limit == 0 || entries.len() > limit || self.disk_view.is_none() {
+        let complete_in_memory = limit > 0
+            && entries.len() > limit
+            && self.disk.as_ref().is_none_or(|disk| {
+                entries[entries.len() - limit].seq > disk.imported_through[module as usize]
+            });
+        if limit == 0 || complete_in_memory || self.disk.is_none() {
             let has_more = limit > 0 && entries.len() > limit;
             if has_more {
                 entries.drain(..entries.len() - limit);
@@ -128,7 +133,7 @@ impl Logs {
     }
 
     fn snapshot(&self, module: Module, after: u64, before: u64) -> io::Result<Snapshot> {
-        let view = self.disk_view.as_ref();
+        let view = self.disk.as_ref().map(|disk| &disk.view);
         let files_guard = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
         let buffer = self.layer.0.buffers[module as usize]
             .lock()
@@ -139,8 +144,8 @@ impl Logs {
         let cutoff = files_guard
             .as_ref()
             .map_or(0, |files| files[module as usize].through);
-        if let Some(disk) = &self.layer.0.disk {
-            disk.snapshot(|Record(origin, entry)| {
+        if let Some(disk) = &self.disk {
+            disk.worker.queue.snapshot(|Record(origin, entry)| {
                 if *origin == module
                     && entry.seq > cutoff
                     && entry.seq <= latest

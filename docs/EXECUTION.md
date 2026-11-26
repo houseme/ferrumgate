@@ -663,7 +663,21 @@ RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-logging --depth 1
 git diff --check
 ```
 
-在 macOS arm64、Rust stable 1.100.0 上通过 120 项默认测试及 9 项本机 Pebble ACME 测试。五项新增测试覆盖跨日和按大小轮转、gzip 恢复与导出、按保留期限和总量淘汰、清空后拒绝旧批次及压缩结果。归档使用锁定的 `flate2 1.1.11`，Unix 分区容量通过 `rustix` 读取。当前由 Rust 库启用归档，Web 访问日志生产者与管理接口分别随 WP-28 和 WP-11 接入。目录热切换与 gzip 时间范围裁剪仍在 WP-09。
+在 macOS arm64、Rust stable 1.100.0 上通过 120 项默认测试及 9 项本机 Pebble ACME 测试。五项新增测试覆盖跨日和按大小轮转、gzip 恢复与导出、按保留期限和总量淘汰、清空后拒绝旧批次及压缩结果。归档使用锁定的 `flate2 1.1.11`，Unix 分区容量通过 `rustix` 读取。当前由 Rust 库启用归档，Web 访问日志生产者与管理接口分别随 WP-28 和 WP-11 接入。
+
+### WP-09 目录切换与归档时间裁剪
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-logging
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-logging --depth 1
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 123 项默认测试及 9 项本机 Pebble ACME 测试。三项新增测试覆盖目标被占用时继续向旧目录写入、回到旧目录及恢复落盘、并发切换前后的序号连续，以及只读取头部即可排除时间不相交的 gzip。归档元数据覆盖顺序异常与亚秒边界，损坏或缺少元数据时回到逐条读取。WP-09 的 Rust 库阶段已完成，设置、管理接口和访问日志的接入随各自工作包验证。
 
 ### 数据面交付记录
 
