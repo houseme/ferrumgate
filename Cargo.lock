@@ -552,14 +552,17 @@ dependencies = [
  "axum",
  "fg-config",
  "fg-core",
+ "flate2",
  "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

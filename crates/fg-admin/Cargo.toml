@@ -11,12 +11,15 @@ arc-swap = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 fg-config = { path = "../fg-config" }
 fg-core = { path = "../fg-core" }
+flate2 = "1"
 getrandom = "0.4"
 http-body-util = "0.1"
+percent-encoding = "2"
 serde.workspace = true
-serde_json.workspace = true
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+url = "2"
 
 [dev-dependencies]
 hyper = { version = "1", features = ["client", "http1"] }

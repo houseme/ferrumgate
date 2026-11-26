@@ -47,20 +47,22 @@ impl Access<'_> {
     }
 
     pub fn allows_token(&self, grants: &[String]) -> bool {
-        let allows = |scope: &Scope<'_>| {
-            grants.iter().any(|grant| {
-                grant == "*"
-                    || grant.split_once(':').is_some_and(|(domain, level)| {
-                        (domain == "*" || domain == scope.domain)
-                            && (level == "write" || level == scope.level.name())
-                    })
-            })
-        };
+        let allows = |scope: &Scope<'_>| can_access(grants, &scope.domain, scope.level);
         match self {
             Self::Any => true,
             Self::SessionOnly | Self::Public => false,
             Self::Scope(scope) => allows(scope),
             Self::All(scopes) => scopes.iter().all(allows),
+        }
+    }
+
+    pub(crate) fn allows_unredacted(&self, grants: &[String]) -> bool {
+        let can_write = |scope: &Scope<'_>| can_access(grants, &scope.domain, Level::Write);
+        match self {
+            Self::Any => can_access(grants, "*", Level::Write),
+            Self::SessionOnly | Self::Public => false,
+            Self::Scope(scope) => can_write(scope),
+            Self::All(scopes) => scopes.iter().all(can_write),
         }
     }
 
@@ -72,6 +74,16 @@ impl Access<'_> {
             Self::All(scopes) => scopes.iter().all(|scope| scope.level == Level::Read),
         }
     }
+}
+
+fn can_access(grants: &[String], domain: &str, needed: Level) -> bool {
+    grants.iter().any(|grant| {
+        grant == "*"
+            || grant.split_once(':').is_some_and(|(granted, level)| {
+                (granted == "*" || granted == domain)
+                    && (level == "write" || level == needed.name())
+            })
+    })
 }
 
 impl fmt::Display for Access<'_> {

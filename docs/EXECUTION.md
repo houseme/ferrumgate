@@ -706,6 +706,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 133 项默认测试和 9 项本机 Pebble ACME 测试。两个新增回环用例通过真实 HTTP 验证候选启停校验、重复键去重、单次版本提交、失败不触发回调、排序、分组、删除前检查、复制位置、密钥掩码合并和写权限门禁。权限测试仍覆盖固定上游快照的 808 个操作。线上身份和监听仍随对应工作包接入。
 
+### WP-11 管理响应脱敏与压缩
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-admin --depth 1
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 136 项默认测试和 9 项本机 Pebble ACME 测试。新增回环用例验证压缩后的只读响应解压后仍已脱敏、写权限保留原值、超大和坏 JSON 返回受控错误、流式策略及已编码响应透传。容量测试验证饱和时拒绝未经脱敏的正文并允许可选压缩回退。线上身份和管理监听仍随对应工作包接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

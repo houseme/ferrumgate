@@ -13,10 +13,12 @@ use axum::{
 };
 use fg_core::registry::{Enabled, Registry, Status};
 use serde_json::{Value, json};
+use tokio::sync::Semaphore;
 
 use crate::{
     ApiError,
     http::boundary,
+    response::{MAX_TRANSFORMS, accepts_gzip, transform},
     scope::{Access, module_of, required},
 };
 
@@ -25,6 +27,16 @@ pub enum Principal {
     Token { scopes: Vec<String> },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamPolicy {
+    WritersOnly,
+    /// The handler must filter the stream using the `ReadOnly` request extension.
+    ReadOnlySafe,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReadOnly(pub bool);
+
 type Auth = Arc<dyn Fn(&HeaderMap) -> Option<Principal> + Send + Sync>;
 
 struct Operation {
@@ -32,12 +44,15 @@ struct Operation {
     path: String,
     summary: &'static str,
     access: Arc<Access<'static>>,
+    stream: Option<StreamPolicy>,
 }
 
 #[derive(Clone)]
 struct Policy {
     auth: Auth,
     access: Arc<Access<'static>>,
+    stream: Option<StreamPolicy>,
+    response_budget: Arc<Semaphore>,
 }
 
 pub struct ApiRouter {
@@ -45,6 +60,7 @@ pub struct ApiRouter {
     operations: Vec<Operation>,
     auth: Auth,
     modules: Option<Arc<(Registry, Enabled)>>,
+    response_budget: Arc<Semaphore>,
 }
 
 impl Default for ApiRouter {
@@ -62,6 +78,7 @@ impl ApiRouter {
             operations: Vec::new(),
             auth: Arc::new(authenticate),
             modules: None,
+            response_budget: Arc::new(Semaphore::new(MAX_TRANSFORMS)),
         }
     }
 
@@ -75,7 +92,7 @@ impl ApiRouter {
     }
 
     pub fn route<H, T>(
-        mut self,
+        self,
         method: Method,
         path: impl Into<String>,
         summary: &'static str,
@@ -85,7 +102,36 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        let path = path.into();
+        self.register(method, path.into(), summary, None, handler)
+    }
+
+    pub fn stream_route<H, T>(
+        self,
+        method: Method,
+        path: impl Into<String>,
+        summary: &'static str,
+        policy: StreamPolicy,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(method, path.into(), summary, Some(policy), handler)
+    }
+
+    fn register<H, T>(
+        mut self,
+        method: Method,
+        path: String,
+        summary: &'static str,
+        stream: Option<StreamPolicy>,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
         assert!(
             module_of(&path).is_some(),
             "admin route requires an /api/ path"
@@ -102,6 +148,7 @@ impl ApiRouter {
             method,
             path,
             summary,
+            stream,
         };
         assert_ne!(
             *operation.access,
@@ -122,6 +169,8 @@ impl ApiRouter {
         let policy = Policy {
             auth: self.auth.clone(),
             access: operation.access.clone(),
+            stream: operation.stream,
+            response_budget: self.response_budget.clone(),
         };
         self.router = std::mem::take(&mut self.router).route(
             &operation.path,
@@ -142,6 +191,7 @@ impl ApiRouter {
             path: "/api/openapi.json".into(),
             summary: "Get the management API schema",
             access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
+            stream: None,
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
@@ -182,21 +232,36 @@ impl ApiRouter {
     }
 }
 
-async fn authorize(State(policy): State<Policy>, request: Request, next: Next) -> Response {
+async fn authorize(State(policy): State<Policy>, mut request: Request, next: Next) -> Response {
     let Some(principal) = (policy.auth)(request.headers()) else {
         return ApiError::new(StatusCode::UNAUTHORIZED, "authentication required").into_response();
     };
-    let allowed = match principal {
-        Principal::Session { read_only: false } => true,
-        Principal::Session { read_only: true } => {
-            policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD)
-        }
-        Principal::Token { scopes } => policy.access.allows_token(&scopes),
+    let (allowed, restricted) = match principal {
+        Principal::Session { read_only: false } => (true, false),
+        Principal::Session { read_only: true } => (
+            policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD),
+            true,
+        ),
+        Principal::Token { scopes } => (
+            policy.access.allows_token(&scopes),
+            !policy.access.allows_unredacted(&scopes),
+        ),
     };
-    if !allowed {
+    if !allowed || (restricted && policy.stream == Some(StreamPolicy::WritersOnly)) {
         return ApiError::new(StatusCode::FORBIDDEN, "insufficient permission").into_response();
     }
-    next.run(request).await
+    request.extensions_mut().insert(ReadOnly(restricted));
+    if policy.stream.is_some() {
+        return next.run(request).await;
+    }
+    let gzip = accepts_gzip(request.headers());
+    transform(
+        next.run(request).await,
+        restricted,
+        gzip,
+        policy.response_budget,
+    )
+    .await
 }
 
 pub struct Admin {
@@ -273,7 +338,7 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
             [route.method.as_str().to_ascii_lowercase()] = json!({
             "summary":route.summary, "tags":[tag], "parameters":parameters,
             "responses":{"200":{"description":"Success"},"401":{"description":"Authentication required"},"403":{"description":"Insufficient permission"}},
-            "security":security,"x-required-scope":route.access.to_string(),"x-token-allowed":token
+            "security":security,"x-required-scope":route.access.to_string(),"x-token-allowed":token,"x-stream":route.stream.is_some()
         });
     }
     json!({"openapi":"3.0.3", "info":{"title":"FerrumGate Management API","version":env!("CARGO_PKG_VERSION")},

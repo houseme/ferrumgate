@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Read, Write},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -7,12 +8,13 @@ use std::{
 use anyhow::Result;
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
+    extract::Extension,
     http::{HeaderMap, Method, Request, StatusCode},
 };
 use fg_admin::{
-    ApiError, ApiRouter, Collection, CollectionPaths, ItemChange, Principal, SECRET_MASK,
-    keep_secret,
+    ApiError, ApiRouter, Collection, CollectionPaths, ItemChange, Principal, ReadOnly, SECRET_MASK,
+    StreamPolicy, keep_secret,
 };
 use fg_config::{ConfigStore, Loaded};
 use fg_core::registry::Registry;
@@ -48,6 +50,22 @@ impl Server {
         headers: &[(&str, &str)],
         body: impl Into<Body>,
     ) -> Result<(StatusCode, HeaderMap, Value)> {
+        let (status, headers, bytes) = self.call_raw(method, path, headers, body).await?;
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes)?
+        };
+        Ok((status, headers, value))
+    }
+
+    async fn call_raw(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: impl Into<Body>,
+    ) -> Result<(StatusCode, HeaderMap, Bytes)> {
         timeout(Duration::from_secs(5), async {
             let stream = TcpStream::connect(self.listen).await?;
             let (mut sender, connection) =
@@ -66,15 +84,275 @@ impl Server {
             let response = sender.send_request(request.body(body.into())?).await?;
             let (parts, body) = response.into_parts();
             let bytes = body.collect().await?.to_bytes();
-            let value = if bytes.is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_slice(&bytes)?
-            };
-            Ok((parts.status, parts.headers, value))
+            Ok((parts.status, parts.headers, bytes))
         })
         .await?
     }
+}
+
+#[tokio::test]
+async fn response_redacts_before_gzip_and_preserves_writer_values() -> Result<()> {
+    let value = json!({
+        "privateKey":"fixture-private-key",
+        "passwordEnabled":true, "hasPassword":true, "emptySecret":"",
+        "requestHeaders":["Authorization: fixture-header","X-Empty:","malformed-authorization"],
+        "responseHeaders":{"Set-Cookie":"fixture-cookie"},
+        "extraArgs":["--flag=fixture-argument"],
+        "daemonEnv":"SECRET=fixture-env\nmalformed-env\nEMPTY=",
+        "users":["alice:fixture-password", {"apiKey":"fixture-api-key"}],
+        "credentials":{"extra":{"zone":"fixture-extra","endpoint":"https://dns.test/?secret=fixture-dns"},"EXTRA":{"zone":"fixture-extra-2"}},
+        "nested":{"token":["fixture-array-token"],"credentials":[{"extra":{"key":"fixture-array-extra"}}]},
+        "template":{"method":"POST","body":{"text":"fixture-body","numeric":12345}},
+        "summary":{"body":"preserve explanatory body"},
+        "error":"see https://ui:fixture-url@example.test/docs/%61bcDEF0123456789/?key=fixture-query&bare-fixture#fixture-fragment for details",
+        "ordinary":"https://example.test/docs",
+        "largeInteger":u128::MAX,
+        "padding":"x".repeat(4096),
+    });
+    let payload = value.clone();
+    let server = Server::start(
+        ApiRouter::new(principal)
+            .route(
+                Method::GET,
+                "/api/ddns/example",
+                "Example",
+                move || async move {
+                    (
+                        [
+                            ("vary", "Accept-Language"),
+                            ("etag", "\"original\""),
+                            ("content-digest", "original"),
+                        ],
+                        Json(payload),
+                    )
+                },
+            )
+            .finish()
+            .router,
+    )
+    .await?;
+    let path = "/api/ddns/example";
+    let (status, headers, compressed) = server
+        .call_raw(
+            "GET",
+            path,
+            &[("x-test-id", "viewer"), ("accept-encoding", "gzip")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(
+        headers["content-length"].to_str()?.parse::<usize>()?,
+        compressed.len()
+    );
+    assert!(
+        headers
+            .get_all("vary")
+            .iter()
+            .any(|entry| entry == "Accept-Language")
+    );
+    assert!(
+        headers
+            .get_all("vary")
+            .iter()
+            .any(|entry| entry == "Accept-Encoding")
+    );
+    assert!(headers.get("etag").is_none());
+    assert!(headers.get("content-digest").is_none());
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(compressed.as_ref()).read_to_string(&mut json)?;
+    for forbidden in [
+        "fixture-",
+        "malformed-",
+        "%61bcDEF0123456789",
+        "bare-fixture",
+        "12345\"}",
+    ] {
+        assert!(!json.contains(forbidden), "response leaked {forbidden}");
+    }
+    let masked: Value = serde_json::from_str(&json)?;
+    assert_eq!(masked["privateKey"], SECRET_MASK);
+    assert_eq!(masked["passwordEnabled"], true);
+    assert_eq!(masked["hasPassword"], true);
+    assert_eq!(masked["emptySecret"], "");
+    assert_eq!(
+        masked["requestHeaders"],
+        json!(["Authorization: ********", "X-Empty:", SECRET_MASK])
+    );
+    assert_eq!(masked["responseHeaders"], json!({"Set-Cookie":SECRET_MASK}));
+    assert_eq!(masked["daemonEnv"], "SECRET=********\n********\nEMPTY=");
+    assert_eq!(masked["users"][0], "alice:********");
+    assert_eq!(masked["credentials"]["EXTRA"]["zone"], SECRET_MASK);
+    assert_eq!(masked["nested"]["token"][0], SECRET_MASK);
+    assert_eq!(
+        masked["nested"]["credentials"][0]["extra"]["key"],
+        SECRET_MASK
+    );
+    assert_eq!(masked["template"]["body"]["numeric"], SECRET_MASK);
+    assert_eq!(masked["summary"]["body"], "preserve explanatory body");
+    assert!(
+        masked["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("see https://ui:********@example.test/docs/********/?key=")
+    );
+    assert_eq!(masked["ordinary"], "https://example.test/docs");
+    assert_eq!(masked["largeInteger"], value["largeInteger"]);
+    let (_, headers, token) = server
+        .call(
+            "GET",
+            path,
+            &[
+                ("x-test-id", "token"),
+                ("accept-encoding", "*;q=0.8, gzip;q=0"),
+            ],
+            Body::empty(),
+        )
+        .await?;
+    assert!(headers.get("content-encoding").is_none());
+    assert_eq!(token, masked);
+    for id in ["writer", "admin"] {
+        let (_, headers, original) = server
+            .call("GET", path, &[("x-test-id", id)], Body::empty())
+            .await?;
+        assert_eq!(original, value);
+        assert_eq!(headers["etag"], "\"original\"");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn response_rejects_unsafe_buffered_json_and_honors_stream_policies() -> Result<()> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(br#"{"secret":"fixture-encoded-secret"}"#)?;
+    let encoded = Bytes::from(encoder.finish()?);
+    let body = encoded.clone();
+    let admin = ApiRouter::new(principal)
+        .route(
+            Method::GET,
+            "/api/ddns/encoded",
+            "Encoded JSON",
+            move || async move {
+                (
+                    [
+                        ("content-type", "application/json"),
+                        ("content-encoding", "gzip"),
+                    ],
+                    body,
+                )
+            },
+        )
+        .route(
+            Method::GET,
+            "/api/ddns/malformed",
+            "Malformed JSON",
+            || async {
+                (
+                    [("content-type", "application/problem+json")],
+                    "fixture-corrupt-secret",
+                )
+            },
+        )
+        .route(Method::GET, "/api/ddns/large", "Oversized JSON", || async {
+            Json(json!({"secret":"x".repeat(8 << 20)}))
+        })
+        .stream_route(
+            Method::GET,
+            "/api/ddns/events",
+            "Filtered event stream",
+            StreamPolicy::ReadOnlySafe,
+            |Extension(read_only): Extension<ReadOnly>| async move {
+                let event = if read_only.0 {
+                    "data: public event\n\n"
+                } else {
+                    "data: writer event\n\n"
+                };
+                ([("content-type", "text/event-stream")], event.repeat(100))
+            },
+        )
+        .stream_route(
+            Method::GET,
+            "/api/ddns/archive",
+            "Restricted download",
+            StreamPolicy::WritersOnly,
+            || async {
+                (
+                    [("content-type", "application/octet-stream")],
+                    "fixture-download",
+                )
+            },
+        )
+        .finish();
+    assert_eq!(
+        admin.document()["paths"]["/api/ddns/events"]["get"]["x-stream"],
+        true
+    );
+    assert_eq!(
+        admin.document()["paths"]["/api/ddns/encoded"]["get"]["x-stream"],
+        false
+    );
+    let server = Server::start(admin.router).await?;
+    for endpoint in ["encoded", "malformed", "large"] {
+        let (status, headers, value) = server
+            .call(
+                "GET",
+                &format!("/api/ddns/{endpoint}"),
+                &[("x-test-id", "viewer"), ("accept-encoding", "gzip")],
+                Body::empty(),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(!headers.contains_key("content-encoding"));
+        assert_eq!(value, json!({"error":"could not safely process response"}));
+    }
+    let (_, headers, original) = server
+        .call_raw(
+            "GET",
+            "/api/ddns/encoded",
+            &[("x-test-id", "writer"), ("accept-encoding", "gzip")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(original, encoded);
+    let (status, headers, stream) = server
+        .call_raw(
+            "GET",
+            "/api/ddns/events",
+            &[("x-test-id", "token"), ("accept-encoding", "gzip")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!headers.contains_key("content-encoding"));
+    assert_eq!(headers["content-type"], "text/event-stream");
+    assert_eq!(stream, "data: public event\n\n".repeat(100));
+    assert_eq!(
+        server
+            .call(
+                "GET",
+                "/api/ddns/archive",
+                &[("x-test-id", "viewer")],
+                Body::empty()
+            )
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server
+            .call_raw(
+                "GET",
+                "/api/ddns/archive",
+                &[("x-test-id", "writer")],
+                Body::empty()
+            )
+            .await?
+            .2,
+        "fixture-download"
+    );
+    Ok(())
 }
 
 impl Drop for Server {
