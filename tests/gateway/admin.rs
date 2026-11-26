@@ -187,6 +187,62 @@ async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<(
     assert_eq!(listed.as_array().unwrap().len(), 1);
     assert_eq!(listed[0]["legacy"], true);
     assert!(listed[0].get("hash").is_none());
+
+    let bearer = |path, raw: &str| {
+        let mut request = request(Method::GET, path, "localhost", full(""));
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("bEaReR {raw}").parse().unwrap(),
+        );
+        request
+    };
+    let mut create = request(
+        Method::POST,
+        "/api/tokens",
+        "localhost",
+        full(r#"{"name":"collector","scopes":["logs:read"]}"#),
+    );
+    create.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    create
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse()?);
+    let response = send(&mut client, create).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let created: Value = serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    let token = created["secret"].as_str().context("issued API token")?;
+    let session_token = cookie.split_once('=').context("session cookie")?.1;
+    for (path, raw, status) in [
+        ("/api/logs/sources", token, StatusCode::OK),
+        ("/api/system/security", token, StatusCode::FORBIDDEN),
+        ("/api/tokens", legacy, StatusCode::FORBIDDEN),
+        ("/api/tokens", session_token, StatusCode::OK),
+        ("/api/session", "gtl_invalid", StatusCode::UNAUTHORIZED),
+    ] {
+        assert_eq!(send(&mut client, bearer(path, raw)).await?.status(), status);
+    }
+    let mut session = bearer("/api/session", token);
+    session
+        .headers_mut()
+        .insert("x-forwarded-for", "192.0.2.8".parse()?);
+    let response = send(&mut client, session).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let identity: Value =
+        serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(identity["username"], "api-token:collector");
+    let response = send(&mut client, bearer("/api/session", legacy)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let raw = store.load_raw("tokens")?.context("persisted token file")?;
+    let on_disk: Value = serde_json::from_slice(&raw)?;
+    let collector_on_disk = on_disk["tokens"]
+        .as_array()
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == created["token"]["id"])
+        })
+        .context("collector persisted by create")?;
+    assert!(collector_on_disk["lastUsedAt"].is_null());
+
     let mut logout = request(Method::POST, "/api/logout", "localhost", full(""));
     logout.headers_mut().insert(header::COOKIE, cookie.parse()?);
     assert_eq!(send(&mut client, logout).await?.status(), StatusCode::OK);
@@ -241,7 +297,18 @@ async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<(
             .success()
     );
     assert!(timeout(DEADLINE, child.wait()).await??.success());
+    while let Some(line) = lines.next_line().await? {
+        assert!(!line.contains(token));
+        assert!(!line.contains(legacy));
+    }
     let tokens = fg_auth::token::TokenManager::open(store, [], std::time::Instant::now())?;
+    let persisted = tokens.list(time::OffsetDateTime::now_utc());
+    let collector = persisted
+        .iter()
+        .find(|entry| entry.name == "collector")
+        .context("collector restored after shutdown")?;
+    assert!(collector.last_used_at.is_some());
+    assert_eq!(collector.last_used_ip, "127.0.0.1");
     assert_eq!(
         tokens
             .authenticate(legacy, time::OffsetDateTime::now_utc(), None)?

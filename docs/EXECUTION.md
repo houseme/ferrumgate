@@ -980,6 +980,30 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 190 项工作区测试和 9 项本机 Pebble ACME 测试。回环 HTTP 用例覆盖八个管理接口、会话权限、明文只在签发和轮换时返回、轮换后旧值失效、排序校验与批量分组回退。真实进程用例验证管理员登录后可通过 `/api/tokens` 读取遗留令牌元数据。运行期 Bearer 鉴权和使用记录刷盘由第 5 步接入。
 
+### WP-13 创建与使用 API 令牌
+
+使用管理员会话向 `POST /api/tokens` 提交 `{"name":"collector","scopes":["logs:read"]}`。从响应保存一次性 `secret`，将其传给客户端的 `FGATE_API_TOKEN` 环境变量。以下示例假设管理监听地址为 `127.0.0.1:8080`。
+
+```bash
+curl --fail-with-body \
+  --header "Authorization: Bearer ${FGATE_API_TOKEN:?}" \
+  http://127.0.0.1:8080/api/logs/sources
+```
+
+同一令牌访问 `/api/session` 返回 `api-token:collector`，访问 `/api/tokens` 返回 403。若需轮换，通过管理员会话调用 `POST /api/tokens/{id}/regenerate`，保存响应中的新 `secret`。轮换提交后旧值立即失效。
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --bin fgate auth_maintenance_flushes_due_token_usage
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway admin::management_bootstrap_login_change_logout_and_online_reset
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 191 项工作区测试和 9 项本机 Pebble ACME 测试。真实进程用例覆盖签发后使用、权限不足返回 403、无效凭据返回 401、遗留令牌及会话 Bearer 兼容、以 TCP 对端记录来源，以及正常退出后恢复最近使用记录。维护用例验证达到刷盘间隔后，即使没有新请求也会写盘。本机 curl 演练确认日志来源接口返回 200、令牌管理接口返回 403、收到 SIGTERM 后保存最近使用记录。可信代理地址解析、持久化审计和备份分别随 WP-14、WP-08 和 WP-70 验收。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

@@ -100,37 +100,45 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
     } else {
         None
     };
-    let (ready, waiting) = oneshot::channel();
-    let gateway = fg_gateway::serve_with_ready(config, ready);
-    let management = async {
-        let Ok(ready) = waiting.await else {
-            return Ok(());
+    let result = async {
+        let (ready, waiting) = oneshot::channel();
+        let gateway = fg_gateway::serve_with_ready(config, ready);
+        let management = async {
+            let Ok(ready) = waiting.await else {
+                return Ok(());
+            };
+            serve_management(
+                listener,
+                options,
+                accounts,
+                tokens.clone(),
+                logs,
+                ready,
+                third_login,
+            )
+            .await
         };
-        serve_management(
-            listener,
-            options,
-            accounts,
-            tokens,
-            logs,
-            ready,
-            third_login,
-        )
-        .await
-    };
-    tokio::pin!(gateway, management);
-    tokio::select! {
-        biased;
-        result = &mut gateway => {
-            result?;
-            tokio::time::timeout(Duration::from_secs(3), management).await
-                .context("management drain deadline expired")?
-        }
-        result = &mut management => {
-            result?;
-            // The gateway owns the process signal and data-plane drain.
-            gateway.await
+        tokio::pin!(gateway, management);
+        tokio::select! {
+            biased;
+            result = &mut gateway => {
+                result?;
+                tokio::time::timeout(Duration::from_secs(3), management).await
+                    .context("management drain deadline expired")?
+            }
+            result = &mut management => {
+                result?;
+                // The gateway owns the process signal and data-plane drain.
+                gateway.await
+            }
         }
     }
+    .await;
+    let flushed = tokio::task::spawn_blocking(move || tokens.flush_usage_on_shutdown())
+        .await
+        .context("join API token shutdown flush")
+        .and_then(|saved| saved.context("flush API token usage on shutdown"));
+    result.and(flushed.map(|_| ()))
 }
 
 async fn serve_management(
@@ -142,7 +150,9 @@ async fn serve_management(
     ready: ManagementReady,
     third_login: Option<Arc<ThirdLogin>>,
 ) -> Result<()> {
-    let router = ApiRouter::default().with_modules(ready.registry, ready.enabled);
+    let router = ApiRouter::default()
+        .with_modules(ready.registry, ready.enabled)
+        .with_token_authentication(tokens.clone());
     let origin = options.admin_origin.as_ref();
     let router = if let Some(origin) = origin {
         router.with_passkey_accounts(accounts.clone(), &options.admin_prefix, origin)?
@@ -163,11 +173,11 @@ async fn serve_management(
     let admin = router
         .with_logs(logs)
         .with_security_status(accounts.clone(), exposure)
-        .with_token_management(tokens)
+        .with_token_management(tokens.clone())
         .finish();
     tracing::info!(listen = %listener.local_addr()?, "management ready");
     let mut drain = ready.drain;
-    let resets = poll_resets(accounts, drain.clone());
+    let maintenance = poll_auth_maintenance(accounts, tokens, drain.clone());
     let server = axum::serve(
         listener,
         admin
@@ -181,23 +191,78 @@ async fn serve_management(
     tokio::pin!(server);
     tokio::select! {
         result = &mut server => result.context("serve management"),
-        () = resets => server.await.context("drain management"),
+        () = maintenance => server.await.context("drain management"),
     }
 }
 
-async fn poll_resets(accounts: Arc<AccountManager>, mut drain: watch::Receiver<bool>) {
+async fn poll_auth_maintenance(
+    accounts: Arc<AccountManager>,
+    tokens: Arc<TokenManager>,
+    mut drain: watch::Receiver<bool>,
+) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
+            biased;
             _ = drain.wait_for(|&draining| draining) => return,
-            _ = interval.tick() => {
-                let accounts = accounts.clone();
-                match tokio::task::spawn_blocking(move || accounts.apply_pending_reset()).await {
-                    Ok(Ok(_)) => {}
-                    _ => tracing::error!(target: "fg_core::auth", "administrator reset could not be applied"),
-                }
-            }
+            _ = interval.tick() => {},
         }
+        let accounts = accounts.clone();
+        let tokens = tokens.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            if accounts.apply_pending_reset().is_err() {
+                tracing::error!(target: "fg_core::auth", "administrator reset could not be applied");
+            }
+            if tokens.flush_usage(Instant::now()).is_err() {
+                tracing::error!(target: "fg_core::auth", "API token usage could not be persisted");
+            }
+        })
+        .await;
+        if let Err(error) = work {
+            tracing::error!(target: "fg_core::auth", %error, "authentication maintenance failed");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn auth_maintenance_flushes_due_token_usage() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let store = ConfigStore::open(directory.path())?;
+        let (accounts, _) = AccountManager::open(store.clone(), Some("Fixture$Password-23"))?;
+        let raw = "fixture-legacy-for-periodic-flush";
+        let now = time::OffsetDateTime::now_utc();
+        store.save("ferrumgate", &serde_json::json!({"apiToken": raw}))?;
+        let tokens = TokenManager::open(store.clone(), [], Instant::now())?;
+        assert!(tokens.migrate_legacy_settings("ferrumgate", now)?);
+        drop(tokens);
+
+        let tokens = Arc::new(TokenManager::open(
+            store.clone(),
+            [],
+            Instant::now() - Duration::from_secs(60),
+        )?);
+        tokens.authenticate(raw, now, Some("127.0.0.1".parse()?))?;
+        let (shutdown, drain) = watch::channel(false);
+        let maintenance = tokio::spawn(poll_auth_maintenance(Arc::new(accounts), tokens, drain));
+        let saved = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let data = store.load_raw("tokens")?.context("persisted tokens")?;
+                let data: serde_json::Value = serde_json::from_slice(&data)?;
+                if data["tokens"][0]["lastUsedIP"] == "127.0.0.1" {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        shutdown.send_replace(true);
+        maintenance.await?;
+        saved??;
+        Ok(())
     }
 }

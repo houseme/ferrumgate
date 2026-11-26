@@ -14,6 +14,7 @@ use axum::{
 use fg_auth::{
     AccountManager, CredentialChangeRejected, Identity, LoginError, PasswordIssue,
     ReadonlyUserNotFound, Role, Session, check_password_strength, passkey::Passkeys,
+    token::TokenIdentity,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -90,19 +91,25 @@ impl SessionCookies {
 }
 
 pub(super) fn session_token(headers: &HeaderMap) -> Option<&str> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        bearer_token(headers)
+    } else {
+        cookie(headers, COOKIE_NAME)
+    }
+}
+
+pub(super) fn bearer_token(headers: &HeaderMap) -> Option<&str> {
     let authorization = headers.get_all(header::AUTHORIZATION);
     let mut authorization = authorization.iter();
-    if let Some(value) = authorization.next() {
-        if authorization.next().is_some() {
-            return None;
-        }
-        let (scheme, token) = value.to_str().ok()?.split_once(' ')?;
-        return scheme
-            .eq_ignore_ascii_case("bearer")
-            .then_some(token.trim())
-            .filter(|token| !token.is_empty());
+    let value = authorization.next()?;
+    if authorization.next().is_some() {
+        return None;
     }
-    cookie(headers, COOKIE_NAME)
+    let (scheme, token) = value.to_str().ok()?.split_once(' ')?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then_some(token.trim())
+        .filter(|token| !token.is_empty())
 }
 
 pub(super) fn cookie<'a>(headers: &'a HeaderMap, cookie_name: &str) -> Option<&'a str> {
@@ -310,14 +317,22 @@ pub(super) fn mount(
                 "/api/session",
                 "Get the current identity",
                 RouteModels::default().response::<SessionView>(),
-                move |identity: Option<Extension<Identity>>| async move {
+                move |identity: Option<Extension<Identity>>,
+                      token: Option<Extension<TokenIdentity>>| async move {
                     let identity = identity.map(|Extension(identity)| identity);
                     let password_issue = identity.as_ref().map_or("", Identity::password_issue);
                     let role = identity
                         .as_ref()
                         .map_or(Role::Admin, |identity| identity.role);
                     Json(SessionView {
-                        username: identity.map_or_else(String::new, |identity| identity.username),
+                        username: identity.map_or_else(
+                            || {
+                                token.map_or_else(String::new, |token| {
+                                    format!("api-token:{}", token.name())
+                                })
+                            },
+                            |identity| identity.username,
+                        ),
                         role: role.as_str(),
                         default_password: password_issue == "default",
                         password_issue,

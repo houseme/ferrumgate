@@ -1,10 +1,10 @@
-use std::{collections::BTreeSet, io::Write, path::Path, sync::Arc};
+use std::{collections::BTreeSet, io::Write, net::SocketAddr, path::Path, sync::Arc};
 
 use anyhow::Result;
 use axum::{
     Router,
     body::{Bytes, HttpBody},
-    extract::{Request, State},
+    extract::{ConnectInfo, Request, State},
     handler::Handler,
     http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
@@ -14,15 +14,17 @@ use axum::{
 use fg_auth::{
     AccountManager, Identity, Role,
     passkey::{Passkeys, Url},
+    token::{TokenIdentity, TokenManager},
 };
 use fg_core::registry::{CATALOG, Enabled, Registry, Status};
 use serde_json::{Value, json};
+use time::OffsetDateTime;
 use tokio::sync::Semaphore;
 
 use crate::{
     AdminAssets, ApiError, Localizer, RouteModels, Translation,
     http::{Presentation, RenderPolicy, boundary},
-    login::{self, COOKIE_NAME, SessionCookies, password_fix_allowed, session_token},
+    login::{self, COOKIE_NAME, SessionCookies, bearer_token, password_fix_allowed, session_token},
     response::MAX_TRANSFORMS,
     scope::{Access, bootstrap_route, module_of, required},
     upload,
@@ -45,6 +47,7 @@ pub struct ReadOnly(pub bool);
 
 enum Authenticated {
     Account(Identity),
+    Token(TokenIdentity),
     External(Principal),
 }
 
@@ -97,6 +100,7 @@ struct RouteMode {
 #[derive(Clone)]
 struct Policy {
     auth: Auth,
+    tokens: Option<Arc<TokenManager>>,
     access: Arc<Access<'static>>,
     mode: RouteMode,
 }
@@ -105,6 +109,7 @@ pub struct ApiRouter {
     router: Router,
     operations: Vec<Operation>,
     auth: Auth,
+    tokens: Option<Arc<TokenManager>>,
     modules: Option<Arc<(Registry, Enabled)>>,
     presentation: Presentation,
     assets: Option<AdminAssets>,
@@ -124,6 +129,7 @@ impl ApiRouter {
             router: Router::new(),
             operations: Vec::new(),
             auth: Arc::new(move |headers| authenticate(headers).map(Authenticated::External)),
+            tokens: None,
             modules: None,
             assets: None,
             presentation: Presentation {
@@ -152,14 +158,24 @@ impl ApiRouter {
         self
     }
 
-    pub fn with_token_management(self, tokens: Arc<fg_auth::token::TokenManager>) -> Self {
+    /// Enables managed Bearer credentials for protected routes. Call before mounting routes.
+    pub fn with_token_authentication(mut self, tokens: Arc<TokenManager>) -> Self {
+        assert!(
+            self.operations.is_empty(),
+            "configure token authentication before declaring routes"
+        );
+        self.tokens = Some(tokens);
+        self
+    }
+
+    pub fn with_token_management(self, tokens: Arc<TokenManager>) -> Self {
         let domains = crate::token_routes::domains(self.modules.as_deref(), &tokens);
         tokens.set_domains(domains.iter().map(|domain| domain.id.to_owned()));
         crate::token_routes::mount(self, tokens, domains)
     }
 
     /// Installs account routes before other routes. Set `secure` for an externally HTTPS listener.
-    /// The listener must supply `ConnectInfo<SocketAddr>`. Other authenticators supply API tokens.
+    /// The listener must supply `ConnectInfo<SocketAddr>`.
     pub fn with_accounts(
         self,
         accounts: Arc<AccountManager>,
@@ -431,6 +447,7 @@ impl ApiRouter {
         } else {
             let policy = Policy {
                 auth: self.auth.clone(),
+                tokens: self.tokens.clone(),
                 access: operation.access.clone(),
                 mode: operation.mode,
             };
@@ -516,7 +533,23 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
         }
         response
     };
-    let Some(principal) = (policy.auth)(request.headers()) else {
+    let token_access = |scopes: &[String]| {
+        (
+            policy.access.allows_token(scopes),
+            !policy.access.allows_unredacted(scopes),
+        )
+    };
+    let token = policy.tokens.as_ref().and_then(|tokens| {
+        let raw = bearer_token(request.headers())?;
+        let peer = request.extensions().get::<ConnectInfo<SocketAddr>>();
+        tokens
+            .authenticate(raw, OffsetDateTime::now_utc(), peer.map(|peer| peer.ip()))
+            .ok()
+    });
+    let Some(principal) = token
+        .map(Authenticated::Token)
+        .or_else(|| (policy.auth)(request.headers()))
+    else {
         return reject(ApiError::new(
             StatusCode::UNAUTHORIZED,
             "authentication required",
@@ -525,6 +558,11 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
     let readonly_allowed =
         policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD);
     let (allowed, restricted) = match principal {
+        Authenticated::Token(token) => {
+            let access = token_access(token.scopes());
+            request.extensions_mut().insert(token);
+            access
+        }
         Authenticated::Account(identity) => {
             if identity.must_change_password
                 && !password_fix_allowed(request.method(), request.uri().path())
@@ -541,10 +579,7 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
         }
         Authenticated::External(Principal::Session { read_only: false }) => (true, false),
         Authenticated::External(Principal::Session { read_only: true }) => (readonly_allowed, true),
-        Authenticated::External(Principal::Token { scopes }) => (
-            policy.access.allows_token(&scopes),
-            !policy.access.allows_unredacted(&scopes),
-        ),
+        Authenticated::External(Principal::Token { scopes }) => token_access(&scopes),
     };
     if !allowed || (restricted && policy.mode.stream == Some(StreamPolicy::WritersOnly)) {
         return reject(ApiError::new(
