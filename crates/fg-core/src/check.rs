@@ -12,6 +12,7 @@ pub struct CheckEnv {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Ok,
@@ -23,6 +24,7 @@ pub enum Status {
 /// One finding: an identifier plus machine parameters. The interface
 /// translates ids into human text; the backend never formats messages.
 #[derive(Debug, Serialize, PartialEq)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct CheckResult {
     pub id: &'static str,
     pub status: Status,

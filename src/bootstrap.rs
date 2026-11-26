@@ -328,6 +328,9 @@ impl ManagementService {
             modules,
             started_at: process_start,
             settings: settings_snapshot,
+            public_ip: crate::publicip::lookup()?,
+            probe_head: crate::publicip::probe_head()?,
+            onboarding_store: store.clone(),
         }
         .register(router)
         .finish();

@@ -5,6 +5,7 @@ mod ctl;
 mod logging;
 mod mcp;
 mod offline;
+mod publicip;
 mod restart;
 
 use std::{

@@ -225,6 +225,7 @@ pub fn required<'a>(method: &Method, path: &'a str) -> Access<'a> {
         | "/api/system/update"
         | "/api/system/update/state"
         | "/api/system/public-ip" => return scope("status", Level::Read),
+        "/api/metrics" => return scope("metrics", Level::Read),
         "/api/logs" | "/api/logs/sources" | "/api/logs/export" => {
             return scope("logs", Level::Read);
         }

@@ -32,4 +32,4 @@ pub use oauth_routes::ManagedThirdLogin;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
 pub use security_score::SecurityExposure;
 pub use settings_api::SettingsState;
-pub use system::SystemRoutes;
+pub use system::{SystemRoutes, probe, publicip};
