@@ -94,7 +94,40 @@ pub struct AccountManager {
     _owner: File,
 }
 
+pub struct SecurityFacts {
+    pub password_issue: &'static str,
+    pub second_factor: bool,
+    pub common_username: bool,
+    pub login_limits: LoginLimits,
+}
+
 impl AccountManager {
+    pub fn security_facts(&self, rp_id: Option<&str>) -> SecurityFacts {
+        let snapshot = self.snapshot.load();
+        let account = &snapshot.account;
+        let password_issue = if !account.must_change_password() {
+            ""
+        } else if account.using_default_password {
+            "default"
+        } else {
+            "weak"
+        };
+        SecurityFacts {
+            password_issue,
+            second_factor: snapshot.totp.is_some()
+                || rp_id.is_some_and(|rp| {
+                    account
+                        .passkeys
+                        .iter()
+                        .any(|credential| credential.belongs_to(rp))
+                }),
+            common_username: matches!(
+                account.username.to_ascii_lowercase().as_str(),
+                "admin" | "administrator" | "root" | "gately" | "ferrumgate" | "user" | "test"
+            ),
+            login_limits: self.limiter.limits(),
+        }
+    }
     /// Loads the account or creates it. A random initial password is returned only on creation.
     pub fn open(
         store: Arc<ConfigStore>,

@@ -15,6 +15,7 @@ mod redact;
 mod response;
 mod router;
 pub mod scope;
+mod security_score;
 mod upload;
 
 pub use assets::{AdminAssets, Asset};
@@ -23,3 +24,4 @@ pub use http::{ApiError, ApiJson};
 pub use localize::{Localizer, RequestLanguage, Translation};
 pub use models::RouteModels;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
+pub use security_score::SecurityExposure;

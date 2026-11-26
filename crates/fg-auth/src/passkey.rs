@@ -39,6 +39,10 @@ pub(super) enum StoredPasskey {
 }
 
 impl StoredPasskey {
+    pub(super) fn belongs_to(&self, rp_id: &str) -> bool {
+        self.native().is_some_and(|record| record.rp_id == rp_id)
+    }
+
     fn native(&self) -> Option<&PasskeyRecord> {
         match self {
             Self::Native(record) => Some(record),

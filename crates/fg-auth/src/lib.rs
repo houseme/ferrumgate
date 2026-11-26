@@ -10,6 +10,7 @@ mod session;
 pub mod third_login;
 mod totp;
 
+pub use account::SecurityFacts;
 pub use account::{AccountManager, CredentialChangeRejected};
 pub use lockout::{LoginError, LoginLimits};
 pub use password::{PasswordIssue, check_password_strength};

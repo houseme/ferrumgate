@@ -104,6 +104,10 @@ impl LoginLimiter {
         state.unknown.reported = false;
     }
 
+    pub(super) fn limits(&self) -> LoginLimits {
+        self.state().limits
+    }
+
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let mut state = State::new(Instant::now());
         if let Loaded::Found(entries) = store.load::<Vec<KnownSource>>(KNOWN_FILE)? {
