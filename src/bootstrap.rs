@@ -7,7 +7,9 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use fg_admin::{ApiRouter, AuditLog, Category, ManagedThirdLogin, SecurityExposure, SettingsState};
+use fg_admin::{
+    ApiRouter, AuditLog, Category, Localizer, ManagedThirdLogin, SecurityExposure, SettingsState,
+};
 use fg_auth::{AccountManager, LoginLimits, passkey::Url, token::TokenManager};
 use fg_config::ConfigStore;
 use fg_core::{
@@ -17,6 +19,7 @@ use fg_core::{
     },
 };
 use fg_gateway::ManagementReady;
+use fg_i18n::lang::{BUILT, SOURCE};
 use tokio::{
     net::TcpListener,
     sync::{Notify, oneshot, watch},
@@ -282,7 +285,16 @@ impl ManagementService {
             Some(audit.clone()),
         )?);
         let delayed = restart.clone();
+        // Server language: settings, then the environment, then the source.
+        let server_language = fg_i18n::lang::normalize(&started.language)
+            .or_else(|| fg_i18n::lang::from_env(|name| std::env::var(name).ok()))
+            .unwrap_or(SOURCE);
+        let localizer = Localizer::new(SOURCE, server_language, BUILT, |language, text| {
+            let translated = fg_i18n::tr(language, text);
+            (translated != text).then_some(translated)
+        })?;
         let admin = router
+            .with_localizer(localizer)
             .with_logs(logs.handle())
             .with_security_status(accounts.clone(), exposure)
             .with_token_management(tokens.clone())

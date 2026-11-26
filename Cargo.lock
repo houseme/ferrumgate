@@ -1071,6 +1071,7 @@ dependencies = [
  "fg-config",
  "fg-core",
  "fg-gateway",
+ "fg-i18n",
  "fg-logging",
  "futures-util",
  "h2",
@@ -1229,6 +1230,14 @@ dependencies = [
  "tracing",
  "webpki-roots",
  "x509-parser",
+]
+
+[[package]]
+name = "fg-i18n"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "serde_json",
 ]
 
 [[package]]
@@ -4665,6 +4674,14 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde_json",
 ]
 
 [[package]]

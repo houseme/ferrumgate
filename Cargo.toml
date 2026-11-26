@@ -5,8 +5,10 @@ members = [
     "crates/fg-config",
     "crates/fg-core",
     "crates/fg-gateway",
+    "crates/fg-i18n",
     "crates/fg-logging",
-    "crates/fg-testkit"
+    "crates/fg-testkit",
+    "crates/xtask"
 ]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
@@ -26,6 +28,7 @@ fg-auth = { path = "crates/fg-auth", version = "0.1.0" }
 fg-config = { path = "crates/fg-config", version = "0.1.0" }
 fg-core = { path = "crates/fg-core", version = "0.1.0" }
 fg-gateway = { path = "crates/fg-gateway", version = "0.1.0" }
+fg-i18n = { path = "crates/fg-i18n", version = "0.1.0" }
 fg-logging = { path = "crates/fg-logging", version = "0.1.0" }
 fg-testkit = { path = "crates/fg-testkit", version = "0.1.0" }
 # External crates
@@ -99,6 +102,7 @@ fg-auth.workspace = true
 fg-config.workspace = true
 fg-core.workspace = true
 fg-gateway.workspace = true
+fg-i18n.workspace = true
 fg-logging.workspace = true
 rpassword.workspace = true
 serde_json.workspace = true

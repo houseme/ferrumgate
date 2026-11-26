@@ -384,3 +384,13 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 与上游的差异有意的收紧：上游逐个文件写入、遇到错误即返回，此前文件已写入；FerrumGate 先整体校验（文件名、禁止名与 JSON 语法）再统一写入，被拒绝的启动不会留下「半个目录」在下次启动重复应用。出错信息包含文件名与已检查的候选文件数；此前合法运行已应用的文件保留。启动成功时系统日志记录应用与跳过的文件数及名称。
 
 `fgate run` 子命令沿用同一参数（WP-03 随 WP-39 接入）；运行期间不重新应用，声明式目录只在启动时读取。
+
+## 20. 国际化（WP-10）
+
+`fg-i18n` 位于分层最底端，提供服务端翻译：源码以 `tr!(lang, "简体中文原文", 名 = 值)` 调用，键即中文原文。`tr` 在源语言、缺失或空值键上返回键本身；`tr_args` 无译文时用键作模板渲染 `{name}` 占位符，缺失参数保留占位、多余参数忽略。`tr_deep` 整体翻译只用于完全由程序生成的数据；`tr_fields` 只翻译说明性字段——`error`、`errors`、`lastError`、`ipError`、`errorDetail`、`detail`、`details`、`message`、`reason`、`warnings`、`mappingNote`、`hint`、`title`、`label`、`issues`、`status`、`description` 整体翻译，`mapping`、`unsupported`、`firewall` 仅在值为字符串时翻译，名称、分组、备注、命令与记录值等用户内容原样保留。
+
+语言列表为 `zh-CN`（源）、`en`、`zh-TW`、`ja`、`ko`、`es`、`fr`、`de`、`ru`、`pt-BR`；语言档位的裁剪由 WP-90 接入。规范化对大小写与分隔符不敏感，简繁按文字与地区子标签归并（`zh-Hant`/`zh-TW`/`zh-HK` → 繁中，其余含 `zh` → 简中），`pt-BR` 之外的区域后缀归并到基础语言，未知标签返回空。`Accept-Language` 解析按 q 值与出现顺序选取第一个已编译语言，`*` 匹配回退语言（英语优先）；服务端语言按设置 → `FERRUMGATE_LANG` → `LC_ALL` → `LC_MESSAGES` → `LANG` 读取并剥离 POSIX 编码后缀。
+
+`crates/fg-i18n/locales/*.json` 是 9 个非源语言的目录文件，`build.rs` 在编译期校验并把每个文件压缩嵌入二进制，运行时首次用到某语言才解压建表。空值键视为未翻译。上游仓库不含服务端译文（其目录由同步工具生成、键值待翻译），因此目录从空开始，译文随各模块的 `tr!` 键由 `cargo run -p xtask -- i18n-extract` 同步后补齐。`cargo test -p xtask` 运行一致性检查：各语言键集合一致、占位符与键一致、译文不得等于键；提取器扫描源码第二参数为含中文字面量的 `tr!` 调用，跳过 `tests/` 目录。
+
+管理进程把 `Localizer` 接到响应链上：源语言为简中，默认语言取规范化的设置 `language`（缺失时回退环境变量链），翻译闭包装 `fg_i18n::tr`；按请求 `Accept-Language` 协商的结果沿用既有响应协商与脱敏链路。新增文案的三步流程记录在 `docs/AGENT.md`。
