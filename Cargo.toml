@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fg-admin", "crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
+members = ["crates/fg-admin", "crates/fg-auth", "crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
 

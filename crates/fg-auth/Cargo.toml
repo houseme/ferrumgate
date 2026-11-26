@@ -1,0 +1,23 @@
+[package]
+name = "fg-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+arc-swap = "1"
+base64 = "0.22"
+bcrypt = "0.19"
+fg-config = { path = "../fg-config" }
+getrandom = "0.4"
+ring = "0.17"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true
