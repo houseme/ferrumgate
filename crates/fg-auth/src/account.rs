@@ -11,10 +11,13 @@ use fg_config::{ConfigStore, Loaded};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::session::{Identity, Session, Snapshot, unix_seconds};
+use crate::{
+    password::{self, MAX_PASSWORD_BYTES, check_password_strength},
+    session::{Identity, Session, Snapshot, unix_seconds},
+};
 
 const ACCOUNT: &str = "account";
-const MAX_PASSWORD_BYTES: usize = 72;
+pub(super) const MAX_USERNAME_BYTES: usize = 256;
 pub(super) const MAX_REVOKED: usize = 1024;
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -105,8 +108,7 @@ impl AccountManager {
                 );
                 let account = Account {
                     username: "admin".into(),
-                    password_hash: bcrypt::non_truncating_hash(password, bcrypt::DEFAULT_COST)
-                        .map_err(|_| anyhow!("hash initial administrator password"))?,
+                    password_hash: password::hash(password)?,
                     session_secret: random_urlsafe::<32>()?,
                     onboarding_pending: true,
                     using_default_password: true,
@@ -132,16 +134,10 @@ impl AccountManager {
     pub fn login(&self, username: &str, password: &str) -> Result<Option<Session>> {
         let snapshot = self.snapshot.load_full();
         let account = &snapshot.account;
-        if password.is_empty()
-            || password.len() > MAX_PASSWORD_BYTES
-            || account.password_login_off
-            || !account.totp_secret.is_empty()
-        {
+        if account.password_login_off || !account.totp_secret.is_empty() {
             return Ok(None);
         }
-        let accepted = bcrypt::verify(password, &account.password_hash)
-            .map_err(|_| anyhow!("verify administrator password hash"))?;
-        if !accepted || account.username != username {
+        if !password::verify(password, &account.password_hash)? || account.username != username {
             return Ok(None);
         }
         Ok(Some(snapshot.issue(SystemTime::now())?))
@@ -182,6 +178,57 @@ impl AccountManager {
     pub fn revoke_all(&self) -> Result<()> {
         let _writer = self.writer.lock().expect("account writer poisoned");
         let mut next = self.snapshot.load().account.clone();
+        next.invalidate_sessions()?;
+        self.save(next)
+    }
+
+    /// Replaces the administrator credentials after verifying the current password.
+    /// Call from a bounded blocking worker.
+    pub fn change_credentials(
+        &self,
+        current_password: &str,
+        username: &str,
+        new_password: &str,
+    ) -> Result<()> {
+        let username = username.trim();
+        ensure!(
+            !username.is_empty() && username.len() <= MAX_USERNAME_BYTES,
+            "invalid administrator username"
+        );
+        check_password_strength(username, new_password)?;
+        ensure!(
+            current_password != new_password,
+            "new password must differ from the current password"
+        );
+
+        let verified = self.snapshot.load_full();
+        ensure!(
+            password::verify(current_password, &verified.account.password_hash)?,
+            "invalid administrator credentials"
+        );
+        let new_hash = password::hash(new_password)?;
+        let secret = random_urlsafe::<32>()?;
+        let _writer = self.writer.lock().expect("account writer poisoned");
+        let active = self.snapshot.load();
+        let account = &active.account;
+        ensure!(
+            account.username == verified.account.username
+                && account.password_hash == verified.account.password_hash,
+            "administrator credentials changed during verification"
+        );
+        ensure!(
+            !account
+                .users
+                .iter()
+                .any(|user| user["username"].as_str() == Some(username)),
+            "administrator username conflicts with an existing user"
+        );
+        let mut next = account.clone();
+        next.username = username.into();
+        next.password_hash = new_hash;
+        next.session_secret = secret;
+        next.using_default_password = false;
+        next.weak_password = false;
         next.invalidate_sessions()?;
         self.save(next)
     }

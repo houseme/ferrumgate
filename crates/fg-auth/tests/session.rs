@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fg_auth::AccountManager;
+use fg_auth::{AccountManager, PasswordIssue};
 use fg_config::ConfigStore;
 use serde_json::{Value, json};
 
@@ -164,5 +164,74 @@ fn failed_write_keeps_the_published_session_state() -> Result<()> {
     fs::rename(backup, dir.path().join("account.json"))?;
     manager.revoke(&session.token)?;
     assert!(manager.identify(&session.token).is_none());
+    Ok(())
+}
+
+#[test]
+fn concurrent_password_changes_keep_one_winner_and_invalidate_old_sessions() -> Result<()> {
+    const CHANGES: [(&str, &str); 2] = [("keeper", "Fm9!rQ2-vNZ"), ("curator", "Cd7$mh3=YW")];
+    let (_dir, store, mut account) = fixture()?;
+    store.enable_history(10, &[]);
+    account["usingDefaultPassword"] = json!(true);
+    account["weakPassword"] = json!(true);
+    store.save("account", &account)?;
+    let (manager, _) = AccountManager::open(store.clone(), None)?;
+    let old = manager
+        .login("operator", PASSWORD)?
+        .context("old session")?;
+    assert!(manager.identify(&old.token).unwrap().must_change_password);
+    let before = store.load_raw("account")?;
+    let weak = manager
+        .change_credentials(PASSWORD, "keeper", "Password2024!")
+        .unwrap_err();
+    assert_eq!(
+        weak.downcast_ref::<PasswordIssue>(),
+        Some(&PasswordIssue::Common)
+    );
+    assert!(
+        manager
+            .change_credentials("wrong-password", "keeper", CHANGES[0].1)
+            .is_err()
+    );
+    assert_eq!(store.load_raw("account")?, before);
+    assert!(manager.identify(&old.token).is_some());
+
+    let gate = std::sync::Barrier::new(CHANGES.len());
+    let [first, second] = std::thread::scope(|scope| {
+        let gate = &gate;
+        let manager = &manager;
+        CHANGES
+            .map(|(user, password)| {
+                scope.spawn(move || {
+                    gate.wait();
+                    manager.change_credentials(PASSWORD, user, password)
+                })
+            })
+            .map(|task| task.join().unwrap())
+    });
+    assert_ne!(first.is_ok(), second.is_ok());
+    let (winner, loser) = if first.is_ok() { (0, 1) } else { (1, 0) };
+    assert!(manager.identify(&old.token).is_none());
+    let saved: Value =
+        serde_json::from_slice(&store.load_raw("account")?.context("stored credentials")?)?;
+    assert_eq!(saved["username"], CHANGES[winner].0);
+    assert_ne!(saved["sessionSecret"], account["sessionSecret"]);
+    assert_eq!(saved["sessionEpoch"], 1);
+    assert_eq!(saved["passkeys"], account["passkeys"]);
+    assert!(store.versions("account")?.is_empty());
+
+    drop(manager);
+    let (manager, _) = AccountManager::open(store, None)?;
+    assert!(manager.identify(&old.token).is_none());
+    assert!(manager.login(CHANGES[winner].0, PASSWORD)?.is_none());
+    assert!(manager.login(CHANGES[loser].0, CHANGES[loser].1)?.is_none());
+    let current = manager
+        .login(CHANGES[winner].0, CHANGES[winner].1)?
+        .context("rotated credentials")?;
+    let identity = manager
+        .identify(&current.token)
+        .context("updated identity")?;
+    assert_eq!(identity.username, CHANGES[winner].0);
+    assert!(!identity.must_change_password);
     Ok(())
 }

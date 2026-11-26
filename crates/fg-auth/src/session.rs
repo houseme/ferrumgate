@@ -9,7 +9,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
 
-use crate::account::{Account, MAX_REVOKED, random_urlsafe};
+use crate::account::{Account, MAX_REVOKED, MAX_USERNAME_BYTES, random_urlsafe};
 
 const DEFAULT_TTL_HOURS: u64 = 72;
 const MAX_TOKEN_BYTES: usize = 4096;
@@ -54,7 +54,7 @@ pub(super) struct Snapshot {
 impl Snapshot {
     pub fn new(account: Account) -> Result<Self> {
         ensure!(
-            !account.username.trim().is_empty() && account.username.len() <= 256,
+            !account.username.trim().is_empty() && account.username.len() <= MAX_USERNAME_BYTES,
             "invalid administrator username"
         );
         ensure!(
