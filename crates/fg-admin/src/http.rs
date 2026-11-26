@@ -46,6 +46,23 @@ pub struct ApiJson<T>(pub T);
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
     type Rejection = ApiError;
 
+    async fn from_request(request: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let JsonBody(bytes) = JsonBody::from_request(request, state).await?;
+        serde_json::from_slice(&bytes)
+            .map(Self)
+            .map_err(|_| invalid_json())
+    }
+}
+
+pub(crate) struct JsonBody(pub Vec<u8>);
+
+pub(crate) fn invalid_json() -> ApiError {
+    ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request")
+}
+
+impl<S: Send + Sync> FromRequest<S> for JsonBody {
+    type Rejection = ApiError;
+
     async fn from_request(request: Request, _: &S) -> Result<Self, Self::Rejection> {
         if !single_header(request.headers(), header::CONTENT_TYPE)
             .flatten()
@@ -97,9 +114,7 @@ impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
         })
         .await
         .map_err(|_| timed_out())??;
-        serde_json::from_slice(&bytes)
-            .map(Self)
-            .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid JSON request"))
+        Ok(Self(bytes))
     }
 }
 

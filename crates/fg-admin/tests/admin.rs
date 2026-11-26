@@ -28,6 +28,9 @@ use tokio::{
     time::timeout,
 };
 
+#[path = "admin/compat.rs"]
+mod compat;
+
 struct Server {
     listen: std::net::SocketAddr,
     task: JoinHandle<()>,

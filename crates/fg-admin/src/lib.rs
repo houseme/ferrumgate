@@ -2,6 +2,7 @@
 
 mod collection;
 mod http;
+mod item_json;
 mod redact;
 mod response;
 mod router;
