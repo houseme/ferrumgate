@@ -14,6 +14,7 @@ use tempfile::TempPath;
 
 mod diff;
 mod history;
+pub mod rollback;
 
 pub use diff::{DiffLine, Op, diff};
 use history::History;

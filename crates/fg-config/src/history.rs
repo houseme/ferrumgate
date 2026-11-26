@@ -180,6 +180,18 @@ impl ConfigStore {
         Ok(())
     }
 
+    pub(super) fn newest_version(&self) -> Result<Option<(String, VersionId)>> {
+        let mut latest: Option<(String, VersionId)> = None;
+        for name in self.history_dirs()? {
+            if let Some(id) = version_ids(&self.version_dir(&name))?.pop()
+                && latest.as_ref().is_none_or(|(_, old)| id > *old)
+            {
+                latest = Some((name, id));
+            }
+        }
+        Ok(latest)
+    }
+
     pub(super) fn snapshot(
         &self,
         name: &str,

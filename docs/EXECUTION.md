@@ -595,6 +595,17 @@ git diff --check
 
 现有回环用例覆盖 SIGHUP 的 Web/TLS 和 TCP/UDP 更新，以及 SIGTERM 的正常排空。WP-01 新用例执行 `fgate serve`，通过占用 TCP 端口验证预绑定失败与关闭转发的行为，发送 SIGHUP 验证开关变更要求重启，并用持续打开的回环连接验证 SIGINT 排空超时会回收连接。
 
+### WP-02 配置历史、差异与回滚
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+git diff --check
+```
+
+2026-11-26 在 macOS arm64、Rust stable 1.100.0 上通过 93 项默认测试。新增 14 项覆盖版本保留、恢复后撤销、并发版本链、快照失败保留当前文件、敏感项排除、版本 ID 与链接校验、差异上限及回滚请求的原子领取。全量回归包含既有网关回环测试。Linux、Windows 和断电恢复尚待实测。CLI、管理 API 与重启接入由后续工作包验证。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
