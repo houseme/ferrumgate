@@ -14,7 +14,12 @@ fg-auth = { workspace = true, features = ["schema"] }
 fg-config.workspace = true
 fg-core = { workspace = true, features = ["schema"] }
 fg-logging = { workspace = true, features = ["schema"] }
+fg-net.workspace = true
+data-encoding.workspace = true
 flate2.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 getrandom.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
@@ -31,7 +36,6 @@ url.workspace = true
 
 [dev-dependencies]
 bcrypt.workspace = true
-data-encoding.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 ring.workspace = true

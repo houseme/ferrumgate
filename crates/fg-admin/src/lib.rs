@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
+pub mod access;
 mod assets;
 mod audit;
 mod changeset;
 mod collection;
 pub mod confirm;
 pub mod demo;
+pub mod gateway;
 mod http;
 mod item_json;
 mod localize;
