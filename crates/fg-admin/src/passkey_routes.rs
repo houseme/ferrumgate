@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use axum::{
     Json,
     extract::{ConnectInfo, Extension, Path},
-    http::{HeaderMap, Method, StatusCode},
+    http::{HeaderMap, Method},
     response::{IntoResponse, Response},
 };
 use fg_auth::passkey::{PasskeyInfo, Passkeys, PublicKeyCredential, RegisterPublicKeyCredential};
@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ApiError, ApiJson, ApiRouter, RouteModels,
-    login::{Sessions, credential_error, login_error, session_token},
+    login::{Sessions, admin_token, credential_error, login_error},
     models::OkResponse,
 };
 
@@ -199,15 +199,6 @@ impl Routes {
             Err(error) => Ok(login_error(error)),
         }
     }
-}
-
-fn admin_token(headers: &HeaderMap) -> Result<String, ApiError> {
-    session_token(headers)
-        .map(str::to_owned)
-        .ok_or(ApiError::new(
-            StatusCode::UNAUTHORIZED,
-            "administrator session required",
-        ))
 }
 
 fn views(passkeys: &Passkeys) -> Vec<PasskeyView> {

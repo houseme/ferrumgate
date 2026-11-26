@@ -24,6 +24,215 @@ fn credentials(username: &str, password: &str) -> String {
 }
 
 #[tokio::test]
+async fn login_readonly_account_permissions_and_revocation_are_isolated() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    let password = "fixture-administrator-password";
+    let viewer_password = "Nm7!Zx4+rq";
+    let new_password = "Lk8$yN3-pv";
+    store.save(
+        "account",
+        &json!({
+            "username":"operator",
+            "passwordHash":bcrypt::hash(password, 4)?,
+            "sessionSecret":"fixture-session-secret-for-tests-only",
+        }),
+    )?;
+    let (accounts, _) = AccountManager::open(store.clone(), None)?;
+    let admin = ApiRouter::default()
+        .with_accounts(Arc::new(accounts), "", false)?
+        .route(Method::GET, "/api/ddns/fixture", "Fixture read", || async {
+            Json(json!({"secret":"fixture-only-secret","enabled":true}))
+        })
+        .route(
+            Method::GET,
+            "/api/ddns/fixture/secrets",
+            "Fixture secret",
+            || async { Json(json!({"secret":"fixture-only-secret"})) },
+        )
+        .route(
+            Method::POST,
+            "/api/ddns/fixture",
+            "Fixture write",
+            || async { Json(json!({"saved":true})) },
+        )
+        .route(Method::GET, "/api/audit", "Fixture audit", || async {
+            Json(json!([]))
+        })
+        .route(Method::GET, "/api/history", "Fixture history", || async {
+            Json(json!([]))
+        })
+        .route(Method::GET, "/api/tokens", "Fixture tokens", || async {
+            Json(json!([]))
+        })
+        .route(
+            Method::GET,
+            "/api/system/settings",
+            "Fixture settings",
+            || async { Json(json!({})) },
+        )
+        .finish();
+    assert_eq!(
+        admin.document()["paths"]["/api/account/users"]["post"]["x-token-allowed"],
+        false
+    );
+    let server = Server::start(admin.router).await?;
+    let (_, headers, _) = server
+        .call(
+            "POST",
+            "/api/login",
+            &[JSON],
+            credentials("operator", password),
+        )
+        .await?;
+    let operator = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    let users_path = "/api/account/users";
+    let create = json!({"username":"viewer", "password":viewer_password}).to_string();
+    let (status, _, users) = server
+        .call("POST", users_path, &[JSON, operator[0]], create.clone())
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(users, json!([{"username":"viewer","role":"readonly"}]));
+    assert_eq!(
+        server
+            .call("POST", users_path, &[JSON, operator[0]], create)
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let persisted = store.load_raw("account")?.context("persisted accounts")?;
+    assert!(!std::str::from_utf8(&persisted)?.contains(viewer_password));
+
+    let (_, headers, _) = server
+        .call(
+            "POST",
+            "/api/login",
+            &[JSON],
+            credentials("viewer", viewer_password),
+        )
+        .await?;
+    let viewer = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &viewer, Body::empty())
+            .await?
+            .2["role"],
+        "readonly"
+    );
+    let (_, _, read) = server
+        .call("GET", "/api/ddns/fixture", &viewer, Body::empty())
+        .await?;
+    assert_eq!(read, json!({"secret":SECRET_MASK,"enabled":true}));
+    for path in [
+        users_path,
+        "/api/audit",
+        "/api/history",
+        "/api/tokens",
+        "/api/system/settings",
+        "/api/ddns/fixture/secrets",
+    ] {
+        assert_eq!(
+            server.call("GET", path, &viewer, Body::empty()).await?.0,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    assert_eq!(
+        server
+            .call("POST", "/api/ddns/fixture", &viewer, Body::empty())
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server
+            .call(
+                "POST",
+                "/api/account/sessions/revoke",
+                &viewer,
+                Body::empty()
+            )
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    let account = "/api/account/users/viewer";
+    let reset = json!({"password":new_password}).to_string();
+    assert_eq!(
+        server
+            .call("PUT", account, &[JSON, operator[0]], reset)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &viewer, Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &operator, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call(
+                "POST",
+                "/api/login",
+                &[JSON],
+                credentials("viewer", viewer_password)
+            )
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (_, headers, _) = server
+        .call(
+            "POST",
+            "/api/login",
+            &[JSON],
+            credentials("viewer", new_password),
+        )
+        .await?;
+    let reset_viewer = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    assert_eq!(
+        server
+            .call("DELETE", account, &operator, Body::empty())
+            .await?
+            .2,
+        json!([])
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &reset_viewer, Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        server
+            .call("DELETE", account, &operator, Body::empty())
+            .await?
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &operator, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn login_passkey_http_uses_existing_session_and_cookie_boundaries() -> Result<()> {
     use fg_auth::passkey::{CreationChallengeResponse, RequestChallengeResponse, Url};
 

@@ -9,6 +9,7 @@ mod login;
 mod logs;
 mod models;
 mod passkey_routes;
+mod readonly_routes;
 mod redact;
 mod response;
 mod router;

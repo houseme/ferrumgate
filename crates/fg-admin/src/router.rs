@@ -12,7 +12,7 @@ use axum::{
     routing::{MethodFilter, on},
 };
 use fg_auth::{
-    AccountManager, Identity,
+    AccountManager, Identity, Role,
     passkey::{Passkeys, Url},
 };
 use fg_core::registry::{CATALOG, Enabled, Registry, Status};
@@ -516,6 +516,8 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
             "authentication required",
         ));
     };
+    let readonly_allowed =
+        policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD);
     let (allowed, restricted) = match principal {
         Authenticated::Account(identity) => {
             if identity.must_change_password
@@ -526,14 +528,13 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
                     "administrator password must be changed",
                 ));
             }
+            let restricted = identity.role == Role::Readonly;
+            let allowed = !restricted || readonly_allowed;
             request.extensions_mut().insert(identity);
-            (true, false)
+            (allowed, restricted)
         }
         Authenticated::External(Principal::Session { read_only: false }) => (true, false),
-        Authenticated::External(Principal::Session { read_only: true }) => (
-            policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD),
-            true,
-        ),
+        Authenticated::External(Principal::Session { read_only: true }) => (readonly_allowed, true),
         Authenticated::External(Principal::Token { scopes }) => (
             policy.access.allows_token(&scopes),
             !policy.access.allows_unredacted(&scopes),

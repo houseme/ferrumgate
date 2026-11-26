@@ -415,8 +415,8 @@ impl Passkeys {
 
 fn registration_owner<'a>(snapshot: &Snapshot, token: &'a str) -> Result<&'a str> {
     let now = unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
-    let (session, _) = snapshot
-        .verify(token, now)
+    let session = snapshot
+        .verify_admin(token, now)
         .ok_or_else(|| rejected("administrator session is invalid"))?;
     ensure!(
         !snapshot.account.using_default_password && !snapshot.account.weak_password,

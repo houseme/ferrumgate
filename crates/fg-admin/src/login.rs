@@ -12,8 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use fg_auth::{
-    AccountManager, CredentialChangeRejected, Identity, LoginError, PasswordIssue, Session,
-    check_password_strength, passkey::Passkeys,
+    AccountManager, CredentialChangeRejected, Identity, LoginError, PasswordIssue,
+    ReadonlyUserNotFound, Role, Session, check_password_strength, passkey::Passkeys,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -125,8 +125,17 @@ pub(super) fn password_fix_allowed(method: &Method, path: &str) -> bool {
     )
 }
 
+pub(super) fn admin_token(headers: &HeaderMap) -> Result<String, ApiError> {
+    session_token(headers)
+        .map(str::to_owned)
+        .ok_or(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "administrator session required",
+        ))
+}
+
 pub(super) struct Sessions {
-    accounts: Arc<AccountManager>,
+    pub(super) accounts: Arc<AccountManager>,
     pub(super) cookies: SessionCookies,
     workers: Arc<Semaphore>,
 }
@@ -301,9 +310,12 @@ pub(super) fn mount(
                 move |identity: Option<Extension<Identity>>| async move {
                     let identity = identity.map(|Extension(identity)| identity);
                     let password_issue = identity.as_ref().map_or("", Identity::password_issue);
+                    let role = identity
+                        .as_ref()
+                        .map_or(Role::Admin, |identity| identity.role);
                     Json(SessionView {
                         username: identity.map_or_else(String::new, |identity| identity.username),
-                        role: "admin",
+                        role: role.as_str(),
                         default_password: password_issue == "default",
                         password_issue,
                         disabled_modules: disabled,
@@ -386,6 +398,7 @@ pub(super) fn mount(
                     .response::<OkResponse>(),
                 move |headers, ApiJson(request)| totp_disable.set_totp(headers, request, false),
             );
+    let router = crate::readonly_routes::mount(router, state.clone());
     match passkeys {
         Some(passkeys) => crate::passkey_routes::mount(router, state, passkeys),
         None => router,
@@ -397,6 +410,8 @@ pub(super) fn credential_error(error: anyhow::Error) -> ApiError {
         ApiError::new(StatusCode::BAD_REQUEST, issue.code())
     } else if let Some(rejection) = error.downcast_ref::<CredentialChangeRejected>() {
         ApiError::new(StatusCode::BAD_REQUEST, rejection.0)
+    } else if error.is::<ReadonlyUserNotFound>() {
+        ApiError::new(StatusCode::NOT_FOUND, "read-only account was not found")
     } else if matches!(error.downcast_ref::<LoginError>(), Some(LoginError::Busy)) {
         BUSY
     } else {

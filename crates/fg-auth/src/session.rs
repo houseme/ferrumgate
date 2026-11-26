@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     account::{Account, MAX_REVOKED, MAX_USERNAME_BYTES, random_urlsafe},
+    readonly,
     totp::Totp,
 };
 
@@ -26,8 +27,25 @@ pub struct Session {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub username: String,
+    pub role: Role,
     pub must_change_password: bool,
     pub initial_password: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    Admin,
+    Readonly,
+}
+
+impl Role {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admin => "admin",
+            Self::Readonly => "readonly",
+        }
+    }
 }
 
 impl Identity {
@@ -64,8 +82,16 @@ pub(super) struct Snapshot {
     pub totp: Option<Totp>,
     key: hmac::Key,
     version: String,
+    readonly_versions: HashMap<String, String>,
     ttl: Duration,
     revoked: HashSet<String>,
+}
+
+pub(super) struct VerifiedSession<'a, 't> {
+    pub id: &'t str,
+    pub expires: u64,
+    pub username: &'a str,
+    pub role: Role,
 }
 
 impl Snapshot {
@@ -105,17 +131,37 @@ impl Snapshot {
             .iter()
             .map(|entry| entry.id.clone())
             .collect();
+        let readonly_versions = readonly::versions(&account)?;
         Ok(Self {
             totp: Totp::parse(&account.totp_secret),
             account,
             key,
             version,
+            readonly_versions,
             ttl: Duration::from_secs(ttl),
             revoked,
         })
     }
 
     pub fn issue(&self, now: SystemTime) -> Result<Session> {
+        self.issue_session(now, &self.account.username, None, &self.version)
+    }
+
+    pub fn issue_readonly(&self, now: SystemTime, username: &str) -> Result<Session> {
+        let version = self
+            .readonly_versions
+            .get(username)
+            .context("read-only credentials are missing")?;
+        self.issue_session(now, username, Some(Role::Readonly.as_str()), version)
+    }
+
+    fn issue_session(
+        &self,
+        now: SystemTime,
+        username: &str,
+        role: Option<&str>,
+        version: &str,
+    ) -> Result<Session> {
         let expires = unix_seconds(now)
             .context("system clock predates Unix epoch")?
             .checked_add(self.ttl.as_secs())
@@ -125,10 +171,10 @@ impl Snapshot {
             .context("session expiration overflow")?;
         let nonce = random_urlsafe::<12>()?;
         let claims = Claims {
-            user: Cow::Borrowed(&self.account.username),
+            user: Cow::Borrowed(username),
             expires,
-            role: None,
-            version: &self.version,
+            role,
+            version,
             epoch: self.account.session_epoch,
             nonce: &nonce,
         };
@@ -146,7 +192,7 @@ impl Snapshot {
             .filter(|&step| self.account.totp_last_step.is_none_or(|last| step > last))
     }
 
-    pub fn verify<'a>(&self, token: &'a str, now: u64) -> Option<(&'a str, u64)> {
+    pub fn verify<'a, 't>(&'a self, token: &'t str, now: u64) -> Option<VerifiedSession<'a, 't>> {
         if token.len() > MAX_TOKEN_BYTES {
             return None;
         }
@@ -164,13 +210,35 @@ impl Snapshot {
         }
         let raw = URL_SAFE_NO_PAD.decode(body).ok()?;
         let claims: Claims<'_> = serde_json::from_slice(&raw).ok()?;
-        (claims.expires > now
-            && claims.epoch == self.account.session_epoch
-            && claims.user == self.account.username
-            && matches!(claims.role, None | Some("admin"))
-            && claims.version == self.version
-            && !claims.nonce.is_empty())
-        .then_some((id, claims.expires))
+        if claims.expires <= now
+            || claims.epoch != self.account.session_epoch
+            || claims.nonce.is_empty()
+        {
+            return None;
+        }
+        let (username, role, version) = match claims.role {
+            None | Some("admin") if claims.user == self.account.username => (
+                self.account.username.as_str(),
+                Role::Admin,
+                self.version.as_str(),
+            ),
+            Some("readonly") => {
+                let (name, version) = self.readonly_versions.get_key_value(claims.user.as_ref())?;
+                (name.as_str(), Role::Readonly, version.as_str())
+            }
+            _ => return None,
+        };
+        (claims.version == version).then_some(VerifiedSession {
+            id,
+            expires: claims.expires,
+            username,
+            role,
+        })
+    }
+
+    pub fn verify_admin<'t>(&self, token: &'t str, now: u64) -> Option<&'t str> {
+        let verified = self.verify(token, now)?;
+        (verified.role == Role::Admin).then_some(verified.id)
     }
 }
 

@@ -13,13 +13,13 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::events::{Event, EventBus, Kind};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{
     lockout::{KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
     passkey::StoredPasskey,
     password::{self, MAX_PASSWORD_BYTES, check_password_strength},
-    session::{Identity, Session, Snapshot, unix_seconds},
+    readonly::ReadonlyUser,
+    session::{Identity, Role, Session, Snapshot, unix_seconds},
     totp::{PendingTotp, Totp},
 };
 
@@ -40,7 +40,7 @@ pub(super) struct Account {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub totp_last_step: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    users: Vec<Value>,
+    pub(super) users: Vec<ReadonlyUser>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(super) passkeys: Vec<StoredPasskey>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,10 +196,18 @@ impl AccountManager {
         let attempt = self.limiter.begin(address)?;
         let snapshot = self.snapshot.load_full();
         let account = &snapshot.account;
-        let accepted = password::verify(password, &account.password_hash)
-            .map_err(LoginError::Internal)?
-            && account.username == username
-            && !account.password_login_off;
+        let readonly = account.users.iter().find(|user| user.username == username);
+        let hash = readonly.map_or(account.password_hash.as_str(), |user| {
+            user.password_hash.as_str()
+        });
+        let verified = password::verify(password, hash).map_err(LoginError::Internal)?;
+        if verified && readonly.is_some() {
+            // A viewer login leaves the shared failure counters and known-source state intact.
+            return snapshot
+                .issue_readonly(SystemTime::now(), username)
+                .map_err(LoginError::Internal);
+        }
+        let accepted = verified && account.username == username && !account.password_login_off;
         let session = if !accepted {
             None
         } else if account.totp_secret.is_empty() {
@@ -266,8 +274,8 @@ impl AccountManager {
         let snapshot = self.snapshot.load();
         let timestamp =
             unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
-        let (id, _) = snapshot
-            .verify(token, timestamp)
+        let id = snapshot
+            .verify_admin(token, timestamp)
             .ok_or(CredentialChangeRejected("administrator session is invalid"))?;
         let pending = PendingTotp::new(id)?;
         let secret = pending.secret.clone();
@@ -280,7 +288,7 @@ impl AccountManager {
         let timestamp =
             unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
         ensure!(
-            verified.verify(token, timestamp).is_some(),
+            verified.verify_admin(token, timestamp).is_some(),
             CredentialChangeRejected("administrator session is invalid")
         );
         ensure!(
@@ -291,8 +299,8 @@ impl AccountManager {
         let current = self.snapshot.load();
         let timestamp =
             unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
-        let (id, _) = current
-            .verify(token, timestamp)
+        let id = current
+            .verify_admin(token, timestamp)
             .ok_or(CredentialChangeRejected("administrator session is invalid"))?;
         ensure!(
             current.account.password_hash == verified.account.password_hash,
@@ -341,12 +349,14 @@ impl AccountManager {
     pub fn identify(&self, token: &str) -> Option<Identity> {
         let snapshot = self.snapshot.load();
         let now = unix_seconds(SystemTime::now())?;
-        let _ = snapshot.verify(token, now)?;
+        let verified = snapshot.verify(token, now)?;
+        let administrator = verified.role == Role::Admin;
         Some(Identity {
-            username: snapshot.account.username.clone(),
-            initial_password: snapshot.account.using_default_password,
-            must_change_password: snapshot.account.using_default_password
-                || snapshot.account.weak_password,
+            username: verified.username.into(),
+            role: verified.role,
+            initial_password: administrator && snapshot.account.using_default_password,
+            must_change_password: administrator
+                && (snapshot.account.using_default_password || snapshot.account.weak_password),
         })
     }
 
@@ -355,17 +365,27 @@ impl AccountManager {
         let _writer = self.writer.lock().expect("account writer poisoned");
         let snapshot = self.snapshot.load();
         let now = unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
-        let Some((id, expires)) = snapshot.verify(token, now) else {
+        let Some(session) = snapshot.verify(token, now) else {
             return Ok(());
         };
         let mut next = snapshot.account.clone();
         next.revoked.retain(|token| token.expires > now);
-        if next.revoked.len() == MAX_REVOKED {
+        if session.role == Role::Readonly && next.revoked.len() >= MAX_REVOKED / 2 {
+            let user = next
+                .users
+                .iter_mut()
+                .find(|user| user.username == session.username)
+                .expect("verified read-only account");
+            user.session_epoch = user
+                .session_epoch
+                .checked_add(1)
+                .context("read-only session epoch exhausted")?;
+        } else if next.revoked.len() == MAX_REVOKED {
             next.invalidate_sessions()?;
         } else {
             next.revoked.push(Revoked {
-                id: id.into(),
-                expires,
+                id: session.id.into(),
+                expires: session.expires,
             });
         }
         self.save(next)
@@ -413,10 +433,7 @@ impl AccountManager {
             CredentialChangeRejected("administrator credentials changed during verification")
         );
         ensure!(
-            !account
-                .users
-                .iter()
-                .any(|user| user["username"].as_str() == Some(username)),
+            !account.users.iter().any(|user| user.username == username),
             CredentialChangeRejected("administrator username conflicts with an existing user")
         );
         let mut next = account.clone();

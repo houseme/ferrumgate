@@ -867,6 +867,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 171 项工作区测试和 9 项本机 Pebble ACME 测试。四项新增用例验证 Origin 限制、挑战容量与过期、软件认证器注册、挑战重放、签名计数回退、重启恢复、独立登录限流，以及 HTTP 层的密码登录开关、最后一把 Passkey 保护和删除后会话失效。物理认证器和生产管理监听待实测，上游已有 Passkey 记录的迁移待实现。[WebAuthn Level 3](https://www.w3.org/TR/webauthn-3/)
 
+### WP-12 只读账号
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth --test readonly
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login::login_readonly
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 174 项工作区测试和 9 项本机 Pebble ACME 测试。三项新增用例验证只读账号 CRUD、密码哈希持久化、会话角色与响应脱敏、敏感接口和写入拒绝、重置及删除后的会话失效、限流计数保留，以及吊销容量阈值下的会话隔离。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
