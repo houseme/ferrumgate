@@ -39,7 +39,7 @@ enum Command {
         #[arg(long)]
         log_dir: Option<PathBuf>,
         #[command(flatten)]
-        admin: bootstrap::AdminOptions,
+        admin: Box<bootstrap::AdminOptions>,
     },
     /// Reset the administrator password using the private configuration directory.
     ResetPassword {
@@ -89,6 +89,7 @@ async fn main() -> Result<()> {
             log_dir,
             admin,
         } => {
+            let admin = *admin;
             let logs = logging::RuntimeLogs::start(log_level, log_dir, admin.enabled())?;
             let outcome = bootstrap::serve(config, admin, &logs).await;
             logs.shutdown().await;

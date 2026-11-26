@@ -999,3 +999,77 @@ async fn management_takes_offline_rollback_requests_while_running() -> Result<()
     stop_management(&mut child).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn management_applies_declarative_directory_before_config_load() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let apply = tempfile::tempdir()?;
+    let backend = Origin::http("apply fixture").await?;
+    std::fs::write(apply.path().join("ferrumgate.json"), r#"{"language":"zh"}"#)?;
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        store.enable_history(20, &[]);
+        store.save("ferrumgate", &json!({"language":"en"}))?;
+    }
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", backend.addr, "/"), "", ""),
+    )?;
+    let start = || {
+        Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--config"])
+            .arg(&config_path)
+            .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+            .arg(&accounts)
+            .args(["--apply"])
+            .arg(apply.path())
+            .env_remove("FERRUMGATE_LOG_LEVEL")
+            .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+    };
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    // The apply log line precedes the management listener announcement.
+    wait_log_message(&mut lines, "declarative configuration applied").await?;
+    wait_listener(&mut lines, "management ready").await?;
+    let mut expected = br#"{"language":"zh"}"#.to_vec();
+    expected.push(b'\n');
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        assert_eq!(
+            store.load_raw("ferrumgate")?.as_deref(),
+            Some(expected.as_slice()),
+            "the declarative file replaced the saved settings"
+        );
+        assert_eq!(
+            store.versions("ferrumgate")?.len(),
+            1,
+            "the replaced content is rollback-readable"
+        );
+    }
+    stop_management(&mut child).await?;
+
+    // A second start applies identical content without touching history.
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    wait_listener(&mut lines, "management ready").await?;
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        assert_eq!(
+            store.versions("ferrumgate")?.len(),
+            1,
+            "unchanged declarative files do not rewrite or re-archive"
+        );
+        assert_eq!(
+            store.load_raw("ferrumgate")?.as_deref(),
+            Some(expected.as_slice())
+        );
+    }
+    stop_management(&mut child).await?;
+    Ok(())
+}

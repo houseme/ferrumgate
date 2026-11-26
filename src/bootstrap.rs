@@ -62,6 +62,9 @@ pub struct AdminOptions {
     /// External path prefix removed by the trusted reverse proxy.
     #[arg(long, default_value = "", requires = "admin_dir")]
     admin_prefix: String,
+    /// Apply declarative <name>.json files from this directory at startup.
+    #[arg(long = "apply", env = "FERRUMGATE_APPLY_DIR", requires = "admin_dir")]
+    apply_dir: Option<PathBuf>,
 }
 
 impl AdminOptions {
@@ -91,11 +94,25 @@ pub async fn serve(
     })?;
     let origin = options.admin_origin.clone();
     let setup_events = events.clone();
+    let apply_dir = options.apply_dir.take();
     let (accounts, tokens, settings, store) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
         // Snapshot every configuration change except credential and
         // runtime state, so offline rollback requests have versions to use.
         store.enable_history(30, &HISTORY_SKIP);
+        // Declarative files state the operator's intent: apply them before
+        // any configuration, account or settings is read.
+        if let Some(apply_dir) = &apply_dir {
+            let report = fg_config::apply::apply_config_dir(&store, apply_dir)
+                .context("apply declarative configuration")?;
+            tracing::info!(
+                target: "fgate::bootstrap",
+                applied = report.applied,
+                skipped = report.skipped,
+                names = ?report.names,
+                "declarative configuration applied"
+            );
+        }
         let initial = std::env::var("FERRUMGATE_INITIAL_PASSWORD");
         let initial = match &initial {
             Ok(password) => Some(password.as_str()),

@@ -12,6 +12,7 @@ use fg_core::fsperm;
 use serde::{Serialize, de::DeserializeOwned};
 use tempfile::TempPath;
 
+pub mod apply;
 mod diff;
 mod history;
 pub mod rollback;

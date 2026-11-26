@@ -1117,6 +1117,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 223 项工作区测试和 9 项本机 Pebble ACME 测试。`POST /api/system/restart` 仅限管理员会话，响应写出 500 毫秒后触发重启；`bootstrap::serve` 以 `Outcome::Restart` 返回，主程序用标准库的安全 `exec` 封装以相同参数与环境重新执行自身，失败或不支持的平台以退出码 3 退出。端到端用例验证重启后 PID 不变、固定管理监听恢复、凭据可用且 SIGINT 仍能干净退出；用例等待第二次 `management ready` 日志行而不是抢先连接，避免把请求发给尚未被替换的旧镜像。管理进程启动时对配置存储启用历史（保留 30，跳过账号、令牌与登录来源），2 秒维护轮询在应用账号重置与令牌刷盘之外取走并应用 `rollback-request.state`，运行中写入请求文件的用例验证文件被取走且配置回退到上一版本。`fgate run` 子命令、`Boot`/`Clock` 与声明式目录应用随 WP-39 前的配置解析决策接入；Windows 路径（退出码 3 加外部拉起）待实机标注。
 
+### WP-06 声明式配置
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-config --test apply
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway management_applies_declarative_directory_before_config_load
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 234 项工作区测试和 9 项本机 Pebble ACME 测试。`apply_config_dir` 用例覆盖首次写入与二次跳过、缺尾换行比较前补齐、被替换内容进入历史可回读、`account`/`tokens` 报错且此前无任何写入、非法 JSON 与非法配置名报错含文件名、子目录/隐藏文件/其他扩展名忽略、按名称排序处理、来源目录登记为受保护路径及目录缺失报错。端到端用例验证 `--apply` 在读取任何配置之前覆盖已保存设置、被替换内容可在历史回读，且第二次启动相同内容不再重写或产生新历史。环境变量 `FERRUMGATE_APPLY_DIR` 走 clap 的 env 装配，与 `--apply` 同一参数位。启动日志记录应用与跳过的数量及名称。git 仓库下发演练：把 `<名称>.json` 提交到仓库并以 `--apply` 指向检出目录，每次启动幂等应用；与本用例的二段启动验证等价。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
