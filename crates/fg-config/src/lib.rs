@@ -12,8 +12,10 @@ use fg_core::fsperm;
 use serde::{Serialize, de::DeserializeOwned};
 use tempfile::TempPath;
 
+mod diff;
 mod history;
 
+pub use diff::{DiffLine, Op, diff};
 use history::History;
 pub use history::{DEFAULT_HISTORY_KEEP, Version, VersionId};
 
