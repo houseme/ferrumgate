@@ -10,19 +10,19 @@ schema = ["dep:schemars"]
 
 [dependencies]
 anyhow.workspace = true
-arc-swap = "1"
-futures-util = { version = "0.3", default-features = false, features = ["std"] }
-ipnet = "2"
-jiff-tzdb = "1"
-schemars = { version = "1", optional = true }
+arc-swap.workspace = true
+futures-util.workspace = true
+ipnet.workspace = true
+jiff-tzdb.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
-url = "2"
+url.workspace = true
 
 [build-dependencies]
 serde.workspace = true
-toml = "1"
+toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

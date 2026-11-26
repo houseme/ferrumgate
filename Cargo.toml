@@ -8,14 +8,71 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 
+# All dependency versions are managed here. Member manifests only reference
+# entries with `workspace = true` and may add features on top of them.
 [workspace.dependencies]
+# Internal crates
+fg-admin = { path = "crates/fg-admin" }
+fg-auth = { path = "crates/fg-auth" }
+fg-config = { path = "crates/fg-config" }
+fg-core = { path = "crates/fg-core" }
+fg-gateway = { path = "crates/fg-gateway" }
+fg-logging = { path = "crates/fg-logging" }
+fg-testkit = { path = "crates/fg-testkit" }
+# External crates
 anyhow = "1"
+arc-swap = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+base64 = "0.23"
+bcrypt = "0.19"
+cap-std = "4"
+clap = { version = "4", features = ["derive"] }
+data-encoding = "2"
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+getrandom = "0.4"
+h2 = "0.4"
+hickory-proto = "0.26"
+hickory-resolver = { version = "0.26.4", default-features = false, features = ["tokio"] }
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "server", "http1", "http2"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "tls12"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+instant-acme = { version = "0.8", default-features = false, features = ["hyper-rustls", "rcgen", "ring"] }
+ipnet = "2"
+jiff-tzdb = "1"
+libc = "0.2"
+mime = "0.3"
+mime_guess = "2"
+openidconnect = { version = "4.1", default-features = false }
+pem = "4"
+percent-encoding = "2"
+rcgen = "0.14"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots", "socks"] }
+ring = "0.17"
+rpassword = "7"
+rustix = { version = "1", features = ["fs"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+subtle = "2"
 tempfile = "3"
 time = "0.3"
 tokio = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { version = "0.1", default-features = false }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio-util = { version = "0.7", features = ["io"] }
+toml = "1"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+url = "2"
+webauthn-authenticator-rs = { version = "0.6", default-features = false, features = ["softpasskey"] }
+webauthn-rs = { version = "0.6", default-features = false }
+webpki-roots = "1"
+x509-parser = "0.18"
 
 [package]
 name = "ferrumgate"
@@ -25,19 +82,19 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
-clap = { version = "4", features = ["derive"] }
-fg-admin = { path = "crates/fg-admin" }
-fg-auth = { path = "crates/fg-auth" }
-fg-config = { path = "crates/fg-config" }
-fg-core = { path = "crates/fg-core" }
-fg-gateway = { path = "crates/fg-gateway" }
-fg-logging = { path = "crates/fg-logging" }
-rpassword = "7"
-time.workspace = true
+axum.workspace = true
+clap.workspace = true
+fg-admin.workspace = true
+fg-auth.workspace = true
+fg-config.workspace = true
+fg-core.workspace = true
+fg-gateway.workspace = true
+fg-logging.workspace = true
+rpassword.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+tracing-subscriber.workspace = true
 
 [[bin]]
 name = "fgate"
@@ -45,17 +102,17 @@ path = "src/main.rs"
 
 
 [dev-dependencies]
-futures-util = { version = "0.3", features = ["sink"] }
-h2 = "0.4"
-hickory-proto = "0.26"
-http-body-util = "0.1"
-hyper = { version = "1", features = ["client", "server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-rcgen = "0.14"
+futures-util = { workspace = true, features = ["sink"] }
+h2.workspace = true
+hickory-proto.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 serde_json.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
-tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
-x509-parser = "0.18"
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+x509-parser.workspace = true

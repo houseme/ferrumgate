@@ -7,14 +7,14 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-fg-core = { path = "../fg-core" }
+fg-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["formatting", "macros", "parsing", "serde"] }
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
+libc.workspace = true
 
 [dev-dependencies]
-fg-testkit = { path = "../fg-testkit" }
+fg-testkit.workspace = true

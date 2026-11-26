@@ -10,18 +10,18 @@ schema = ["dep:schemars"]
 
 [dependencies]
 anyhow.workspace = true
-arc-swap = "1"
-fg-core = { path = "../fg-core" }
-flate2 = "1"
-ipnet = "2"
-schemars = { version = "1", optional = true }
+arc-swap.workspace = true
+fg-core.workspace = true
+flate2.workspace = true
+ipnet.workspace = true
+schemars = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 time = { workspace = true, features = ["formatting", "macros", "parsing", "serde"] }
 tracing.workspace = true
-tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
+tracing-subscriber.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = "0.2"
-rustix = { version = "1", features = ["fs"] }
+libc.workspace = true
+rustix.workspace = true
