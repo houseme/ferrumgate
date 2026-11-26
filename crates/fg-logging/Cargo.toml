@@ -7,13 +7,15 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+flate2 = "1"
 ipnet = "2"
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-time = { workspace = true, features = ["formatting", "parsing", "serde"] }
+time = { workspace = true, features = ["formatting", "macros", "parsing", "serde"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+rustix = { version = "1", features = ["fs"] }

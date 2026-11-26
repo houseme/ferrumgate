@@ -7,8 +7,13 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use time::OffsetDateTime;
 
-use super::{Buffer, MAX_JSON_LINE, MAX_SOURCES, MODULES, Record, query::scan_forward};
+use super::{
+    Buffer, MAX_JSON_LINE, MAX_RING_BYTES, MAX_SOURCES, MODULES, Module, Record,
+    archive::{self, ArchiveOptions},
+    query::{LogFile, scan_forward},
+};
 
 pub(super) struct Disk {
     pub view: Arc<DiskView>,
@@ -16,12 +21,37 @@ pub(super) struct Disk {
     streams: [Stream; MODULES.len()],
     _lock: File,
     encoded: Vec<u8>,
+    archive: Option<ArchiveOptions>,
+    maintenance_pending: bool,
 }
 
 /// Coordinates file snapshots with rotation without involving publishers.
 pub(super) struct DiskView {
     pub dir: PathBuf,
-    pub files: Mutex<()>,
+    pub files: Mutex<[Clear; MODULES.len()]>,
+    pub archive_web: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct Clear {
+    pub through: u64,
+    pub generation: u64,
+}
+
+impl DiskView {
+    pub fn clear_files(&self, module: Module) -> io::Result<()> {
+        for suffix in ["log", "log.1", "sources"] {
+            archive::remove(&self.dir.join(format!("{}.{suffix}", module.stem())))?;
+        }
+        if module == Module::Web {
+            for entry in archive::list(&self.dir)? {
+                for path in entry.paths() {
+                    archive::remove(path)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -29,12 +59,14 @@ struct Stream {
     file: Option<OpenLog>,
     sources: BTreeSet<String>,
     changed_sources: bool,
+    generation: u64,
 }
 
 struct OpenLog {
     writer: BufWriter<File>,
     size: u64,
     needs_delimiter: bool,
+    started: Option<OffsetDateTime>,
 }
 
 impl Disk {
@@ -42,6 +74,7 @@ impl Disk {
         dir: PathBuf,
         limit: u64,
         lines: usize,
+        archive: Option<ArchiveOptions>,
         buffers: &mut [Buffer; MODULES.len()],
     ) -> Result<Self> {
         ensure!(dir.is_absolute(), "log directory must be absolute");
@@ -49,26 +82,39 @@ impl Disk {
         let lock = open_regular(&dir.join(".ferrumgate-log.lock"), true)?
             .context("open runtime log lock")?;
         lock.try_lock().context("runtime log directory is in use")?;
+        let archive = archive.map(|options| options.prepare(&dir)).transpose()?;
+        if let Some(options) = archive {
+            archive::cleanup_temporaries(&dir)?;
+            archive::prune(&dir, options, OffsetDateTime::now_utc())?;
+        }
         let mut disk = Self {
             view: Arc::new(DiskView {
                 dir,
-                files: Mutex::new(()),
+                files: Mutex::new([Clear::default(); MODULES.len()]),
+                archive_web: archive.is_some(),
             }),
             limit,
             _lock: lock,
             streams: std::array::from_fn(|_| Stream::default()),
             encoded: Vec::with_capacity(1024),
+            archive,
+            maintenance_pending: archive.is_some(),
         };
         for module in MODULES {
             let buffer = &mut buffers[module as usize];
-            for suffix in ["log.1", "log"] {
-                restore(
-                    &disk.view.dir.join(format!("{}.{suffix}", module.stem())),
-                    lines,
-                    buffer,
-                )
-                .with_context(|| format!("restore {} runtime log", module.stem()))?;
+            if module == Module::Web && archive.is_some() {
+                restore_archived(&disk.view.dir, lines, buffer)?;
+            } else {
+                for suffix in ["log.1", "log"] {
+                    restore(
+                        &disk.view.dir.join(format!("{}.{suffix}", module.stem())),
+                        lines,
+                        buffer,
+                    )
+                    .with_context(|| format!("restore {} runtime log", module.stem()))?;
+                }
             }
+
             if let Some(file) = open_regular(
                 &disk.view.dir.join(format!("{}.sources", module.stem())),
                 false,
@@ -102,36 +148,62 @@ impl Disk {
         if batch.is_empty() {
             return Ok(());
         }
-        let _files = self.view.files.lock().expect("log file mutex poisoned");
+        let files = self.view.files.lock().expect("log file mutex poisoned");
+        for (stream, clear) in self.streams.iter_mut().zip(files.iter()) {
+            if stream.generation != clear.generation {
+                *stream = Stream {
+                    generation: clear.generation,
+                    ..Stream::default()
+                };
+            }
+        }
         for Record(module, entry) in batch {
+            if entry.seq <= files[*module as usize].through {
+                continue;
+            }
+            let archive = self.archive.filter(|_| *module == Module::Web);
+            let limit = archive.map_or(self.limit, ArchiveOptions::file_limit);
+
             self.encoded.clear();
             serde_json::to_writer(&mut self.encoded, entry.as_ref())?;
             self.encoded.push(b'\n');
-            if self.encoded.len() > MAX_JSON_LINE || self.encoded.len() as u64 > self.limit {
+            if self.encoded.len() > MAX_JSON_LINE || self.encoded.len() as u64 > limit {
                 continue;
             }
             let stream = &mut self.streams[*module as usize];
             if stream.file.is_none() {
                 stream.file = Some(open_log(
                     &self.view.dir.join(format!("{}.log", module.stem())),
+                    archive.is_some(),
                 )?);
             }
             let record_len = self.encoded.len() as u64;
             let file = stream.file.as_mut().expect("log file opened");
-            if file
-                .size
-                .saturating_add(record_len + u64::from(file.needs_delimiter))
-                > self.limit
+            let new_day = archive.is_some()
+                && file
+                    .started
+                    .is_some_and(|started| started.date() != entry.time.date());
+            if (file.size != 0 && new_day)
+                || file
+                    .size
+                    .saturating_add(record_len + u64::from(file.needs_delimiter))
+                    > limit
             {
                 let mut previous = stream.file.take().expect("log file opened");
                 previous.writer.flush()?;
+                let started = previous.started.unwrap_or(entry.time);
                 drop(previous);
                 let path = self.view.dir.join(format!("{}.log", module.stem()));
-                fs::rename(
-                    &path,
-                    self.view.dir.join(format!("{}.log.1", module.stem())),
-                )?;
-                stream.file = Some(open_log(&path)?);
+                if archive.is_some() {
+                    archive::rotate(&self.view.dir, &path, started, entry.seq)?;
+                    self.maintenance_pending = true;
+                } else {
+                    fs::rename(
+                        &path,
+                        self.view.dir.join(format!("{}.log.1", module.stem())),
+                    )?;
+                }
+                stream.file = Some(open_log(&path, archive.is_some())?);
             }
             let file = stream.file.as_mut().expect("log file opened");
             if file.needs_delimiter {
@@ -141,6 +213,7 @@ impl Disk {
             }
             file.writer.write_all(&self.encoded)?;
             file.size += record_len;
+            file.started.get_or_insert(entry.time);
             if stream.sources.len() < MAX_SOURCES
                 && !entry.source.is_empty()
                 && !stream.sources.contains(&entry.source)
@@ -170,6 +243,56 @@ impl Disk {
         }
         Ok(())
     }
+    pub fn maintain_archives(&mut self) -> io::Result<()> {
+        if std::mem::take(&mut self.maintenance_pending)
+            && let Some(options) = self.archive
+        {
+            let result = archive::maintain(&self.view, options);
+            self.maintenance_pending = result.is_err();
+            result
+        } else {
+            Ok(())
+        }
+    }
+}
+
+fn restore_archived(dir: &Path, limit: usize, buffer: &mut Buffer) -> io::Result<()> {
+    let mut recent = Vec::new();
+    let mut bytes = 0;
+    let mut visit = |entry: super::Entry| {
+        if recent
+            .last()
+            .is_some_and(|previous: &super::Entry| entry.seq >= previous.seq)
+        {
+            return Ok(true);
+        }
+        let size = entry.bytes();
+        if recent.len() == limit || bytes + size > MAX_RING_BYTES {
+            return Ok(false);
+        }
+        bytes += size;
+        recent.push(entry);
+        Ok(true)
+    };
+    let archives = archive::list(dir)?;
+    let current = dir.join("webservice.log");
+    let previous = dir.join("webservice.log.1");
+    let files = std::iter::once((current.as_path(), false))
+        .chain(archives.iter().rev().map(archive::Archive::preferred))
+        .chain(std::iter::once((previous.as_path(), false)));
+    for (path, gzip) in files {
+        if let Some(file) = LogFile::open(path, gzip)? {
+            private_file(&file.file)?;
+            if !file.visit::<true>(&mut visit)? {
+                break;
+            }
+        }
+    }
+    for entry in recent.into_iter().rev() {
+        let size = entry.bytes();
+        buffer.add(Arc::new(entry), size, limit);
+    }
+    Ok(())
 }
 
 fn restore(path: &Path, lines: usize, buffer: &mut Buffer) -> io::Result<()> {
@@ -188,10 +311,21 @@ fn restore(path: &Path, lines: usize, buffer: &mut Buffer) -> io::Result<()> {
     Ok(())
 }
 
-fn open_log(path: &Path) -> io::Result<OpenLog> {
+fn open_log(path: &Path, archiving: bool) -> io::Result<OpenLog> {
     let mut file = open_regular(path, true)?.ok_or(io::ErrorKind::NotFound)?;
     let size = file.metadata()?.len();
+    let mut started = None;
+    if archiving && size > 0 {
+        scan_forward(file.try_clone()?, size, |entry| {
+            started = Some(entry.time);
+            Ok(false)
+        })?;
+        if started.is_none() {
+            started = Some(file.metadata()?.modified()?.into());
+        }
+    }
     let mut last = *b"\n";
+
     if size != 0 {
         file.seek(SeekFrom::End(-1))?;
         file.read_exact(&mut last)?;
@@ -200,6 +334,7 @@ fn open_log(path: &Path) -> io::Result<OpenLog> {
         writer: BufWriter::with_capacity(32 << 10, file),
         size,
         needs_delimiter: last != *b"\n",
+        started,
     })
 }
 
@@ -264,7 +399,7 @@ fn ensure_dir(path: &Path) -> io::Result<()> {
     }
 }
 
-fn private_file(file: &File) -> io::Result<()> {
+pub(super) fn private_file(file: &File) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

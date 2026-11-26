@@ -58,6 +58,7 @@ fn disk_rotates_once_and_restores_sequence_and_sources() -> Result<()> {
         directory: Some(dir.path().to_owned()),
         lines: 3,
         file_bytes: 650,
+        web_archive: None,
     };
     let logs = Logs::start(options(), io::sink())?;
     assert!(Logs::start(options(), io::sink()).is_err());

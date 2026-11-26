@@ -651,6 +651,20 @@ git diff --check
 
 在 macOS arm64、Rust stable 1.100.0 上通过 115 项默认测试及 9 项本机 Pebble ACME 测试。新增 5 项测试覆盖关键词与 IP 条件组合、跨文件和损坏长行、待写记录在内存淘汰后可读、快照跨轮转及追加保持一致、CSV 公式防护与多行转义。访问日志压缩归档、清空、目录热切换和管理端授权继续按计划接入。
 
+### WP-09 Web 日志归档与清空
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-logging
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-logging --depth 1
+git diff --check
+```
+
+在 macOS arm64、Rust stable 1.100.0 上通过 120 项默认测试及 9 项本机 Pebble ACME 测试。五项新增测试覆盖跨日和按大小轮转、gzip 恢复与导出、按保留期限和总量淘汰、清空后拒绝旧批次及压缩结果。归档使用锁定的 `flate2 1.1.11`，Unix 分区容量通过 `rustix` 读取。当前由 Rust 库启用归档，Web 访问日志生产者与管理接口分别随 WP-28 和 WP-11 接入。目录热切换与 gzip 时间范围裁剪仍在 WP-09。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

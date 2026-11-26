@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod archive;
 mod filter;
 mod persist;
 mod query;
@@ -15,6 +16,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
+pub use archive::ArchiveOptions;
 pub use filter::Filter;
 use persist::{Disk, DiskView};
 pub use query::{Format, Page};
@@ -150,6 +152,7 @@ pub struct Options {
     pub directory: Option<PathBuf>,
     pub lines: usize,
     pub file_bytes: u64,
+    pub web_archive: Option<ArchiveOptions>,
 }
 
 impl Default for Options {
@@ -158,6 +161,7 @@ impl Default for Options {
             directory: None,
             lines: 2000,
             file_bytes: 2 << 20,
+            web_archive: None,
         }
     }
 }
@@ -188,9 +192,21 @@ impl Logs {
             "invalid log file size limit"
         );
         let mut buffers = std::array::from_fn(|_| Buffer::default());
+        ensure!(
+            options.web_archive.is_none() || options.directory.is_some(),
+            "Web log archives require a log directory"
+        );
         let disk = options
             .directory
-            .map(|dir| Disk::open(dir, options.file_bytes, options.lines, &mut buffers))
+            .map(|dir| {
+                Disk::open(
+                    dir,
+                    options.file_bytes,
+                    options.lines,
+                    options.web_archive,
+                    &mut buffers,
+                )
+            })
             .transpose()?;
         let disk_view = disk.as_ref().map(|disk| disk.view.clone());
         let mut output = BufWriter::with_capacity(64 << 10, echo);
@@ -233,7 +249,17 @@ impl Logs {
                             .into_bytes();
                             let bytes = notice.capacity();
                             echo.push(notice, bytes);
-                        })
+                        })?;
+                        if let Err(error) = sink.maintain_archives() {
+                            let notice = format!(
+                                "ferrumgate: Web log archive maintenance failed ({:?})\n",
+                                error.kind()
+                            )
+                            .into_bytes();
+                            let bytes = notice.capacity();
+                            echo.push(notice, bytes);
+                        }
+                        Ok(())
                     },
                 )
             })
@@ -281,6 +307,32 @@ impl Logs {
             .iter()
             .cloned()
             .collect()
+    }
+
+    /// Clears the selected stream and discards its already queued records.
+    pub fn clear(&self, module: Module) -> io::Result<()> {
+        let mut files = self
+            .disk_view
+            .as_ref()
+            .map(|view| view.files.lock().expect("log file mutex poisoned"));
+        if let Some(view) = &self.disk_view {
+            view.clear_files(module)?;
+        }
+        let mut buffer = self.layer.0.buffers[module as usize]
+            .lock()
+            .expect("log buffer poisoned");
+        if let Some(files) = &mut files {
+            let clear = &mut files[module as usize];
+            clear.through = buffer.latest;
+            clear.generation += 1;
+        }
+        let entries = std::mem::take(&mut buffer.entries);
+        let sources = std::mem::take(&mut buffer.sources);
+        buffer.bytes = 0;
+        drop(buffer);
+        drop(files);
+        drop((entries, sources));
+        Ok(())
     }
 
     pub fn shutdown(self, timeout: Duration) -> io::Result<()> {

@@ -1,15 +1,19 @@
 use std::{
     collections::VecDeque,
     fs::File,
-    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    path::Path,
     sync::Arc,
 };
 
+use flate2::read::GzDecoder;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
     Entry, Filter, Level, Logs, MAX_FILE_BYTES, MAX_JSON_LINE, MAX_LINES, MAX_RING_BYTES, Module,
-    Record, persist::open_regular,
+    Record,
+    archive::{self, MAX_ARCHIVES, MAX_RAW},
+    persist::open_regular,
 };
 
 const BLOCK: usize = 64 << 10;
@@ -124,33 +128,50 @@ impl Logs {
 
     fn snapshot(&self, module: Module, after: u64, before: u64) -> io::Result<Snapshot> {
         let view = self.disk_view.as_ref();
-        let _files = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
+        let files_guard = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
         let buffer = self.layer.0.buffers[module as usize]
             .lock()
             .expect("log buffer poisoned");
         let latest = buffer.latest;
         let mut live: Vec<_> = buffer.range(after, before).cloned().collect();
         drop(buffer);
+        let cutoff = files_guard
+            .as_ref()
+            .map_or(0, |files| files[module as usize].through);
         if let Some(disk) = &self.layer.0.disk {
             disk.snapshot(|Record(origin, entry)| {
-                if *origin == module && entry.seq <= latest && in_range(entry.seq, after, before) {
+                if *origin == module
+                    && entry.seq > cutoff
+                    && entry.seq <= latest
+                    && in_range(entry.seq, after, before)
+                {
                     live.push(entry.clone());
                 }
             });
         }
         let mut files = Vec::new();
         if let Some(view) = view {
-            for suffix in ["log.1", "log"] {
-                let path = view.dir.join(format!("{}.{suffix}", module.stem()));
-                if let Some(file) = open_regular(&path, false)? {
-                    files.push(LogFile {
-                        size: file.metadata()?.len(),
-                        file,
-                    });
+            if let Some(file) =
+                LogFile::open(&view.dir.join(format!("{}.log.1", module.stem())), false)?
+            {
+                files.push(file);
+            }
+            if module == Module::Web && view.archive_web {
+                let archives = archive::list(&view.dir)?;
+                for item in &archives[archives.len().saturating_sub(MAX_ARCHIVES)..] {
+                    let (path, gzip) = item.preferred();
+                    if let Some(file) = LogFile::open(path, gzip)? {
+                        files.push(file);
+                    }
                 }
             }
+            if let Some(file) =
+                LogFile::open(&view.dir.join(format!("{}.log", module.stem())), false)?
+            {
+                files.push(file);
+            }
         }
-        drop(_files);
+        drop(files_guard);
         live.sort_unstable_by_key(|entry| entry.seq);
         live.dedup_by_key(|entry| entry.seq);
         Ok(Snapshot {
@@ -169,9 +190,50 @@ struct Snapshot {
     live: VecDeque<Arc<Entry>>,
 }
 
-struct LogFile {
-    file: File,
+pub(super) struct LogFile {
+    pub file: File,
     size: u64,
+    gzip: bool,
+}
+
+impl LogFile {
+    pub fn open(path: &Path, gzip: bool) -> io::Result<Option<Self>> {
+        let Some(file) = open_regular(path, false)? else {
+            return Ok(None);
+        };
+        let size = file.metadata()?.len();
+        Ok(Some(Self { file, size, gzip }))
+    }
+
+    pub fn visit<const REVERSE: bool>(
+        self,
+        visit: &mut impl FnMut(Entry) -> io::Result<bool>,
+    ) -> io::Result<bool> {
+        if self.gzip {
+            let decoder = GzDecoder::new(self.file.take(self.size));
+            if REVERSE {
+                let mut contents = Vec::new();
+                decoder.take(MAX_RAW + 1).read_to_end(&mut contents)?;
+                let size = contents.len() as u64;
+                if size > MAX_RAW {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Web log archive exceeds uncompressed limit",
+                    ));
+                }
+                scan_reverse(Cursor::new(contents), size, visit)
+            } else {
+                scan_lines(
+                    BufReader::with_capacity(BLOCK, decoder.take(MAX_RAW)),
+                    visit,
+                )
+            }
+        } else if REVERSE {
+            scan_reverse(self.file, self.size, visit)
+        } else {
+            scan_forward(self.file, self.size, visit)
+        }
+    }
 }
 
 enum Row {
@@ -242,11 +304,7 @@ impl Snapshot {
             visit(Row::File(entry))
         };
         for file in self.files {
-            let proceed = if REVERSE {
-                scan_reverse(file, &mut merge)?
-            } else {
-                scan_forward(file.file, file.size, &mut merge)?
-            };
+            let proceed = file.visit::<REVERSE>(&mut merge)?;
             if !proceed {
                 return Ok(());
             }
@@ -271,6 +329,13 @@ pub(super) fn scan_forward(
     if start != 0 {
         reader.skip_until(b'\n')?;
     }
+    scan_lines(reader, &mut visit)
+}
+
+fn scan_lines(
+    mut reader: impl BufRead,
+    visit: &mut impl FnMut(Entry) -> io::Result<bool>,
+) -> io::Result<bool> {
     let mut line = Vec::new();
     loop {
         line.clear();
@@ -285,27 +350,28 @@ pub(super) fn scan_forward(
             if line.last() != Some(&b'\n') {
                 reader.skip_until(b'\n')?;
             }
-        } else if !decode(&line, &mut visit)? {
+        } else if !decode(&line, visit)? {
             return Ok(false);
         }
     }
 }
 
 fn scan_reverse(
-    mut log: LogFile,
+    mut file: impl Read + Seek,
+    size: u64,
     visit: &mut impl FnMut(Entry) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let mut block = vec![0; BLOCK];
     let mut carry = Vec::new();
     let mut joined = Vec::new();
     let mut oversize = false;
-    let mut end = log.size;
+    let mut end = size;
     let start = end.saturating_sub(MAX_FILE_BYTES);
     while end > start {
         let size = (end - start).min(BLOCK as u64) as usize;
         end -= size as u64;
-        log.file.seek(SeekFrom::Start(end))?;
-        log.file.read_exact(&mut block[..size])?;
+        file.seek(SeekFrom::Start(end))?;
+        file.read_exact(&mut block[..size])?;
         let mut pieces = block[..size].rsplit(|&byte| byte == b'\n');
         let right = pieces.next().expect("nonempty block");
         joined.clear();
