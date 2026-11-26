@@ -1,5 +1,13 @@
 [workspace]
-members = ["crates/fg-admin", "crates/fg-auth", "crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
+members = [
+    "crates/fg-admin",
+    "crates/fg-auth",
+    "crates/fg-config",
+    "crates/fg-core",
+    "crates/fg-gateway",
+    "crates/fg-logging",
+    "crates/fg-testkit"
+]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
 
@@ -7,18 +15,19 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+authors = ["houseme <housemecn@gmail.com>"]
 
 # All dependency versions are managed here. Member manifests only reference
 # entries with `workspace = true` and may add features on top of them.
 [workspace.dependencies]
 # Internal crates
-fg-admin = { path = "crates/fg-admin" }
-fg-auth = { path = "crates/fg-auth" }
-fg-config = { path = "crates/fg-config" }
-fg-core = { path = "crates/fg-core" }
-fg-gateway = { path = "crates/fg-gateway" }
-fg-logging = { path = "crates/fg-logging" }
-fg-testkit = { path = "crates/fg-testkit" }
+fg-admin = { path = "crates/fg-admin", version = "0.1.0" }
+fg-auth = { path = "crates/fg-auth", version = "0.1.0" }
+fg-config = { path = "crates/fg-config", version = "0.1.0" }
+fg-core = { path = "crates/fg-core", version = "0.1.0" }
+fg-gateway = { path = "crates/fg-gateway", version = "0.1.0" }
+fg-logging = { path = "crates/fg-logging", version = "0.1.0" }
+fg-testkit = { path = "crates/fg-testkit", version = "0.1.0" }
 # External crates
 anyhow = "1"
 arc-swap = "1"
@@ -79,6 +88,7 @@ name = "ferrumgate"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
