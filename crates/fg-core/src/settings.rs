@@ -25,13 +25,14 @@ pub const DEFAULT_ACCESS_LOG_MB: u64 = 32;
 
 const DENY_STATUSES: [i32; 7] = [DEFAULT_DENY_STATUS, 403, 404, 410, 500, 502, 503];
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize)]
 pub struct SettingError {
     pub field: &'static str,
     pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub enum Effect {
     Immediate,
@@ -55,6 +56,16 @@ macro_rules! setting_effects {
             }
         }
 
+        pub fn effects() -> impl Iterator<Item = (&'static str, Effect)> {
+            [$($(($name, Effect::$effect),)+)+].into_iter()
+        }
+
+        pub fn changed_with_effect(&self, old: &Self, effect: Effect) -> bool {
+            match effect {
+                $(Effect::$effect => $(self.$field != old.$field)||+,)+
+            }
+        }
+
         /// Classifies differences between normalized settings using persisted JSON field names.
         pub fn changes_from(&self, old: &Self) -> Vec<SettingChange> {
             [$($((self.$field != old.$field, SettingChange {
@@ -71,6 +82,7 @@ macro_rules! setting_effects {
 /// The persisted `ferrumgate.json` settings. Zero-valued limits request runtime defaults.
 /// Contains credentials. Management responses must use a redacted view.
 #[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Settings {
     pub listen: String,
@@ -123,6 +135,7 @@ pub struct Settings {
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThirdLoginSettings {
     pub enable: bool,
@@ -135,6 +148,7 @@ pub struct ThirdLoginSettings {
 }
 
 #[derive(Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct IdentityProviderSettings {
     pub key: String,

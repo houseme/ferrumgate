@@ -1030,6 +1030,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 203 项工作区测试和 9 项本机 Pebble ACME 测试。12 项设置测试覆盖监听地址、访问限制、数值边界、时区、DNS 与代理、日志路径、第三方登录配置和模块依赖。用例验证单次返回多个字段错误且不回显秘密，并核对设置生效方式与差异列表一致。依赖沿用锁定版本 `ipnet 2.12.2`、`url 2.5.9` 和 `jiff-tzdb 1.0.0`。真实管理 API、目录可写性与运行时更新在步骤 5～6 接入。[时区数据库](https://github.com/BurntSushi/jiff/tree/master/crates/jiff-tzdb)
 
+### WP-07 设置管理 API 与持久化
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin settings::
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 204 项工作区测试和 9 项本机 Pebble ACME 测试。回环 HTTP 测试覆盖三个设置接口的管理员会话权限、响应脱敏和 `no-store`、完整表单往返、错误字段聚合、严格 JSON、日志目录探测和重启提示。校验失败与文件替换失败保留原快照，保存成功后订阅者收到新快照，重复保存相同设置不会重复通知。当前验证路径为独立管理路由，后续接入 `fgate serve`、会话时长写入和运行期消费者。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

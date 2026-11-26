@@ -11,7 +11,7 @@ arc-swap = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 fg-auth = { path = "../fg-auth", features = ["schema"] }
 fg-config = { path = "../fg-config" }
-fg-core = { path = "../fg-core" }
+fg-core = { path = "../fg-core", features = ["schema"] }
 fg-logging = { path = "../fg-logging", features = ["schema"] }
 flate2 = "1"
 getrandom = "0.4"
@@ -25,6 +25,7 @@ tempfile.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-stream = { version = "0.1", default-features = false }
+tracing.workspace = true
 url = "2"
 
 [dev-dependencies]

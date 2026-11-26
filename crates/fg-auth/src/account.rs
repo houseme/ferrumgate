@@ -192,6 +192,10 @@ impl AccountManager {
         self.limiter.configure(limits)
     }
 
+    pub fn session_hours(&self) -> u64 {
+        self.snapshot.load().ttl.as_secs() / 3600
+    }
+
     pub fn with_login_events(mut self, events: EventBus) -> Self {
         self.login_events = Some(events);
         self

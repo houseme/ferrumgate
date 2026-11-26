@@ -83,7 +83,7 @@ pub(super) struct Snapshot {
     key: hmac::Key,
     version: String,
     readonly_versions: HashMap<String, String>,
-    ttl: Duration,
+    pub(super) ttl: Duration,
     revoked: HashSet<String>,
 }
 

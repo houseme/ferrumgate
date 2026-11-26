@@ -38,6 +38,8 @@ mod logs;
 mod models;
 #[path = "admin/public_routes.rs"]
 mod public_routes;
+#[path = "admin/settings.rs"]
+mod settings;
 #[path = "admin/tokens.rs"]
 mod tokens;
 #[path = "admin/transport.rs"]

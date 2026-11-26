@@ -16,6 +16,7 @@ mod response;
 mod router;
 pub mod scope;
 mod security_score;
+mod settings_api;
 mod token_routes;
 mod upload;
 
@@ -26,3 +27,4 @@ pub use localize::{Localizer, RequestLanguage, Translation};
 pub use models::RouteModels;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
 pub use security_score::SecurityExposure;
+pub use settings_api::SettingsState;

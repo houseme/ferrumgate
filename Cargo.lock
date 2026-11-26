@@ -1130,6 +1130,7 @@ dependencies = [
  "time",
  "tokio",
  "tokio-stream",
+ "tracing",
  "url",
  "webauthn-authenticator-rs",
 ]
@@ -1184,6 +1185,7 @@ dependencies = [
  "futures-util",
  "ipnet",
  "jiff-tzdb 1.0.0",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "tempfile",
