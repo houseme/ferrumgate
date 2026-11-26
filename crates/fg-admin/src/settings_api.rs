@@ -6,14 +6,14 @@ use axum::{
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use fg_auth::AccountManager;
+use fg_auth::{AccountManager, MAX_SESSION_HOURS};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::{
     registry::{CATALOG, Registry},
     settings::{Effect, Settings},
 };
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, watch};
 
 use crate::{
@@ -91,6 +91,10 @@ impl SettingsState {
         self.current.subscribe()
     }
 
+    pub fn snapshot(&self) -> Arc<Settings> {
+        self.current.borrow().clone()
+    }
+
     fn view(&self, current: &Settings, accounts: &AccountManager) -> SettingsView {
         let mut settings = current.clone();
         for provider in &mut settings.third_login.providers {
@@ -108,8 +112,15 @@ impl SettingsState {
         }
     }
 
-    fn save(&self, mut next: Settings, accounts: &AccountManager) -> Response {
-        let old = self.current.borrow().clone();
+    fn save(&self, mut next: Settings, session_hours: u64, accounts: &AccountManager) -> Response {
+        if session_hours > MAX_SESSION_HOURS && session_hours != accounts.session_hours() {
+            return ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "sessionHours must be zero or between 1 and 8760",
+            )
+            .into_response();
+        }
+        let old = self.snapshot();
         next.legacy_api_token.clear();
         next.ui_language.clone_from(&old.ui_language);
         self.registry
@@ -144,23 +155,38 @@ impl SettingsState {
             )
             .into_response();
         }
-        if next == *old {
-            return Json(self.view(&old, accounts)).into_response();
-        }
-        let Ok(mut bytes) = serde_json::to_vec_pretty(&next) else {
-            return ApiError::internal().into_response();
+        let changed = next != *old;
+        let next = if changed {
+            let Ok(mut bytes) = serde_json::to_vec_pretty(&next) else {
+                return ApiError::internal().into_response();
+            };
+            bytes.push(b'\n');
+            let saved = self.store.write_raw(FILE, &bytes);
+            let next = Arc::new(next);
+            // A directory sync error can occur after the new file becomes visible.
+            if saved.is_ok() || self.store.load_raw(FILE).ok().flatten().as_deref() == Some(&bytes)
+            {
+                self.current.send_replace(next.clone());
+            }
+            if saved.is_err() {
+                return ApiError::internal().into_response();
+            }
+            next
+        } else {
+            old
         };
-        bytes.push(b'\n');
-        let saved = self.store.write_raw(FILE, &bytes);
-        let next = Arc::new(next);
-        // A directory sync error can occur after the new file becomes visible.
-        if saved.is_ok() || self.store.load_raw(FILE).ok().flatten().as_deref() == Some(&bytes) {
-            self.current.send_replace(next.clone());
+        let change_hours = session_hours != 0 && session_hours != accounts.session_hours();
+        if change_hours && accounts.set_session_hours(session_hours).is_err() {
+            let message = if changed {
+                "global settings saved; sessionHours update failed"
+            } else {
+                "sessionHours update failed"
+            };
+            return ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, message).into_response();
         }
-        if saved.is_err() {
-            return ApiError::internal().into_response();
+        if changed || change_hours {
+            tracing::info!(target: "fg_core::settings", "global settings updated");
         }
-        tracing::info!(target: "fg_core::settings", "global settings updated");
         Json(self.view(&next, accounts)).into_response()
     }
 }
@@ -176,7 +202,7 @@ impl ApiRouter {
             "Get global settings",
             RouteModels::default().response::<SettingsView>(),
             move || async move {
-                let settings = get.current.borrow().clone();
+                let settings = get.snapshot();
                 Json(get.view(&settings, &get_accounts))
             },
         )
@@ -200,7 +226,10 @@ impl ApiRouter {
                         let Ok(input) = item_json::decode(&bytes, VIEW_ONLY) else {
                             return invalid_json().into_response();
                         };
-                        put.save(input, &accounts)
+                        let Ok(session) = serde_json::from_slice::<SessionUpdate>(&bytes) else {
+                            return invalid_json().into_response();
+                        };
+                        put.save(input, session.session_hours, &accounts)
                     },
                 )
                 .await
@@ -212,7 +241,7 @@ impl ApiRouter {
             "Get third-party login client secrets",
             RouteModels::default().response::<BTreeMap<String, String>>(),
             move || async move {
-                let settings = state.current.borrow().clone();
+                let settings = state.snapshot();
                 Json(
                     settings
                         .third_login
@@ -224,6 +253,12 @@ impl ApiRouter {
             },
         )
     }
+}
+
+#[derive(Deserialize)]
+struct SessionUpdate {
+    #[serde(default, rename = "sessionHours")]
+    session_hours: u64,
 }
 
 #[derive(Serialize, JsonSchema)]

@@ -1043,6 +1043,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 204 项工作区测试和 9 项本机 Pebble ACME 测试。回环 HTTP 测试覆盖三个设置接口的管理员会话权限、响应脱敏和 `no-store`、完整表单往返、错误字段聚合、严格 JSON、日志目录探测和重启提示。校验失败与文件替换失败保留原快照，保存成功后订阅者收到新快照，重复保存相同设置不会重复通知。当前验证路径为独立管理路由，后续接入 `fgate serve`、会话时长写入和运行期消费者。
 
+### WP-07 真实启动与运行时设置
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin settings::
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway admin::
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 205 项工作区测试和 9 项本机 Pebble ACME 测试。真实进程用例覆盖命令行覆盖保存地址、运行中切换日志级别、登录限流即时更新、保存后原模块继续服务、重启应用保存地址及模块开关、会话时长持久化和无效设置拒绝启动。回环 API 用例分别阻断设置文件和账号文件的写入，验证账号更新失败时可重试，已保存的全局设置与读回快照一致。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

@@ -14,6 +14,7 @@ use time::OffsetDateTime;
 const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 const UNKNOWN_WINDOW: Duration = Duration::from_secs(10 * 60);
 const MAX_LOCK: Duration = Duration::from_secs(24 * 3600);
+const MAX_BASE_LOCK: Duration = Duration::from_secs(7 * 24 * 3600);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const KNOWN_SAVE_INTERVAL: Duration = Duration::from_secs(12 * 3600);
 const MAX_ATTEMPTS: u32 = 4;
@@ -127,7 +128,7 @@ impl LoginLimiter {
             "login failure limit must be positive"
         );
         ensure!(
-            !limits.lock_duration.is_zero() && limits.lock_duration <= MAX_LOCK,
+            !limits.lock_duration.is_zero() && limits.lock_duration <= MAX_BASE_LOCK,
             "invalid login lock duration"
         );
         ensure!(
@@ -228,7 +229,7 @@ impl Source {
             .filter(|(time, _)| now.duration_since(*time) <= MAX_LOCK)
             .map_or(1, |(_, count)| count.saturating_add(1));
         let scale = 1_u32.checked_shl(count - 1).unwrap_or(u32::MAX);
-        let duration = base.saturating_mul(scale).min(MAX_LOCK);
+        let duration = base.saturating_mul(scale).min(MAX_LOCK.max(base));
         self.strike = Some((now, count));
         self.locked_until = now + duration;
         self.started = now;

@@ -105,6 +105,15 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
         server.call("PUT", PATH, &edit, typo.to_string()).await?.0,
         StatusCode::BAD_REQUEST
     );
+    let mut bad_hours = view.clone();
+    bad_hours["sessionHours"] = json!(8761);
+    assert_eq!(
+        server
+            .call("PUT", PATH, &edit, bad_hours.to_string())
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
     assert_eq!(
         server
             .call(
@@ -168,10 +177,12 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
     );
     assert!(!updates.has_changed()?);
     let target = store.dir().join("ferrumgate.json");
-    fs::rename(&target, store.dir().join("prior.json"))?;
+    let original = store.dir().join("prior.json");
+    fs::rename(&target, &original)?;
     fs::create_dir(&target)?;
     let mut failing = saved;
     failing["logLevel"] = json!("debug");
+    failing["sessionHours"] = json!(48);
     assert_eq!(
         server
             .call("PUT", PATH, &edit, failing.to_string())
@@ -180,9 +191,32 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert!(!updates.has_changed()?);
+    let current = server.call("GET", PATH, &auth, Body::empty()).await?.2;
+    assert_eq!(current["logLevel"], "warn");
+    assert_eq!(current["sessionHours"], 72);
+    fs::remove_dir(&target)?;
+    fs::rename(original, target)?;
+    let account = store.dir().join("account.json");
+    let original = store.dir().join("prior-account.json");
+    fs::rename(&account, &original)?;
+    fs::create_dir(&account)?;
+    let (status, _, error) = server.call("PUT", PATH, &edit, failing.to_string()).await?;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
-        server.call("GET", PATH, &auth, Body::empty()).await?.2["logLevel"],
-        "warn"
+        error["error"],
+        "global settings saved; sessionHours update failed"
     );
+    assert!(updates.has_changed()?);
+    assert_eq!(updates.borrow_and_update().log_level, "debug");
+    assert_eq!(
+        server.call("GET", PATH, &auth, Body::empty()).await?.2["sessionHours"],
+        72
+    );
+    fs::remove_dir(&account)?;
+    fs::rename(original, account)?;
+    let (status, _, saved) = server.call("PUT", PATH, &edit, failing.to_string()).await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["sessionHours"], 48);
+    assert!(!updates.has_changed()?);
     Ok(())
 }

@@ -24,6 +24,7 @@ use crate::{
 };
 
 pub(super) const ACCOUNT: &str = "account";
+pub const MAX_SESSION_HOURS: u64 = 24 * 365;
 const LEGACY_DEFAULT_PASSWORD: &str = "gately.cn";
 pub(super) const MAX_USERNAME_BYTES: usize = 256;
 pub(super) const MAX_REVOKED: usize = 1024;
@@ -194,6 +195,21 @@ impl AccountManager {
 
     pub fn session_hours(&self) -> u64 {
         self.snapshot.load().ttl.as_secs() / 3600
+    }
+
+    pub fn set_session_hours(&self, hours: u64) -> Result<()> {
+        ensure!(
+            (1..=MAX_SESSION_HOURS).contains(&hours),
+            "invalid session lifetime"
+        );
+        let _writer = self.writer.lock().expect("account writer poisoned");
+        let current = self.snapshot.load();
+        if current.ttl.as_secs() / 3600 == hours {
+            return Ok(());
+        }
+        let mut account = current.account.clone();
+        account.token_ttl_hours = hours as i64;
+        self.save(account)
     }
 
     pub fn with_login_events(mut self, events: EventBus) -> Self {

@@ -12,7 +12,7 @@ pub mod token;
 mod totp;
 
 pub use account::SecurityFacts;
-pub use account::{AccountManager, CredentialChangeRejected};
+pub use account::{AccountManager, CredentialChangeRejected, MAX_SESSION_HOURS};
 pub use lockout::{LoginError, LoginLimits};
 pub use password::{PasswordIssue, check_password_strength};
 pub use readonly::{ReadonlyUserInfo, ReadonlyUserNotFound};

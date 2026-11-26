@@ -25,7 +25,7 @@ use crate::{
     web::Web,
 };
 
-pub(crate) const REGISTRY: Registry = Registry::new(&[L4::ID, Certificates::ID, Web::ID]);
+pub const REGISTRY: Registry = Registry::new(&[L4::ID, Certificates::ID, Web::ID]);
 
 pub(crate) struct Generation {
     pub proxy: Proxy,
@@ -50,7 +50,7 @@ impl Generation {
 
 /// Run the configured data plane until a process shutdown signal arrives.
 pub async fn serve(path: PathBuf) -> Result<()> {
-    serve_gateway(path, None).await
+    serve_gateway(path, &[], None).await
 }
 
 pub struct ManagementReady {
@@ -63,16 +63,27 @@ pub async fn serve_with_ready(
     path: PathBuf,
     ready: oneshot::Sender<ManagementReady>,
 ) -> Result<()> {
-    serve_gateway(path, Some(ready)).await
+    serve_with_management(path, &[], ready).await
+}
+
+pub async fn serve_with_management(
+    path: PathBuf,
+    disabled: &[String],
+    ready: oneshot::Sender<ManagementReady>,
+) -> Result<()> {
+    serve_gateway(path, disabled, Some(ready)).await
 }
 
 async fn serve_gateway(
     path: PathBuf,
+    disabled: &[String],
     ready: Option<oneshot::Sender<ManagementReady>>,
 ) -> Result<()> {
     let managed = Arc::new(Managed::default());
     let config = config::load(&path, managed.clone()).await?;
-    let enabled = REGISTRY.resolve_enabled(&config.disabled_modules, false);
+    let mut disabled_at_start = config.disabled_modules.clone();
+    disabled_at_start.extend_from_slice(disabled);
+    let enabled = REGISTRY.resolve_enabled(&disabled_at_start, false);
     for module in &enabled.restored {
         tracing::warn!(module = module.id, required_by = ?module.by, "required module kept enabled");
     }

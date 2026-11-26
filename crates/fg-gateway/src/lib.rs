@@ -27,7 +27,7 @@ mod websocket;
 
 use std::path::Path;
 
-pub use server::{ManagementReady, serve, serve_with_ready};
+pub use server::{ManagementReady, REGISTRY, serve, serve_with_management, serve_with_ready};
 
 /// Load and validate the gateway configuration and referenced TLS material.
 pub async fn check_config(path: &Path) -> anyhow::Result<()> {

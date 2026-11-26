@@ -10,7 +10,9 @@ use std::{
 
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    filter::LevelFilter, layer::SubscriberExt, reload, util::SubscriberInitExt,
+};
 
 #[derive(Parser)]
 #[command(name = "fgate", version, about = "FerrumGate reverse proxy")]
@@ -32,8 +34,9 @@ enum Command {
     Serve {
         #[arg(long)]
         config: PathBuf,
-        #[arg(long, default_value = "info")]
-        log_level: tracing::Level,
+        /// Override the runtime log level.
+        #[arg(long)]
+        log_level: Option<tracing::Level>,
         /// Persist runtime logs to an absolute directory.
         #[arg(long)]
         log_dir: Option<PathBuf>,
@@ -98,8 +101,14 @@ async fn main() -> Result<()> {
             if let Some(dir) = log_dir {
                 fg_core::fsperm::protect(&dir.canonicalize()?);
             }
+            let fallback = std::env::var("FERRUMGATE_LOG_LEVEL")
+                .ok()
+                .and_then(|level| level.parse().ok())
+                .unwrap_or(tracing::Level::INFO);
+            let (filter, reload) =
+                reload::Layer::new(LevelFilter::from_level(log_level.unwrap_or(fallback)));
             tracing_subscriber::registry()
-                .with(LevelFilter::from_level(log_level))
+                .with(filter)
                 .with(logs.layer())
                 .with(
                     tracing_subscriber::fmt::layer()
@@ -107,7 +116,15 @@ async fn main() -> Result<()> {
                         .with_ansi(false),
                 )
                 .try_init()?;
-            let result = bootstrap::serve(config, admin, logs.handle()).await;
+            let result = bootstrap::serve(config, admin, logs.handle(), |level| {
+                let level = log_level.or_else(|| level.parse().ok()).unwrap_or(fallback);
+                let level = LevelFilter::from_level(level);
+                if reload.with_current(|current| *current != level)? {
+                    reload.reload(level)?;
+                }
+                Ok(())
+            })
+            .await;
             let _ = logs.shutdown(Duration::from_secs(3));
             result
         }
