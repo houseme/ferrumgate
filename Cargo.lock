@@ -1183,6 +1183,7 @@ dependencies = [
  "arc-swap",
  "futures-util",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",

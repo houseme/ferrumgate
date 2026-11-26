@@ -1004,6 +1004,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 191 项工作区测试和 9 项本机 Pebble ACME 测试。真实进程用例覆盖签发后使用、权限不足返回 403、无效凭据返回 401、遗留令牌及会话 Bearer 兼容、以 TCP 对端记录来源，以及正常退出后恢复最近使用记录。维护用例验证达到刷盘间隔后，即使没有新请求也会写盘。本机 curl 演练确认日志来源接口返回 200、令牌管理接口返回 403、收到 SIGTERM 后保存最近使用记录。可信代理地址解析、持久化审计和备份分别随 WP-14、WP-08 和 WP-70 验收。
 
+### WP-07 全局设置模型与规范化
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-core --test settings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 197 项工作区测试和 9 项本机 Pebble ACME 测试。六项模型用例覆盖空配置、上游 `442162e` 的 JSON 字段与 `null` 列表、旧字段省略、未知及重复字段拒绝、规范化幂等性与自定义状态码保留。字段校验和生效方式判定在步骤 3～4 接入，随后装配管理接口和进程启动路径。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
