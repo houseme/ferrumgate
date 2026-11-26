@@ -1,4 +1,6 @@
 schema_version = 1
+# 可选，列出启动时关闭的模块。此构建包含 portforward、ssl 和 webservice。
+# disabled_modules = ["portforward"]
 
 [server]
 listen = "127.0.0.1:8080"

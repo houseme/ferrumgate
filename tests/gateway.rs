@@ -13,6 +13,8 @@ mod http;
 mod http2;
 #[path = "gateway/metrics.rs"]
 mod metrics;
+#[path = "gateway/modules.rs"]
+mod modules;
 #[path = "gateway/site.rs"]
 mod site;
 #[path = "gateway/tcp.rs"]

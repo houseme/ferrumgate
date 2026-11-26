@@ -33,6 +33,8 @@ const MAX_BACKENDS: usize = 2048;
 struct RawConfig {
     schema_version: u32,
     #[serde(default)]
+    disabled_modules: Vec<String>,
+    #[serde(default)]
     server: Settings,
     #[serde(default)]
     routes: Vec<RawRoute>,
@@ -97,6 +99,7 @@ struct RawRoute {
 }
 
 pub(crate) struct Config {
+    pub disabled_modules: Vec<String>,
     pub settings: Settings,
     pub routes: Routes,
     pub tls: Tls,
@@ -182,6 +185,9 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         anyhow::anyhow!("invalid configuration schema or TOML near line {line}")
     })?;
     ensure!(raw.schema_version == 1, "schema_version must be 1");
+    let mut disabled_modules = raw.disabled_modules;
+    disabled_modules.sort_unstable();
+    disabled_modules.dedup();
     let settings = raw.server;
     ensure!(
         (1..=65_535).contains(&settings.max_connections),
@@ -385,6 +391,7 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     )
     .await?;
     Ok(Config {
+        disabled_modules,
         tls,
         acme,
         tcp_forward,

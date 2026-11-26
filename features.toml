@@ -1,0 +1,266 @@
+# 模块元数据取自 Gately 442162e4d0b64df119bc5fe6469a088adee844c4（Apache-2.0）。
+# 运行时依赖按该版本的 internal/modules/registry 注册代码核对。
+
+[[module]]
+id = "portforward"
+group = "network"
+core = true
+requires = []
+title = { zh_cn = "端口转发", zh_tw = "連接埠轉發", en = "Port Forwarding" }
+description = { zh_cn = "TCP / UDP 端口转发与负载均衡", zh_tw = "TCP / UDP 連接埠轉發與負載平衡", en = "TCP / UDP port forwarding and load balancing" }
+
+[[module]]
+id = "protoroute"
+group = "network"
+core = false
+requires = []
+tag = "no_protoroute"
+size_kb = 128
+title = { zh_cn = "协议分流", zh_tw = "協定分流", en = "Protocol Routing" }
+description = { zh_cn = "按协议、SNI 与 Host 共用端口，替代 sslh 与 haproxy SNI 分流", zh_tw = "依協定、SNI 與 Host 共用連接埠，取代 sslh 與 haproxy SNI 分流", en = "Share ports by protocol, SNI and Host, replacing sslh and haproxy SNI routing" }
+
+[[module]]
+id = "ddns"
+group = "network"
+core = false
+requires = []
+tag = "no_ddns"
+size_kb = 192
+title = { zh_cn = "动态域名", zh_tw = "動態網域", en = "Dynamic DNS" }
+description = { zh_cn = "公网 IP 变化时自动更新解析", zh_tw = "公網 IP 變動時自動更新解析", en = "Update DNS records automatically when your public IP changes" }
+
+[[module]]
+id = "stun"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_stun"
+size_kb = 256
+title = { zh_cn = "STUN 穿透", zh_tw = "STUN 穿透", en = "STUN Traversal" }
+description = { zh_cn = "NAT1 网络下无公网 IP 穿透", zh_tw = "NAT1 網路下無公網 IP 穿透", en = "Reach services behind NAT1 without a public IP" }
+
+[[module]]
+id = "tailscale"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_tailscale"
+size_kb = 0
+title = { zh_cn = "Tailscale", zh_tw = "Tailscale", en = "Tailscale" }
+description = { zh_cn = "加入 Tailscale / Headscale 组网", zh_tw = "加入 Tailscale / Headscale 組網", en = "Join a Tailscale / Headscale network" }
+
+[[module]]
+id = "netbird"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_netbird"
+size_kb = 64
+title = { zh_cn = "NetBird", zh_tw = "NetBird", en = "NetBird" }
+description = { zh_cn = "加入 NetBird 官方云或自建组网", zh_tw = "加入 NetBird 官方雲或自建組網", en = "Join a NetBird network (cloud or self-hosted)" }
+
+[[module]]
+id = "easytier"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_easytier"
+size_kb = 64
+title = { zh_cn = "EasyTier", zh_tw = "EasyTier", en = "EasyTier" }
+description = { zh_cn = "加入 EasyTier 组网，P2P 打洞优先，支持自建中继", zh_tw = "加入 EasyTier 組網，P2P 打洞優先，支援自建中繼", en = "Join an EasyTier mesh network (P2P first, self-hosted relays)" }
+
+[[module]]
+id = "frp"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_frp"
+size_kb = 384
+title = { zh_cn = "frp", zh_tw = "frp", en = "frp" }
+description = { zh_cn = "frpc / frps 内网穿透", zh_tw = "frpc / frps 內網穿透", en = "frpc / frps NAT traversal" }
+
+[[module]]
+id = "cloudflared"
+group = "tunnel"
+core = false
+requires = []
+tag = "no_cloudflared"
+size_kb = 128
+title = { zh_cn = "Cloudflare 隧道", zh_tw = "Cloudflare 通道", en = "Cloudflare Tunnel" }
+description = { zh_cn = "无需公网 IP 发布内网服务", zh_tw = "無需公網 IP 發佈內網服務", en = "Publish internal services without a public IP" }
+
+[[module]]
+id = "ssl"
+group = "web"
+core = true
+requires = []
+title = { zh_cn = "SSL 证书", zh_tw = "SSL 憑證", en = "SSL Certificates" }
+description = { zh_cn = "ACME 自动申请与续签", zh_tw = "ACME 自動申請與續簽", en = "Automatic ACME issuance and renewal" }
+
+[[module]]
+id = "waf"
+group = "web"
+core = false
+requires = []
+tag = "no_waf"
+size_kb = 7296
+title = { zh_cn = "WAF 防火墙", zh_tw = "WAF 防火牆", en = "WAF Firewall" }
+description = { zh_cn = "基于 OWASP CRS 的应用防火墙", zh_tw = "基於 OWASP CRS 的應用程式防火牆", en = "Web application firewall based on OWASP CRS" }
+
+[[module]]
+id = "webservice"
+group = "web"
+core = true
+requires = ["ssl","waf"]
+title = { zh_cn = "Web 服务", zh_tw = "Web 服務", en = "Web Services" }
+description = { zh_cn = "反向代理、重定向与静态站点", zh_tw = "反向代理、重新導向與靜態網站", en = "Reverse proxy, redirects and static sites" }
+
+[[module]]
+id = "guard"
+group = "network"
+core = false
+requires = []
+tag = "no_guard"
+size_kb = 256
+title = { zh_cn = "入侵防护", zh_tw = "入侵防護", en = "Intrusion Prevention" }
+description = { zh_cn = "封禁恶意 IP，联动系统防火墙", zh_tw = "封鎖惡意 IP，聯動系統防火牆", en = "Ban malicious IPs at the system firewall" }
+
+[[module]]
+id = "knock"
+group = "network"
+core = false
+requires = []
+tag = "no_knock"
+size_kb = 96
+title = { zh_cn = "端口敲门", zh_tw = "連接埠敲門", en = "Port Knocking" }
+description = { zh_cn = "fwknop 兼容的单包敲门，按需放行 SSH 等端口", zh_tw = "相容 fwknop 的單封包敲門，按需放行 SSH 等連接埠", en = "fwknop-compatible single packet knocking to open SSH and other ports on demand" }
+
+[[module]]
+id = "wol"
+group = "tools"
+core = false
+requires = []
+tag = "no_wol"
+size_kb = 128
+title = { zh_cn = "网络唤醒", zh_tw = "網路喚醒", en = "Wake-on-LAN" }
+description = { zh_cn = "远程唤醒局域网设备", zh_tw = "遠端喚醒區域網路裝置", en = "Wake up devices on your LAN remotely" }
+
+[[module]]
+id = "webterminal"
+group = "tools"
+core = false
+requires = []
+tag = "no_webterminal"
+size_kb = 1088
+title = { zh_cn = "Web 终端", zh_tw = "Web 終端機", en = "Web Terminal" }
+description = { zh_cn = "浏览器中的 SSH 与本机 Shell", zh_tw = "瀏覽器中的 SSH 與本機 Shell", en = "SSH and local shell in your browser" }
+
+[[module]]
+id = "cron"
+group = "tools"
+core = false
+requires = []
+tag = "no_cron"
+size_kb = 128
+title = { zh_cn = "计划任务", zh_tw = "排程工作", en = "Scheduled Tasks" }
+description = { zh_cn = "定时执行命令或 HTTP 请求", zh_tw = "定時執行命令或 HTTP 請求", en = "Run commands or HTTP requests on a schedule" }
+
+[[module]]
+id = "docker"
+group = "tools"
+core = false
+requires = []
+tag = "no_docker"
+size_kb = 512
+title = { zh_cn = "Docker 管理", zh_tw = "Docker 管理", en = "Docker Management" }
+description = { zh_cn = "容器管理与镜像更新", zh_tw = "容器管理與映像檔更新", en = "Container management and image updates" }
+
+[[module]]
+id = "webdav"
+group = "storage"
+core = false
+requires = ["ssl"]
+tag = "no_webdav"
+size_kb = 128
+title = { zh_cn = "WebDAV 服务", zh_tw = "WebDAV 服務", en = "WebDAV Service" }
+description = { zh_cn = "WebDAV 文件共享服务", zh_tw = "WebDAV 檔案分享服務", en = "WebDAV file sharing service" }
+
+[[module]]
+id = "ftp"
+group = "storage"
+core = false
+requires = ["ssl"]
+tag = "no_ftp"
+size_kb = 320
+title = { zh_cn = "FTP 服务", zh_tw = "FTP 服務", en = "FTP Service" }
+description = { zh_cn = "FTP / FTPS 文件共享服务", zh_tw = "FTP / FTPS 檔案分享服務", en = "FTP / FTPS file sharing service" }
+
+[[module]]
+id = "smb"
+group = "storage"
+core = false
+requires = []
+tag = "no_smb"
+size_kb = 832
+title = { zh_cn = "SMB 服务", zh_tw = "SMB 服務", en = "SMB Service" }
+description = { zh_cn = "SMB 文件共享服务", zh_tw = "SMB 檔案分享服務", en = "SMB file sharing service" }
+
+[[module]]
+id = "filebrowser"
+group = "storage"
+core = false
+requires = []
+tag = "no_filebrowser"
+size_kb = 128
+title = { zh_cn = "File Browser", zh_tw = "File Browser", en = "File Browser" }
+description = { zh_cn = "网页文件管理器，支持预览与分享", zh_tw = "網頁檔案管理器，支援預覽與分享", en = "Web file manager with previews and sharing" }
+
+[[module]]
+id = "storage"
+group = "storage"
+core = false
+requires = []
+tag = "no_storage"
+size_kb = 640
+title = { zh_cn = "存储挂载", zh_tw = "儲存掛載", en = "Storage Mounts" }
+description = { zh_cn = "挂载本地目录、远程 WebDAV 或 SMB 共享，在线管理文件", zh_tw = "掛載本機目錄、遠端 WebDAV 或 SMB 共用，線上管理檔案", en = "Mount local directories, remote WebDAV or SMB shares and manage files online" }
+
+[[module]]
+id = "notify"
+group = "system"
+core = false
+requires = []
+tag = "no_notify"
+size_kb = 256
+title = { zh_cn = "通知中心", zh_tw = "通知中心", en = "Notifications" }
+description = { zh_cn = "事件推送到 Telegram、邮件、企业微信等", zh_tw = "事件推送到 Telegram、電子郵件、企業微信等", en = "Push events to Telegram, email, WeCom and more" }
+
+[[module]]
+id = "perf"
+group = "system"
+core = false
+requires = []
+tag = "no_perf"
+size_kb = 128
+title = { zh_cn = "性能监控", zh_tw = "效能監控", en = "Performance" }
+description = { zh_cn = "性能趋势与阈值告警", zh_tw = "效能趨勢與門檻告警", en = "Performance trends and threshold alerts" }
+
+[[module]]
+id = "nettools"
+group = "tools"
+core = false
+requires = []
+tag = "no_nettools"
+size_kb = 128
+title = { zh_cn = "网络诊断", zh_tw = "網路診斷", en = "Network Diagnostics" }
+description = { zh_cn = "Ping、路由追踪、端口探测、DNS 与局域网扫描", zh_tw = "Ping、路由追蹤、連接埠探測、DNS 與區域網路掃描", en = "Ping, traceroute, port probe, DNS and LAN scan" }
+
+[[module]]
+id = "backup"
+group = "storage"
+core = false
+requires = ["storage"]
+tag = "no_backup"
+size_kb = 128
+title = { zh_cn = "配置备份", zh_tw = "設定備份", en = "Configuration Backup" }
+description = { zh_cn = "定时把全部配置备份到本地或存储挂载", zh_tw = "依排程把全部設定備份到本機或儲存掛載", en = "Back up all configuration to local disk or mounted storage on a schedule" }

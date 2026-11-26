@@ -30,6 +30,8 @@ TLS 监听器通过 ALPN 提供 HTTP/2 和 HTTP/1.1。明文 HTTP/2 后端的路
 
 P0 已实现模块 JSON 配置存储。`fg-config` 负责原子读写，`fg-core` 登记受保护目录。部署继续使用 `fgate check/serve --config <TOML>`，配置目录入口由 WP-03 接入。[配置目录设计](docs/DESIGN.md#10-配置目录存储wp-00)
 
+`fgate serve` 按模块运行 Web、证书和 TCP/UDP 转发。TOML 顶层 `disabled_modules` 可在启动时关闭已编译模块。模块间依赖由 `fgate check` 校验。[模块框架](docs/DESIGN.md#11-模块框架与注册表wp-01)
+
 在根目录运行 `cargo test --workspace --locked`，可执行 Rust 单元测试和真实回环端到端测试。
 
 为代理路由添加 `[routes.health]` 可开启 HTTP 或 TCP 主动检查，探测按连续失败和成功次数摘除或恢复后端。[健康检查配置](docs/EXECUTION.md#主动健康检查)

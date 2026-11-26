@@ -8,7 +8,7 @@ use tokio::{
 
 use super::common::*;
 
-fn forwarding(listen: &str, targets: &[SocketAddr], options: &str) -> String {
+pub(super) fn forwarding(listen: &str, targets: &[SocketAddr], options: &str) -> String {
     let targets = targets
         .iter()
         .map(|target| format!("\"{target}\""))

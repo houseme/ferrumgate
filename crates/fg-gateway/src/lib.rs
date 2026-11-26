@@ -5,12 +5,14 @@
 mod acme;
 mod backend;
 mod cert_deploy;
+mod certs;
 mod config;
 mod dns01;
 mod domains;
 mod forward_metrics;
 mod forward_ports;
 mod health;
+mod l4;
 mod proxy;
 mod server;
 mod site;
@@ -20,6 +22,7 @@ mod static_files;
 mod tcp_forward;
 mod tls;
 mod udp_forward;
+mod web;
 mod websocket;
 
 use std::path::Path;
@@ -28,7 +31,6 @@ pub use server::serve;
 
 /// Load and validate the gateway configuration and referenced TLS material.
 pub async fn check_config(path: &Path) -> anyhow::Result<()> {
-    config::load(path, std::sync::Arc::new(acme::Managed::default()))
-        .await
-        .map(|_| ())
+    let config = config::load(path, std::sync::Arc::default()).await?;
+    server::REGISTRY.validate_disabled(&config.disabled_modules, false)
 }

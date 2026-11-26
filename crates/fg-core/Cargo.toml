@@ -7,6 +7,11 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[build-dependencies]
+serde.workspace = true
+toml = "1"
 
 [dev-dependencies]
 tempfile.workspace = true

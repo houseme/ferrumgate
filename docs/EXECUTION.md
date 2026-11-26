@@ -579,6 +579,22 @@ git diff --check
 
 2026-11-26 在 macOS arm64、Rust stable 1.100.0 上，上述检查通过。工作区默认套件通过 72 项，其中 9 项新增用例覆盖原始字节和 JSON 往返、相同内容保持 mtime、权限、非法名称、受保护目录、错误脱敏以及替换失败后的临时文件清理。9 项需本机 Pebble 的 ACME 测试单独运行并全部通过。Linux、Windows 和真实断电恢复留待对应环境验证。
 
+### WP-01 模块框架与注册表
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway --all-features acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway --no-default-features modules
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --all-features --test gateway modules
+git diff --check
+```
+
+2026-11-26 在 macOS arm64、Rust stable 1.100.0 上，默认套件通过 79 项，另有 9 项本机 Pebble ACME 用例全部通过。两种 Cargo feature 构建各通过 3 项模块回环用例，均包含当前三个核心模块。目录表在各次生成中的字节一致。Linux 和 Windows 留待对应环境验证。
+
+现有回环用例覆盖 SIGHUP 的 Web/TLS 和 TCP/UDP 更新，以及 SIGTERM 的正常排空。WP-01 新用例执行 `fgate serve`，通过占用 TCP 端口验证预绑定失败与关闭转发的行为，发送 SIGHUP 验证开关变更要求重启，并用持续打开的回环连接验证 SIGINT 排空超时会回收连接。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
