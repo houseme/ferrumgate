@@ -1,9 +1,28 @@
-use fg_core::settings::{
-    DEFAULT_ACCESS_LOG_DAYS, DEFAULT_ACCESS_LOG_MB, DEFAULT_CONFIRM_TIMEOUT_SECONDS,
-    DEFAULT_LOCK_MINUTES, DEFAULT_LOG_FILE_MB, DEFAULT_LOG_LEVEL, DEFAULT_LOG_LINES,
-    DEFAULT_LOGIN_GLOBAL_LIMIT, DEFAULT_MAX_LOGIN_FAILURES, Settings,
+use std::time::Duration;
+
+use fg_core::{
+    registry::Registry,
+    settings::{
+        DEFAULT_ACCESS_LOG_DAYS, DEFAULT_ACCESS_LOG_MB, DEFAULT_CONFIRM_TIMEOUT_SECONDS,
+        DEFAULT_LOCK_MINUTES, DEFAULT_LOG_FILE_MB, DEFAULT_LOG_LEVEL, DEFAULT_LOG_LINES,
+        DEFAULT_LOGIN_GLOBAL_LIMIT, DEFAULT_MAX_LOGIN_FAILURES, Effect, SettingChange, Settings,
+    },
 };
-use serde_json::{from_str, json, to_value};
+use serde_json::{Value, from_str, from_value, json, to_value};
+
+const REGISTRY: Registry = Registry::new(&["portforward", "ssl", "webservice"]);
+
+fn normalized(input: Value) -> Settings {
+    let mut settings: Settings = from_value(input).unwrap();
+    settings.normalize();
+    settings
+}
+
+fn rejected(input: Value, field: &str) {
+    let errors = normalized(input).validate(&REGISTRY).unwrap_err();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].field, field);
+}
 
 #[test]
 fn empty_settings_resolve_structural_defaults_and_preserve_limit_sentinels() {
@@ -164,4 +183,237 @@ fn normalizes_absolute_log_paths_and_retains_invalid_custom_status_for_validatio
     settings.deny_status = 0;
     settings.normalize();
     assert_eq!(settings.deny_status, 200);
+}
+
+#[test]
+fn validates_listener_addresses_and_dependencies() {
+    for listen in [":16680", ":0", "127.0.0.1:8080", "[::1]:8080", "[::]:443"] {
+        normalized(json!({"listen": listen}))
+            .validate(&REGISTRY)
+            .unwrap();
+    }
+    for listen in [
+        "localhost:8080",
+        "::1:8080",
+        "127.0.0.1",
+        ":65536",
+        ":+80",
+        ":",
+    ] {
+        rejected(json!({"listen": listen}), "listen");
+    }
+    rejected(json!({"httpsListen": "localhost:8443"}), "httpsListen");
+    rejected(
+        json!({"listen": ":443", "httpsListen": "0.0.0.0:443"}),
+        "httpsListen",
+    );
+    rejected(json!({"forceHTTPS": true}), "forceHTTPS");
+    normalized(json!({"forceHTTPS":true,"httpsListen":"[::1]:443"}))
+        .validate(&REGISTRY)
+        .unwrap();
+    rejected(
+        json!({"disabledModules":["not-a-module"]}),
+        "disabledModules",
+    );
+    rejected(json!({"disabledModules":["ssl"]}), "disabledModules");
+    rejected(
+        json!({"httpsListen":":443","disabledModules":["ssl","webservice"]}),
+        "disabledModules",
+    );
+    normalized(json!({"disabledModules":["ssl","webservice","waf"]}))
+        .validate(&REGISTRY)
+        .unwrap();
+}
+
+#[test]
+fn validates_management_access_and_response_settings() {
+    for safe_path in [
+        "/api",
+        "/api/path",
+        "/assets-foo",
+        "/ab",
+        "/秘密",
+        "/has space",
+        "/foo?x",
+        "/foo#x",
+        "/foo\nbar",
+    ] {
+        rejected(json!({"safePath": safe_path}), "safePath");
+    }
+    rejected(json!({"denyMode":"unknown"}), "denyMode");
+    rejected(json!({"denyMode":"custom","denyStatus":418}), "denyStatus");
+    rejected(json!({"denyPage":"a".repeat((64 << 10) + 1)}), "denyPage");
+    rejected(json!({"trustedProxies":["192.0.2.1/33"]}), "trustedProxies");
+    normalized(json!({
+        "safePath":"/入口处", "denyMode":"custom", "denyStatus":503,
+        "denyPage":"a".repeat(64 << 10), "trustedProxies":["192.0.2.11/24","[::1]","2001:db8::/32"]
+    }))
+    .validate(&REGISTRY)
+    .unwrap();
+}
+
+#[test]
+fn validates_numeric_limits_and_resolves_confirmation_duration() {
+    for (field, invalid, valid) in [
+        ("maxLoginFailures", &[-1, 101][..], &[0, 1, 100][..]),
+        ("lockMinutes", &[-1, 10_081][..], &[0, 1, 10_080][..]),
+        ("loginGlobalLimit", &[10_001][..], &[-7, 0, 10_000][..]),
+        ("confirmTimeout", &[29, 601][..], &[-7, 0, 30, 600][..]),
+        ("logLines", &[20_001][..], &[-1, 0, 20_000][..]),
+        ("logFileMB", &[-1, 101][..], &[0, 1, 100][..]),
+        ("accessLogDays", &[-1, 3651][..], &[0, 1, 3650][..]),
+        ("accessLogMB", &[-1, 3, 102_401][..], &[0, 4, 102_400][..]),
+    ] {
+        for value in invalid {
+            rejected(json!({(field):value}), field);
+        }
+        for value in valid {
+            normalized(json!({(field):value}))
+                .validate(&REGISTRY)
+                .unwrap();
+        }
+    }
+    for (value, effective) in [(-20, None), (0, Some(90)), (30, Some(30)), (600, Some(600))] {
+        assert_eq!(
+            normalized(json!({"confirmTimeout": value})).confirm_timeout(),
+            effective.map(Duration::from_secs)
+        );
+    }
+}
+
+#[test]
+fn validates_resolvers_proxies_time_zones_and_log_paths() {
+    for server in [
+        "192.0.2.1:65536",
+        "dns.example:53",
+        "doh@",
+        "doh@/query",
+        "https:///example.test",
+        "http://example.test/query",
+    ] {
+        rejected(json!({"dnsServers":[server]}), "dnsServers");
+    }
+    for proxy in [
+        "http:proxy.test",
+        "http:///proxy.test",
+        "ftp://proxy.test",
+        "https://bad host",
+    ] {
+        rejected(json!({"updateProxy":proxy}), "updateProxy");
+    }
+    for proxy in [
+        "http://proxy.test",
+        "https://proxy.test",
+        "socks5://proxy.test",
+        "socks5h://proxy.test",
+    ] {
+        normalized(json!({"updateProxy":proxy}))
+            .validate(&REGISTRY)
+            .unwrap();
+    }
+    rejected(json!({"timeZone":"Unknown/Fixture"}), "timeZone");
+    rejected(json!({"logLevel":"trace"}), "logLevel");
+    let base = std::env::temp_dir();
+    for dir in [
+        "relative/logs".into(),
+        base.ancestors().last().unwrap().display().to_string(),
+        base.join("control\0character").display().to_string(),
+        base.join("a".repeat(1025)).display().to_string(),
+    ] {
+        rejected(json!({"logDir":dir}), "logDir");
+    }
+    normalized(json!({
+        "timeZone":"Asia/Shanghai", "logLevel":"warn", "logDir":base.join("logs"),
+        "dnsServers":["192.0.2.1","192.0.2.1:53","[::1]","[::1]:53","doh@dns.example","https://dns.example/query"]
+    })).validate(&REGISTRY).unwrap();
+}
+
+#[test]
+fn validates_third_login_and_aggregates_only_safe_error_details() {
+    rejected(json!({"thirdLogin":{"enable":true}}), "thirdLogin");
+    rejected(
+        json!({"thirdLogin":{"callbackBase":"https://login.test/path"}}),
+        "thirdLogin.callbackBase",
+    );
+    rejected(
+        json!({"thirdLogin":{"allowed":["github:"]}}),
+        "thirdLogin.allowed",
+    );
+    let provider = json!({"type":"oidc","key":"example","clientId":"fixture", "clientSecret":"fixture", "issuer":"https://issuer.test/sso"});
+    rejected(
+        json!({"thirdLogin":{"providers":[provider.clone(), provider.clone()]}}),
+        "thirdLogin.providers",
+    );
+    normalized(json!({"thirdLogin":{
+        "enable":true, "callbackBase":"https://login.test", "providers":[provider],
+        "allowed":["example:subject # fixture"],
+    }}))
+    .validate(&REGISTRY)
+    .unwrap();
+
+    let invalid = normalized(json!({
+        "updateProxy":"ftp://user:fixture-secret@proxy.test",
+        "thirdLogin":{"providers":[{"key":"fixture-secret", "type":"unknown", "clientSecret":"fixture-secret"}]},
+        "disabledModules":["fixture-secret"], "logLines":20001,
+    }));
+    let errors = invalid.validate(&REGISTRY).unwrap_err();
+    assert_eq!(
+        errors.iter().map(|error| error.field).collect::<Vec<_>>(),
+        [
+            "updateProxy",
+            "logLines",
+            "thirdLogin.providers",
+            "disabledModules"
+        ]
+    );
+    assert!(!format!("{errors:?}").contains("fixture-secret"));
+}
+
+#[test]
+fn classifies_settings_changes_using_the_same_field_metadata() {
+    let before = normalized(json!({}));
+    let after = normalized(json!({
+        "listen":":16681", "safePath":"entry/", "trustedProxies":["192.0.2.1"],
+        "language":"en-US", "apiToken":"legacy-fixture",
+    }));
+    let changes = after.changes_from(&before);
+    assert_eq!(
+        changes,
+        [
+            SettingChange {
+                field: "listen",
+                effect: Effect::NeedsRestart
+            },
+            SettingChange {
+                field: "safePath",
+                effect: Effect::NeedsConfirm
+            },
+            SettingChange {
+                field: "trustedProxies",
+                effect: Effect::NeedsConfirm
+            },
+            SettingChange {
+                field: "language",
+                effect: Effect::Immediate
+            },
+            SettingChange {
+                field: "apiToken",
+                effect: Effect::BootOnly
+            },
+        ]
+    );
+    for change in changes {
+        assert_eq!(Settings::effect_of(change.field), Some(change.effect));
+    }
+    for field in to_value(&after).unwrap().as_object().unwrap().keys() {
+        assert!(Settings::effect_of(field).is_some(), "{field}");
+    }
+    assert_eq!(Settings::effect_of("uiLanguage"), Some(Effect::Immediate));
+    assert_eq!(Settings::effect_of("gcPercent"), None);
+    assert!(after.changes_from(&after).is_empty());
+    let equivalent = normalized(json!({
+        "listen":" :16681 ", "safePath":"/entry", "trustedProxies":[" 192.0.2.1 "],
+        "language":"en", "apiToken":"legacy-fixture",
+    }));
+    assert!(equivalent.changes_from(&after).is_empty());
 }
