@@ -8,7 +8,7 @@ use axum::{
 use flate2::{Compression, write::GzEncoder};
 use tokio::sync::Semaphore;
 
-use crate::{ApiError, redact::redact};
+use crate::{ApiError, localize::Localized, redact::redact};
 
 pub(super) const MAX_TRANSFORMS: usize = 4;
 const MAX_RESPONSE: usize = 8 << 20;
@@ -19,6 +19,7 @@ pub(super) async fn transform(
     restricted: bool,
     gzip: bool,
     budget: Arc<Semaphore>,
+    localized: Option<Localized>,
 ) -> Response {
     let status = response.status();
     if status.is_informational()
@@ -59,10 +60,19 @@ pub(super) async fn transform(
             || size
                 .is_some_and(|size| (GZIP_MINIMUM as u64..=MAX_RESPONSE as u64).contains(&size)));
     if compressible {
-        add_vary(headers);
+        add_vary(headers, "Accept-Encoding");
     }
     let gzip = gzip && compressible;
-    if !restricted && !gzip {
+    let localized = localized.filter(|_| {
+        json && !encoded
+            && !partial
+            && (restricted || size.is_some_and(|size| size <= MAX_RESPONSE as u64))
+    });
+    if localized.is_some() {
+        add_vary(headers, "Accept-Language");
+    }
+    let translate = localized.as_ref().is_some_and(Localized::translates);
+    if !restricted && !gzip && !translate {
         return Response::from_parts(parts, body);
     }
 
@@ -85,14 +95,32 @@ pub(super) async fn transform(
     let task = tokio::task::spawn_blocking(move || {
         let _permit = permit;
         let mut bytes = bytes;
-        if restricted {
-            let mut value = serde_json::from_slice(&bytes).ok()?;
-            redact(&mut value);
-            let redacted = serde_json::to_vec(&value).ok()?;
-            if redacted.len() > MAX_RESPONSE {
-                return None;
+        let mut language = None;
+        if restricted || translate {
+            match serde_json::from_slice(&bytes) {
+                Ok(mut value) => {
+                    let translated = translate
+                        && localized
+                            .as_ref()
+                            .is_some_and(|locale| locale.translate(&mut value));
+                    if restricted {
+                        redact(&mut value);
+                    }
+                    if restricted || translated {
+                        let rewritten = serde_json::to_vec(&value).ok()?;
+                        if rewritten.len() <= MAX_RESPONSE {
+                            bytes = Bytes::from(rewritten);
+                            if translated {
+                                language = localized.as_ref().map(Localized::header);
+                            }
+                        } else if restricted {
+                            return None;
+                        }
+                    }
+                }
+                Err(_) if restricted => return None,
+                Err(_) => {}
             }
-            bytes = Bytes::from(redacted);
         }
         if gzip && bytes.len() >= GZIP_MINIMUM {
             let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
@@ -100,21 +128,24 @@ pub(super) async fn transform(
                 && let Ok(compressed) = encoder.finish()
                 && compressed.len() < bytes.len()
             {
-                return Some((Bytes::from(compressed), true));
+                return Some((Bytes::from(compressed), true, language));
             }
         }
-        Some((bytes, false))
+        Some((bytes, false, language))
     });
-    let Ok(Some((bytes, compressed))) = task.await else {
+    let Ok(Some((bytes, compressed, language))) = task.await else {
         return unsafe_response();
     };
-    if restricted || compressed {
+    if restricted || compressed || language.is_some() {
         invalidate_body_headers(headers);
         headers.remove(header::CONTENT_ENCODING);
         headers.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len()));
     }
     if compressed {
         headers.insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    if let Some(language) = language {
+        headers.insert(header::CONTENT_LANGUAGE, language);
     }
     Response::from_parts(parts, Body::from(bytes))
 }
@@ -155,15 +186,15 @@ fn invalidate_body_headers(headers: &mut HeaderMap) {
     }
 }
 
-fn add_vary(headers: &mut HeaderMap) {
+fn add_vary(headers: &mut HeaderMap, field: &'static str) {
     if !headers
         .get_all(header::VARY)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
-        .any(|name| name.trim() == "*" || name.trim().eq_ignore_ascii_case("accept-encoding"))
+        .any(|name| name.trim() == "*" || name.trim().eq_ignore_ascii_case(field))
     {
-        headers.append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+        headers.append(header::VARY, HeaderValue::from_static(field));
     }
 }
 
@@ -208,7 +239,14 @@ mod tests {
     async fn saturation_rejects_unredacted_data_and_allows_identity_compression_fallback() {
         let budget = Arc::new(Semaphore::new(0));
         let payload = serde_json::json!({"secret":"fixture-secret", "padding":"x".repeat(2048)});
-        let denied = transform(Json(&payload).into_response(), true, true, budget.clone()).await;
+        let denied = transform(
+            Json(&payload).into_response(),
+            true,
+            true,
+            budget.clone(),
+            None,
+        )
+        .await;
         assert_eq!(denied.status(), StatusCode::SERVICE_UNAVAILABLE);
         let bytes = to_bytes(denied.into_body(), MAX_RESPONSE).await.unwrap();
         assert!(
@@ -217,7 +255,7 @@ mod tests {
                 .contains("fixture-secret")
         );
 
-        let original = transform(Json(&payload).into_response(), false, true, budget).await;
+        let original = transform(Json(&payload).into_response(), false, true, budget, None).await;
         assert_eq!(original.status(), StatusCode::OK);
         assert!(!original.headers().contains_key(header::CONTENT_ENCODING));
         let bytes = to_bytes(original.into_body(), MAX_RESPONSE).await.unwrap();

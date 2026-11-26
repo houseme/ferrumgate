@@ -16,9 +16,9 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use crate::{
-    ApiError,
-    http::boundary,
-    response::{MAX_TRANSFORMS, accepts_gzip, transform},
+    ApiError, Localizer, Translation,
+    http::{Presentation, RenderPolicy, boundary},
+    response::MAX_TRANSFORMS,
     scope::{Access, module_of, required},
 };
 
@@ -45,6 +45,7 @@ struct Operation {
     summary: &'static str,
     access: Arc<Access<'static>>,
     stream: Option<StreamPolicy>,
+    translation: Translation,
 }
 
 #[derive(Clone)]
@@ -52,7 +53,7 @@ struct Policy {
     auth: Auth,
     access: Arc<Access<'static>>,
     stream: Option<StreamPolicy>,
-    response_budget: Arc<Semaphore>,
+    translation: Translation,
 }
 
 pub struct ApiRouter {
@@ -60,7 +61,7 @@ pub struct ApiRouter {
     operations: Vec<Operation>,
     auth: Auth,
     modules: Option<Arc<(Registry, Enabled)>>,
-    response_budget: Arc<Semaphore>,
+    presentation: Presentation,
 }
 
 impl Default for ApiRouter {
@@ -78,7 +79,10 @@ impl ApiRouter {
             operations: Vec::new(),
             auth: Arc::new(authenticate),
             modules: None,
-            response_budget: Arc::new(Semaphore::new(MAX_TRANSFORMS)),
+            presentation: Presentation {
+                localizer: None,
+                budget: Arc::new(Semaphore::new(MAX_TRANSFORMS)),
+            },
         }
     }
 
@@ -88,6 +92,11 @@ impl ApiRouter {
             "configure modules before declaring routes"
         );
         self.modules = Some(Arc::new((registry, enabled)));
+        self
+    }
+
+    pub fn with_localizer(mut self, localizer: Localizer) -> Self {
+        self.presentation.localizer = Some(localizer);
         self
     }
 
@@ -102,7 +111,35 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        self.register(method, path.into(), summary, None, handler)
+        self.register(
+            method,
+            path.into(),
+            summary,
+            None,
+            Translation::None,
+            handler,
+        )
+    }
+
+    pub fn translated_route<H, T>(
+        self,
+        method: Method,
+        path: impl Into<String>,
+        summary: &'static str,
+        translation: Translation,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        if let Translation::Fields(fields) = translation {
+            assert!(
+                fields.iter().all(|field| field.starts_with('/')),
+                "translation fields must be non-root JSON pointers"
+            );
+        }
+        self.register(method, path.into(), summary, None, translation, handler)
     }
 
     pub fn stream_route<H, T>(
@@ -117,7 +154,14 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        self.register(method, path.into(), summary, Some(policy), handler)
+        self.register(
+            method,
+            path.into(),
+            summary,
+            Some(policy),
+            Translation::None,
+            handler,
+        )
     }
 
     fn register<H, T>(
@@ -126,6 +170,7 @@ impl ApiRouter {
         path: String,
         summary: &'static str,
         stream: Option<StreamPolicy>,
+        translation: Translation,
         handler: H,
     ) -> Self
     where
@@ -149,6 +194,7 @@ impl ApiRouter {
             path,
             summary,
             stream,
+            translation,
         };
         assert_ne!(
             *operation.access,
@@ -170,7 +216,7 @@ impl ApiRouter {
             auth: self.auth.clone(),
             access: operation.access.clone(),
             stream: operation.stream,
-            response_budget: self.response_budget.clone(),
+            translation: operation.translation,
         };
         self.router = std::mem::take(&mut self.router).route(
             &operation.path,
@@ -192,6 +238,7 @@ impl ApiRouter {
             summary: "Get the management API schema",
             access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
             stream: None,
+            translation: Translation::None,
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
@@ -223,7 +270,7 @@ impl ApiRouter {
             .method_not_allowed_fallback(|| async {
                 ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
             })
-            .layer(middleware::from_fn(boundary));
+            .layer(middleware::from_fn_with_state(self.presentation, boundary));
         Admin {
             router,
             operations: self.operations,
@@ -251,17 +298,13 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
         return ApiError::new(StatusCode::FORBIDDEN, "insufficient permission").into_response();
     }
     request.extensions_mut().insert(ReadOnly(restricted));
-    if policy.stream.is_some() {
-        return next.run(request).await;
-    }
-    let gzip = accepts_gzip(request.headers());
-    transform(
-        next.run(request).await,
+    let mut response = next.run(request).await;
+    response.extensions_mut().insert(RenderPolicy {
         restricted,
-        gzip,
-        policy.response_budget,
-    )
-    .await
+        stream: policy.stream.is_some(),
+        translation: policy.translation,
+    });
+    response
 }
 
 pub struct Admin {

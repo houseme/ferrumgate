@@ -1,4 +1,5 @@
 use super::*;
+use fg_admin::{Localizer, RequestLanguage, Translation};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -81,5 +82,92 @@ async fn collection_round_trips_declared_display_fields_with_strict_writable_key
         assert!(item.get("running").is_none());
         assert!(item.get("stats").is_none());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn localization_negotiates_and_rewrites_only_declared_paths_before_redaction_and_gzip()
+-> Result<()> {
+    let localizer = Localizer::new(
+        "en",
+        "en",
+        &["en", "zh-CN", "zh-TW", "de"],
+        |lang, text| match (lang, text) {
+            ("zh-TW", "ready") => {
+                Some("可用 https://example.test/status?secret=fixture-translated".into())
+            }
+            ("zh-TW", "authentication required") => Some("請先登入".into()),
+            ("de", "ready") => Some("bereit".into()),
+            _ => None,
+        },
+    )?;
+    let admin = ApiRouter::new(principal).with_localizer(localizer)
+        .translated_route(Method::GET, "/api/ddns/localized", "Localized view", Translation::Fields(&["/status/label"]), |Extension(language): Extension<RequestLanguage>| async move {
+            Json(json!({"lang":language.as_str(),"name":"ready","status":{"label":"ready"},"config":{"label":"ready"},"padding":"x".repeat(4096)}))
+        })
+        .translated_route(Method::GET, "/api/ddns/report", "Generated report", Translation::Generated, || async { Json(json!({"result":["ready"]})) })
+        .finish();
+    let server = Server::start(admin.router).await?;
+    let path = "/api/ddns/localized";
+    let weighted = "no;q=1, zh;q=0, ZH-tw;q=0.8, de;q=0.6";
+    let (status, headers, compressed) = server
+        .call_raw(
+            "GET",
+            path,
+            &[
+                ("x-test-id", "viewer"),
+                ("accept-language", weighted),
+                ("accept-encoding", "gzip"),
+            ],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["content-language"], "zh-TW");
+    assert_eq!(headers["content-encoding"], "gzip");
+    for name in ["Accept-Language", "Accept-Encoding"] {
+        assert!(headers.get_all("vary").iter().any(|entry| entry == name));
+    }
+    let mut json = String::new();
+    flate2::read::GzDecoder::new(compressed.as_ref()).read_to_string(&mut json)?;
+    assert!(!json.contains("fixture-translated"));
+    let body: Value = serde_json::from_str(&json)?;
+    assert_eq!(body["lang"], "zh-TW");
+    assert_eq!(
+        body["status"]["label"],
+        "可用 https://example.test/status?secret=********"
+    );
+    assert_eq!(body["name"], "ready");
+    assert_eq!(body["config"]["label"], "ready");
+
+    let (_, headers, error) = server
+        .call("GET", path, &[("accept-language", "zh-TW")], Body::empty())
+        .await?;
+    assert_eq!(headers["content-language"], "zh-TW");
+    assert_eq!(error, json!({"error":"請先登入"}));
+    let (_, headers, report) = server
+        .call(
+            "GET",
+            "/api/ddns/report",
+            &[("x-test-id", "admin"), ("accept-language", "de-DE")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(headers["content-language"], "de");
+    assert_eq!(report, json!({"result":["bereit"]}));
+    let (_, headers, fallback) = server
+        .call(
+            "GET",
+            path,
+            &[
+                ("x-test-id", "admin"),
+                ("accept-language", "unsupported;q=1"),
+            ],
+            Body::empty(),
+        )
+        .await?;
+    assert!(headers.get("content-language").is_none());
+    assert_eq!(fallback["lang"], "en");
+    assert_eq!(fallback["status"]["label"], "ready");
     Ok(())
 }

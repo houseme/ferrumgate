@@ -1,14 +1,20 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json,
-    extract::{FromRequest, Request},
+    extract::{FromRequest, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use http_body_util::BodyExt;
 use serde::de::DeserializeOwned;
+use tokio::sync::Semaphore;
+
+use crate::{
+    Localizer, Translation,
+    response::{accepts_gzip, transform},
+};
 
 const MAX_JSON: usize = 4 << 20;
 
@@ -118,12 +124,59 @@ impl<S: Send + Sync> FromRequest<S> for JsonBody {
     }
 }
 
-pub(crate) async fn boundary(request: Request, next: Next) -> Response {
+#[derive(Clone)]
+pub(crate) struct Presentation {
+    pub localizer: Option<Localizer>,
+    pub budget: Arc<Semaphore>,
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct RenderPolicy {
+    pub restricted: bool,
+    pub stream: bool,
+    pub translation: Translation,
+}
+
+pub(crate) async fn boundary(
+    State(presentation): State<Presentation>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let language = presentation
+        .localizer
+        .as_ref()
+        .map(|localizer| localizer.negotiate(request.headers()));
+    if let Some(language) = &language {
+        request.extensions_mut().insert(language.clone());
+    }
+    let gzip = accepts_gzip(request.headers());
     let mut response = if same_origin(&request) {
         next.run(request).await
     } else {
         ApiError::new(StatusCode::FORBIDDEN, "cross-origin request denied").into_response()
     };
+    let render = response
+        .extensions_mut()
+        .remove::<RenderPolicy>()
+        .unwrap_or_default();
+    if !render.stream {
+        let localized =
+            presentation
+                .localizer
+                .as_ref()
+                .zip(language)
+                .and_then(|(localizer, language)| {
+                    localizer.response(language, render.translation, response.status())
+                });
+        response = transform(
+            response,
+            render.restricted,
+            gzip,
+            presentation.budget,
+            localized,
+        )
+        .await;
+    }
     let headers = response.headers_mut();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
