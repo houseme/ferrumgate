@@ -163,6 +163,7 @@ pub async fn serve(
         .await
         .context("bind management listener")?;
     let restart = RestartTrigger::default();
+    let process_start = std::time::SystemTime::now();
     let result: Result<Outcome> = async {
         let (ready, waiting) = oneshot::channel();
         let gateway = fg_gateway::serve_with_management(config, &started.disabled_modules, ready);
@@ -180,6 +181,7 @@ pub async fn serve(
                 store,
                 events,
                 restart,
+                process_start,
             }
             .run(ready, logs)
             .await
@@ -221,6 +223,7 @@ struct ManagementService {
     store: Arc<ConfigStore>,
     events: EventBus,
     restart: RestartTrigger,
+    process_start: std::time::SystemTime,
 }
 
 impl ManagementService {
@@ -234,6 +237,7 @@ impl ManagementService {
             store,
             events,
             restart,
+            process_start,
         } = self;
         let started = settings.snapshot();
         let updates = settings.subscribe();
@@ -262,6 +266,7 @@ impl ManagementService {
                 });
             }));
         }
+        let modules = Arc::new((ready.registry, ready.enabled.clone()));
         let router = ApiRouter::default()
             .with_modules(ready.registry, ready.enabled)
             .with_token_authentication(tokens.clone())
@@ -293,7 +298,7 @@ impl ManagementService {
             let translated = fg_i18n::tr(language, text);
             (translated != text).then_some(translated)
         })?;
-        let admin = router
+        let router = router
             .with_localizer(localizer)
             .with_logs(logs.handle())
             .with_security_status(accounts.clone(), exposure)
@@ -316,8 +321,16 @@ impl ManagementService {
                         axum::Json(serde_json::json!({"ok": true}))
                     }
                 },
-            )
-            .finish();
+            );
+        let settings_snapshot = started.clone();
+        let admin = fg_admin::SystemRoutes {
+            config_dir: directory.clone(),
+            modules,
+            started_at: process_start,
+            settings: settings_snapshot,
+        }
+        .register(router)
+        .finish();
         tracing::info!(listen = %listener.local_addr()?, "management ready");
         let mut drain = ready.drain;
         let maintenance = poll_auth_maintenance(accounts.clone(), tokens, store, drain.clone());

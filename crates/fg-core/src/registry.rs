@@ -28,13 +28,13 @@ pub enum Status {
     Absent,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Required {
     pub id: &'static str,
     pub by: Vec<&'static str>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Enabled {
     ids: Vec<&'static str>,
     pub restored: Vec<Required>,
@@ -46,6 +46,7 @@ impl Enabled {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Registry {
     built: &'static [&'static str],
 }

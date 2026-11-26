@@ -18,6 +18,7 @@ mod router;
 pub mod scope;
 mod security_score;
 mod settings_api;
+mod system;
 mod token_routes;
 mod upload;
 
@@ -31,3 +32,4 @@ pub use oauth_routes::ManagedThirdLogin;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
 pub use security_score::SecurityExposure;
 pub use settings_api::SettingsState;
+pub use system::SystemRoutes;
