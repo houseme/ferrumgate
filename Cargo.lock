@@ -457,7 +457,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fg-core",
  "fg-gateway",
+ "fg-logging",
  "futures-util",
  "h2",
  "hickory-proto",
@@ -539,6 +541,20 @@ dependencies = [
  "tracing",
  "webpki-roots",
  "x509-parser",
+]
+
+[[package]]
+name = "fg-logging"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

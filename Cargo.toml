@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-testkit"]
+members = ["crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
 
@@ -26,7 +26,9 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+fg-core = { path = "crates/fg-core" }
 fg-gateway = { path = "crates/fg-gateway" }
+fg-logging = { path = "crates/fg-logging" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
