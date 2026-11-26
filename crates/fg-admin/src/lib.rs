@@ -3,6 +3,7 @@
 mod assets;
 mod audit;
 mod collection;
+pub mod confirm;
 pub mod demo;
 mod http;
 mod item_json;

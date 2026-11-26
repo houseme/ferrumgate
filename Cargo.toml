@@ -34,7 +34,7 @@ fg-testkit = { path = "crates/fg-testkit", version = "0.1.0" }
 # External crates
 anyhow = "1"
 arc-swap = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 base64 = "0.23"
 bcrypt = "0.19"
 cap-std = "4"

@@ -13,6 +13,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use tempfile::TempPath;
 
 pub mod apply;
+pub mod confirm;
 mod diff;
 mod history;
 pub mod rollback;
