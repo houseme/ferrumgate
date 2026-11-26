@@ -1,5 +1,7 @@
 use std::{
+    cmp::Reverse,
     fs::{File, OpenOptions},
+    net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex},
     time::SystemTime,
 };
@@ -8,10 +10,12 @@ use anyhow::{Context, Result, anyhow, ensure};
 use arc_swap::ArcSwap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use fg_config::{ConfigStore, Loaded};
+use fg_core::events::{Event, EventBus, Kind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
+    lockout::{KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
     password::{self, MAX_PASSWORD_BYTES, check_password_strength},
     session::{Identity, Session, Snapshot, unix_seconds},
 };
@@ -64,6 +68,8 @@ pub struct AccountManager {
     store: Arc<ConfigStore>,
     snapshot: ArcSwap<Snapshot>,
     writer: Mutex<()>,
+    limiter: LoginLimiter,
+    login_events: Option<EventBus>,
     _owner: File,
 }
 
@@ -92,6 +98,7 @@ impl AccountManager {
         owner
             .try_lock()
             .context("account directory already has a writer")?;
+        let limiter = LoginLimiter::load(&store)?;
         let (snapshot, generated) = match store.load::<Account>(ACCOUNT)? {
             Loaded::Found(account) => (Snapshot::new(account)?, None),
             Loaded::Missing => {
@@ -124,23 +131,78 @@ impl AccountManager {
                 store,
                 snapshot: ArcSwap::from_pointee(snapshot),
                 writer: Mutex::new(()),
+                limiter,
+                login_events: None,
                 _owner: owner,
             },
             generated,
         ))
     }
 
-    /// Checks the administrator password and signs a session. Call from a bounded blocking worker.
+    /// Checks credentials for a local caller. Network callers pass the resolved address to `login_from`.
     pub fn login(&self, username: &str, password: &str) -> Result<Option<Session>> {
+        match self.login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), username, password) {
+            Ok(session) => Ok(Some(session)),
+            Err(LoginError::InvalidCredentials) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    pub fn configure_login_limits(&self, limits: LoginLimits) -> Result<()> {
+        self.limiter.configure(limits)
+    }
+
+    pub fn with_login_events(mut self, events: EventBus) -> Self {
+        self.login_events = Some(events);
+        self
+    }
+
+    /// Verifies the administrator password using the trusted client address.
+    /// Runs bcrypt and any required persistence synchronously.
+    pub fn login_from(
+        &self,
+        address: IpAddr,
+        username: &str,
+        password: &str,
+    ) -> Result<Session, LoginError> {
+        let attempt = self.limiter.begin(address)?;
         let snapshot = self.snapshot.load_full();
         let account = &snapshot.account;
-        if account.password_login_off || !account.totp_secret.is_empty() {
-            return Ok(None);
+        let accepted = password::verify(password, &account.password_hash)
+            .map_err(LoginError::Internal)?
+            && account.username == username
+            && !account.password_login_off
+            && account.totp_secret.is_empty();
+        if !accepted {
+            let completion = attempt.complete(false);
+            if let Some(failures) = completion.flood
+                && let Some(events) = &self.login_events
+            {
+                events.publish_with(|| {
+                    let mut event = Event::new(Kind::AuthFlood, "auth");
+                    event.args.push(("failures", failures.to_string()));
+                    event
+                });
+            }
+            return Err(LoginError::InvalidCredentials);
         }
-        if !password::verify(password, &account.password_hash)? || account.username != username {
-            return Ok(None);
+        let session = snapshot
+            .issue(SystemTime::now())
+            .map_err(LoginError::Internal)?;
+        if attempt.complete(true).save_known {
+            self.save_login_sources();
         }
-        Ok(Some(snapshot.issue(SystemTime::now())?))
+        Ok(session)
+    }
+
+    fn save_login_sources(&self) {
+        let _writer = self.writer.lock().expect("account writer poisoned");
+        if let Some(mut sources) = self.limiter.take_known() {
+            sources.sort_unstable_by_key(|source| Reverse(source.last));
+            if self.store.save(KNOWN_FILE, &sources).is_err() {
+                self.limiter.retry_known_save();
+            }
+        }
     }
 
     pub fn identify(&self, token: &str) -> Option<Identity> {

@@ -5,8 +5,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use fg_auth::{AccountManager, PasswordIssue};
+use fg_auth::{AccountManager, LoginError, LoginLimits, PasswordIssue};
 use fg_config::ConfigStore;
+use fg_core::events::{Event, EventBus, Kind};
 use serde_json::{Value, json};
 
 const PASSWORD: &str = "fixture-admin-password";
@@ -233,5 +234,59 @@ fn concurrent_password_changes_keep_one_winner_and_invalidate_old_sessions() -> 
         .context("updated identity")?;
     assert_eq!(identity.username, CHANGES[winner].0);
     assert!(!identity.must_change_password);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lockout_notifies_once_and_remembers_successful_subnets_after_restart() -> Result<()> {
+    let (_dir, store, account) = fixture()?;
+    store.enable_history(10, &[]);
+    store.save("account", &account)?;
+    let (manager, _) = AccountManager::open(store.clone(), None)?;
+    let home = "2001:db8:1::19".parse()?;
+    let renewed = "2001:db8:1::20".parse()?;
+    let first = manager.login_from(home, "operator", PASSWORD)?;
+    assert!(manager.identify(&first.token).is_some());
+    assert!(store.versions("login-ips")?.is_empty());
+    drop(manager);
+
+    let bus = EventBus::default();
+    let (sent, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let _subscription = bus.subscribe(move |event| {
+        let _ = sent.send(event);
+        std::future::ready(())
+    })?;
+    let (manager, _) = AccountManager::open(store.clone(), None)?;
+    let manager = manager.with_login_events(bus.clone());
+    manager.configure_login_limits(LoginLimits {
+        unknown_failures: Some(2),
+        ..LoginLimits::default()
+    })?;
+    for address in ["192.0.2.1", "198.51.100.1"] {
+        assert!(matches!(
+            manager.login_from(address.parse()?, "operator", "wrong-password"),
+            Err(LoginError::InvalidCredentials)
+        ));
+    }
+    for address in ["192.0.2.2", "2001:db8:2::10"] {
+        assert!(matches!(
+            manager.login_from(address.parse()?, "operator", PASSWORD),
+            Err(LoginError::Flood)
+        ));
+    }
+    assert!(manager.login_from(renewed, "operator", PASSWORD).is_ok());
+    bus.publish(Event::new(Kind::NotifyTest, "fixture"));
+    let flood = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await?
+        .context("flood event")?;
+    assert_eq!(flood.kind, Kind::AuthFlood);
+    assert_eq!(flood.args, [("failures", "2".into())]);
+    let next = tokio::time::timeout(Duration::from_secs(1), events.recv())
+        .await?
+        .context("marker event")?;
+    assert_eq!(next.kind, Kind::NotifyTest);
+    let login_ips: Value =
+        serde_json::from_slice(&store.load_raw("login-ips")?.context("persisted source")?)?;
+    assert_eq!(login_ips[0]["key"], "2001:db8:1::/64");
     Ok(())
 }

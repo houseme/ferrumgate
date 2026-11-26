@@ -11,13 +11,16 @@ arc-swap = "1"
 base64 = "0.22"
 bcrypt = "0.19"
 fg-config = { path = "../fg-config" }
+fg-core = { path = "../fg-core" }
 getrandom = "0.4"
 ring = "0.17"
 serde.workspace = true
 serde_json.workspace = true
+time = { workspace = true, features = ["formatting", "parsing", "serde", "std"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
