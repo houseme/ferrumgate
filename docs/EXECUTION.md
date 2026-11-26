@@ -953,6 +953,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 185 项工作区测试和 9 项本机 Pebble ACME 测试。令牌核心用例验证了明文一次性返回、私有文件权限与历史排除、摘要认证、停用与过期、轮换及删除、写入失败时保持有效凭据、旧记录加载、未编译权限保留，以及使用记录的节流与重启恢复。运行期刷盘调度和 HTTP 鉴权由后续步骤接入。
 
+### WP-13 遗留令牌迁移与权限继承
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth --test tokens
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway admin::
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 189 项工作区测试和 9 项本机 Pebble ACME 测试。真实进程启动用例验证旧 `apiToken` 自动迁移、其他设置保留和迁移失败时初始密码仍可取用。令牌用例验证重复迁移、写入失败时保留旧字段、避免把明文写入历史快照，以及通配与目标域已有权限的继承规则。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

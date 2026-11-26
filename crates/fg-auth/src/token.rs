@@ -19,6 +19,8 @@ use time::OffsetDateTime;
 
 use crate::account::open_lock;
 
+mod migrate;
+
 const STORE: &str = "tokens";
 const PREFIX: &str = "gtl_";
 const MAX_TOKENS: usize = 100;
@@ -142,6 +144,16 @@ struct Entry {
 }
 
 impl Entry {
+    fn new(record: Record, usage: Usage) -> Arc<Self> {
+        Arc::new(Self {
+            record,
+            activity: Arc::new(Mutex::new(Activity {
+                live: usage,
+                saved: usage,
+            })),
+        })
+    }
+
     fn view(&self, now: OffsetDateTime) -> TokenView {
         let record = &self.record;
         let usage = self.activity.lock().expect("token activity poisoned").live;
@@ -191,6 +203,15 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    fn new_token_id(&self) -> Result<String> {
+        let id = random_hex::<6>()?;
+        ensure!(
+            !self.entries.iter().any(|entry| entry.record.id == id),
+            "API token identifier collision"
+        );
+        Ok(id)
+    }
+
     fn index(&self, id: &str) -> Result<usize> {
         self.entries
             .iter()
@@ -243,15 +264,7 @@ impl TokenManager {
         let entries = data
             .tokens
             .into_iter()
-            .map(|token| {
-                Arc::new(Entry {
-                    record: token.record,
-                    activity: Arc::new(Mutex::new(Activity {
-                        live: token.usage,
-                        saved: token.usage,
-                    })),
-                })
-            })
+            .map(|token| Entry::new(token.record, token.usage))
             .collect();
         Ok(Self {
             store,
@@ -331,16 +344,30 @@ impl TokenManager {
         views
     }
 
+    pub fn set_domains(&self, domains: impl IntoIterator<Item = String>) {
+        let domains = domains.into_iter().collect();
+        self.writer.lock().expect("token writer poisoned").domains = domains;
+    }
+
+    pub fn domains(&self) -> Vec<String> {
+        let mut domains: Vec<_> = self
+            .writer
+            .lock()
+            .expect("token writer poisoned")
+            .domains
+            .iter()
+            .cloned()
+            .collect();
+        domains.sort_unstable();
+        domains
+    }
+
     pub fn create(&self, input: TokenInput, now: OffsetDateTime) -> Result<(TokenView, String)> {
         let mut writer = self.writer.lock().expect("token writer poisoned");
         let mut next = (**self.snapshot.load()).clone();
         ensure!(next.entries.len() < MAX_TOKENS, "API token limit reached");
         let input = normalize(input, &writer.domains, now, None)?;
-        let id = random_hex::<6>()?;
-        ensure!(
-            !next.entries.iter().any(|entry| entry.record.id == id),
-            "API token identifier collision"
-        );
+        let id = next.new_token_id()?;
         let raw = format!("{PREFIX}{}", random_hex::<24>()?);
         let record = Record {
             id,
@@ -354,13 +381,7 @@ impl TokenManager {
             expires_at: input.expires_at,
             legacy: false,
         };
-        let entry = Arc::new(Entry {
-            record,
-            activity: Arc::new(Mutex::new(Activity {
-                live: Usage::default(),
-                saved: Usage::default(),
-            })),
-        });
+        let entry = Entry::new(record, Usage::default());
         let view = entry.view(now);
         next.entries.insert(0, entry);
         self.save(next, &mut writer)?;

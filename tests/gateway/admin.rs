@@ -13,10 +13,49 @@ use tokio::{
 use super::common::{DEADLINE, Origin, config, connect, full, http_client, request, route, send};
 
 #[tokio::test]
+async fn management_delivers_the_initial_password_when_legacy_migration_fails() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let store = fg_config::ConfigStore::open(&accounts)?;
+    store.save("ferrumgate", &json!({"apiToken":17}))?;
+    std::fs::write(&config_path, config("", "", ""))?;
+    let failed = timeout(
+        DEADLINE,
+        Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--config"])
+            .arg(&config_path)
+            .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+            .arg(&accounts)
+            .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await??;
+    assert!(!failed.status.success());
+    let output = String::from_utf8(failed.stderr)?;
+    assert!(output.contains("legacy API token must be a string"));
+    let initial = output
+        .lines()
+        .find_map(|line| line.strip_prefix("Initial administrator password: "))
+        .context("initial password on failed management startup")?;
+    let (accounts, generated) = fg_auth::AccountManager::open(store, None)?;
+    assert!(generated.is_none());
+    assert!(accounts.login("admin", initial)?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
 async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let config_path = directory.path().join("gateway.toml");
     let accounts = directory.path().join("accounts");
+    let legacy = "fixture-legacy-bootstrap-token";
+    let store = fg_config::ConfigStore::open(&accounts)?;
+    store.save(
+        "ferrumgate",
+        &json!({"apiToken":legacy, "otherSetting":true}),
+    )?;
     let backend = Origin::http("bootstrap fixture").await?;
     std::fs::write(
         &config_path,
@@ -54,6 +93,10 @@ async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<(
         anyhow::bail!("management listener did not start")
     })
     .await??;
+    let settings: Value =
+        serde_json::from_slice(&store.load_raw("ferrumgate")?.context("migrated settings")?)?;
+    assert!(settings.get("apiToken").is_none());
+    assert_eq!(settings["otherSetting"], true);
     let mut client = http_client(connect(address).await?).await?;
     let mut login = request(
         Method::POST,
@@ -185,5 +228,12 @@ async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<(
             .success()
     );
     assert!(timeout(DEADLINE, child.wait()).await??.success());
+    let tokens = fg_auth::token::TokenManager::open(store, [], std::time::Instant::now())?;
+    assert_eq!(
+        tokens
+            .authenticate(legacy, time::OffsetDateTime::now_utc(), None)?
+            .scopes(),
+        ["*"]
+    );
     Ok(())
 }

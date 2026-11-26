@@ -225,5 +225,134 @@ fn token_capacity_and_imported_legacy_records_are_bounded() -> Result<()> {
     assert_eq!(tokens.list(NOW).len(), 100);
     assert_eq!(tokens.authenticate(legacy, NOW, None)?.scopes(), ["*"]);
     assert!(tokens.create(input(), NOW).is_err());
+    assert!(
+        tokens
+            .import_legacy("fixture-another-legacy-value", NOW)
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn legacy_settings_migration_is_idempotent_and_never_archives_plaintext() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    store.enable_history(4, &[]);
+    let legacy = "fixture-legacy-settings-token";
+    let raw = format!(
+        r#"{{"port":8000,"apiToken":"{legacy}","future":{{"number":98765432109876543210987654321}}}}"#
+    );
+    store.write_raw("ferrumgate", raw.as_bytes())?;
+    let tokens = TokenManager::open(store.clone(), domains(), Instant::now())?;
+    assert!(tokens.import_legacy(legacy, NOW)?);
+    assert!(tokens.migrate_legacy_settings("ferrumgate", NOW)?);
+    assert!(!tokens.migrate_legacy_settings("ferrumgate", NOW)?);
+    assert_eq!(tokens.list(NOW).len(), 1);
+    assert!(tokens.list(NOW)[0].legacy);
+    assert_eq!(tokens.authenticate(legacy, NOW, None)?.scopes(), ["*"]);
+    assert!(store.versions("ferrumgate")?.is_empty());
+    let settings = store.load_raw("ferrumgate")?.context("migrated settings")?;
+    let text = std::str::from_utf8(&settings)?;
+    assert!(text.contains("98765432109876543210987654321"));
+    assert!(!text.contains("apiToken"));
+    assert!(!text.contains(legacy));
+    assert!(!store.replace_unversioned("ferrumgate", raw.as_bytes(), b"{}")?);
+    assert_eq!(
+        store.load_raw("ferrumgate")?.as_deref(),
+        Some(settings.as_slice())
+    );
+    assert!(
+        !std::str::from_utf8(&store.load_raw("tokens")?.context("token records")?)?
+            .contains(legacy)
+    );
+    drop(tokens);
+    let tokens = TokenManager::open(store, domains(), Instant::now())?;
+    assert!(tokens.authenticate(legacy, NOW, None).is_ok());
+    Ok(())
+}
+
+#[test]
+fn legacy_migration_preserves_the_source_until_token_storage_succeeds() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    store.save("ferrumgate", &json!({"apiToken":"tiny"}))?;
+    let source = store.load_raw("ferrumgate")?;
+    let tokens = TokenManager::open(store.clone(), domains(), Instant::now())?;
+    let unavailable = dir.path().join("tokens.json");
+    fs::create_dir(&unavailable)?;
+    assert!(tokens.migrate_legacy_settings("ferrumgate", NOW).is_err());
+    assert_eq!(store.load_raw("ferrumgate")?, source);
+    assert!(matches!(
+        tokens.authenticate("tiny", NOW, None),
+        Err(TokenError::Invalid)
+    ));
+    fs::remove_dir(unavailable)?;
+    assert!(tokens.migrate_legacy_settings("ferrumgate", NOW)?);
+    assert_eq!(tokens.list(NOW)[0].hint, "…");
+
+    let (native, raw) = tokens.create(
+        TokenInput {
+            disabled: true,
+            ..input()
+        },
+        NOW,
+    )?;
+    store.save("ferrumgate", &json!({"apiToken":raw}))?;
+    assert!(tokens.migrate_legacy_settings("ferrumgate", NOW)?);
+    let saved = tokens.list(NOW);
+    let retained = saved
+        .iter()
+        .find(|view| view.id == native.id)
+        .context("retained token")?;
+    assert!(!retained.legacy);
+    assert!(retained.disabled);
+    assert_eq!(retained.scopes, native.scopes);
+    Ok(())
+}
+
+#[test]
+fn scope_inheritance_keeps_existing_grants_and_only_adds_uncovered_access() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    let tokens = TokenManager::open(store.clone(), ["old".into(), "new".into()], Instant::now())?;
+    let issued = [
+        vec!["old:read"],
+        vec!["*:read", "old:write"],
+        vec!["*:read", "old:read"],
+        vec!["new:write", "old:read"],
+        vec!["*", "old:write"],
+    ]
+    .map(|scopes| {
+        tokens.create(
+            TokenInput {
+                scopes: scopes.into_iter().map(str::to_owned).collect(),
+                ..input()
+            },
+            NOW,
+        )
+    });
+    let issued = issued.into_iter().collect::<Result<Vec<_>>>()?;
+    tokens.set_domains(["new".into(), "new".into()]);
+    assert_eq!(tokens.domains(), ["new"]);
+    assert!(tokens.inherit_scopes("old", "*").is_err());
+    assert_eq!(tokens.inherit_scopes("old", "old")?, 0);
+    assert_eq!(tokens.inherit_scopes("old", "new")?, 2);
+    let saved = store.load_raw("tokens")?;
+    assert_eq!(tokens.inherit_scopes("old", "new")?, 0);
+    assert_eq!(store.load_raw("tokens")?, saved);
+    drop(tokens);
+    let tokens = TokenManager::open(store, ["new".into()], Instant::now())?;
+    let expected = [
+        vec!["new:read", "old:read"],
+        vec!["*:read", "new:write", "old:write"],
+        vec!["*:read", "old:read"],
+        vec!["new:write", "old:read"],
+        vec!["*", "old:write"],
+    ];
+    for ((view, raw), scopes) in issued.iter().zip(expected) {
+        let identity = tokens.authenticate(raw, NOW, None)?;
+        assert_eq!(identity.id(), view.id);
+        assert_eq!(identity.scopes(), scopes);
+    }
     Ok(())
 }

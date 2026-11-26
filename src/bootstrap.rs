@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
@@ -7,6 +12,7 @@ use fg_auth::{
     AccountManager,
     passkey::Url,
     third_login::{ThirdLogin, ThirdLoginConfig},
+    token::TokenManager,
 };
 use fg_config::{ConfigStore, Loaded};
 use fg_core::events::EventBus;
@@ -53,7 +59,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
         tracing::info!(target: "fg_core::auth", kind = event.kind.info().name, "administrator authentication event");
         std::future::ready(())
     })?;
-    let (accounts, generated, third_login) = tokio::task::spawn_blocking(move || {
+    let (accounts, third_login) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
         let third_login = match store.load::<ThirdLoginConfig>("third-login")? {
             Loaded::Found(config) => Some(config),
@@ -65,15 +71,19 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
             Err(std::env::VarError::NotPresent) => None,
             Err(_) => anyhow::bail!("initial password must be UTF-8"),
         };
-        let (manager, generated) = AccountManager::open(store, initial)?;
+        let (manager, generated) = AccountManager::open(store.clone(), initial)?;
+        if let Some(password) = generated {
+            eprintln!("Initial administrator password: {password}");
+        }
         let manager = manager.with_login_events(events);
         manager.apply_pending_reset()?;
-        Ok::<_, anyhow::Error>((Arc::new(manager), generated, third_login))
+        let tokens = TokenManager::open(store, [], Instant::now())?;
+        if tokens.migrate_legacy_settings("ferrumgate", time::OffsetDateTime::now_utc())? {
+            tracing::info!(target: "fg_core::auth", "legacy API token migrated");
+        }
+        Ok::<_, anyhow::Error>((Arc::new(manager), third_login))
     })
     .await??;
-    if let Some(password) = generated {
-        eprintln!("Initial administrator password: {password}");
-    }
     let third_login = if let Some(config) = third_login {
         let mut base = options
             .admin_origin

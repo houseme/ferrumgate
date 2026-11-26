@@ -100,6 +100,27 @@ impl ConfigStore {
         self.write_locked(name, &path, bytes, &mut history)
     }
 
+    /// Replaces the exact configuration read by a migration without archiving its old contents.
+    pub fn replace_unversioned(
+        &self,
+        name: &str,
+        expected: &[u8],
+        replacement: &[u8],
+    ) -> Result<bool> {
+        let path = self.path(name)?;
+        check_size(name, replacement.len())?;
+        let _lock = self.lock.lock().expect("config store lock poisoned");
+        let Some(mut file) = open_config(&path)? else {
+            return Ok(false);
+        };
+        if file.metadata()?.len() != expected.len() as u64 || !same_contents(&mut file, expected)? {
+            return Ok(false);
+        }
+        drop(file);
+        self.write_locked(name, &path, replacement, &mut History::default())?;
+        Ok(true)
+    }
+
     fn write_locked(
         &self,
         name: &str,
