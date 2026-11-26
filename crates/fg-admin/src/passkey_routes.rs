@@ -14,7 +14,7 @@ use time::OffsetDateTime;
 
 use crate::{
     ApiError, ApiJson, ApiRouter, RouteModels,
-    login::{Sessions, admin_token, credential_error, login_error},
+    login::{Sessions, admin_token, credential_error, login_detail_key, login_error},
     models::OkResponse,
 };
 
@@ -189,14 +189,24 @@ impl Routes {
         request: Assertion,
     ) -> Result<Response, ApiError> {
         let Extension(ConnectInfo(peer)) = peer.ok_or_else(ApiError::internal)?;
+        let ip = peer.ip();
         let passkeys = self.passkeys.clone();
         match self
             .sessions
-            .work(move || passkeys.finish_login(peer.ip(), &request.challenge, &request.credential))
+            .work(move || passkeys.finish_login(ip, &request.challenge, &request.credential))
             .await?
         {
-            Ok((session, username)) => self.sessions.cookies.response(session, username),
-            Err(error) => Ok(login_error(error)),
+            Ok((session, username)) => {
+                self.sessions
+                    .record_login(ip, &username, true, "/api/login/passkey/finish", "");
+                self.sessions.cookies.response(session, username)
+            }
+            Err(error) => {
+                let detail = login_detail_key(&error);
+                self.sessions
+                    .record_login(ip, "", false, "/api/login/passkey/finish", detail);
+                Ok(login_error(error))
+            }
         }
     }
 }

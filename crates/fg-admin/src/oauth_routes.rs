@@ -24,7 +24,8 @@ use url::Url;
 use crate::{
     ApiError, ApiRouter,
     assets::normalized_prefix,
-    login::{SessionCookies, cookie, login_error},
+    audit::AuditLog,
+    login::{SessionCookies, cookie, login_detail_key, login_error},
 };
 
 const NONCE: &str = "gately_login_nonce";
@@ -35,6 +36,7 @@ pub struct ManagedThirdLogin {
     settings: watch::Receiver<Arc<ThirdLoginSettings>>,
     accounts: Arc<AccountManager>,
     prefix: String,
+    audit: Option<Arc<AuditLog>>,
     active: ArcSwapOption<Routes>,
 }
 
@@ -43,11 +45,13 @@ impl ManagedThirdLogin {
         settings: watch::Receiver<Arc<ThirdLoginSettings>>,
         accounts: Arc<AccountManager>,
         prefix: &str,
+        audit: Option<Arc<AuditLog>>,
     ) -> Result<Self> {
         Ok(Self {
             settings,
             accounts,
             prefix: normalized_prefix(prefix)?.into(),
+            audit,
             active: ArcSwapOption::empty(),
         })
     }
@@ -77,7 +81,7 @@ impl ManagedThirdLogin {
                         ThirdLoginConfig::from_settings(&config)?,
                     )
                     .await?;
-                    Routes::new(Arc::new(service), Some(config))
+                    Routes::new(Arc::new(service), Some(config), self.audit.clone())
                 };
                 tokio::select! {
                     biased;
@@ -108,7 +112,7 @@ impl ManagedThirdLogin {
 
 impl ApiRouter {
     pub fn with_third_login(self, service: Arc<ThirdLogin>) -> Result<Self> {
-        let routes = Arc::new(Routes::new(service.clone(), None)?);
+        let routes = Arc::new(Routes::new(service.clone(), None, None)?);
         Ok(self.mount_third_login(
             move || Some(routes.clone()),
             move || service.password_login_enabled(),
@@ -171,12 +175,17 @@ struct Routes {
     settings: Option<Arc<ThirdLoginSettings>>,
     cookies: SessionCookies,
     attributes: String,
+    audit: Option<Arc<AuditLog>>,
 }
 
 type Peer = Option<Extension<ConnectInfo<SocketAddr>>>;
 
 impl Routes {
-    fn new(service: Arc<ThirdLogin>, settings: Option<Arc<ThirdLoginSettings>>) -> Result<Self> {
+    fn new(
+        service: Arc<ThirdLogin>,
+        settings: Option<Arc<ThirdLoginSettings>>,
+        audit: Option<Arc<AuditLog>>,
+    ) -> Result<Self> {
         let prefix = normalized_prefix(service.base().path())?;
         let secure = service.base().scheme() == "https";
         let cookies = SessionCookies::new(prefix, secure)?;
@@ -189,6 +198,7 @@ impl Routes {
             settings,
             cookies,
             attributes,
+            audit,
         })
     }
 
@@ -230,8 +240,17 @@ impl Routes {
             .await
         {
             Ok(session) => session,
-            Err(error) => return Ok(login_error(error)),
+            Err(error) => {
+                if let Some(audit) = &self.audit {
+                    let detail = login_detail_key(&error);
+                    audit.record_login(address, "", false, "/api/login/oauth/callback", detail);
+                }
+                return Ok(login_error(error));
+            }
         };
+        if let Some(audit) = &self.audit {
+            audit.record_login(address, "", true, "/api/login/oauth/callback", "");
+        }
         let (session, _) = self.cookies.issue(session)?;
         let mut response = Redirect::to(self.service.base().path()).into_response();
         response.headers_mut().append(header::SET_COOKIE, session);

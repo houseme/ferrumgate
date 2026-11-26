@@ -1089,6 +1089,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 208 项工作区测试和 9 项本机 Pebble ACME 测试。真实管理进程测试覆盖旧文件兼容、运行中切换到本机 OIDC、回调源校验、路径前缀与 PKCE、停用时拒绝已开始的回调，以及重启后保持停用。签名 OIDC 用例覆盖合法身份与浏览器绑定，设置用例覆盖密钥和代理凭据脱敏及还原。真实 GitHub、Google、QQ 和生产 OIDC 环境待验收。
 
+### WP-08 审计日志
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --lib audit
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin audit::
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 221 项工作区测试和 9 项本机 Pebble ACME 测试。判定规则用例覆盖变更方法、只读 POST 跳过清单、敏感读取片段与备份列表豁免。审计库用例覆盖最新优先查询、类别与文本过滤、轮转保留三份且幸存记录为最新连续段、队列满丢弃计数、钩子按写入顺序逐条回调，以及冻结目录下轮转失败计数且条目继续追加。回环 HTTP 用例覆盖登录成功与失败的原因键、变更与敏感访问记录、请求体与凭据不入档、令牌操作者命名 `api-token:<名称>`、只读账号与令牌查询 `/api/audit` 被拒、非法查询参数返回 400，以及审计写失败不影响请求成功。管理进程把每条变更与访问记录经钩子发布为 `audit.change` / `audit.access` 事件。可信代理的 `via` 字段随 WP-14 验收。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。

@@ -28,6 +28,8 @@ use tokio::{
     time::timeout,
 };
 
+#[path = "admin/audit.rs"]
+mod audit;
 #[path = "admin/compat.rs"]
 mod compat;
 #[path = "admin/login.rs"]

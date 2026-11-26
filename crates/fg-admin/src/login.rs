@@ -22,7 +22,8 @@ use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::sync::Semaphore;
 
 use crate::{
-    ApiError, ApiJson, ApiRouter, RouteModels, assets::normalized_prefix, models::OkResponse,
+    ApiError, ApiJson, ApiRouter, RouteModels, assets::normalized_prefix, audit::AuditLog,
+    models::OkResponse,
 };
 
 pub(super) const COOKIE_NAME: &str = "gately_token";
@@ -153,6 +154,7 @@ pub(super) fn admin_token(headers: &HeaderMap) -> Result<String, ApiError> {
 pub(super) struct Sessions {
     pub(super) accounts: Arc<AccountManager>,
     pub(super) cookies: SessionCookies,
+    pub(super) audit: Option<Arc<AuditLog>>,
     workers: Arc<Semaphore>,
 }
 
@@ -164,18 +166,33 @@ impl Sessions {
         crate::http::run_blocking(&self.workers, BUSY, operation).await
     }
 
+    pub(super) fn record_login(
+        &self,
+        ip: std::net::IpAddr,
+        actor: &str,
+        ok: bool,
+        path: &str,
+        detail: &str,
+    ) {
+        if let Some(audit) = &self.audit {
+            audit.record_login(ip, actor, ok, path, detail);
+        }
+    }
+
     async fn login(
         self: Arc<Self>,
         peer: Option<Extension<ConnectInfo<SocketAddr>>>,
         request: LoginRequest,
     ) -> Result<Response, ApiError> {
         let Extension(ConnectInfo(peer)) = peer.ok_or_else(ApiError::internal)?;
+        let ip = peer.ip();
+        let attempted = request.username.clone();
         let accounts = self.accounts.clone();
         let outcome = self
             .work(move || {
                 accounts
                     .login_with_totp_from(
-                        peer.ip(),
+                        ip,
                         &request.username,
                         &request.password,
                         request.code.as_deref(),
@@ -184,15 +201,29 @@ impl Sessions {
             })
             .await?;
         match outcome {
-            Ok((session, username)) => self.cookies.response(session, username),
-            Err(error) => Ok(login_error(error)),
+            Ok((session, username)) => {
+                self.record_login(ip, &username, true, "/api/login", "");
+                self.cookies.response(session, username)
+            }
+            Err(error) => {
+                let detail = login_detail_key(&error);
+                self.record_login(ip, &attempted, false, "/api/login", detail);
+                Ok(login_error(error))
+            }
         }
     }
 
-    async fn logout(self: Arc<Self>, headers: HeaderMap) -> Result<Response, ApiError> {
+    async fn logout(
+        self: Arc<Self>,
+        peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+        headers: HeaderMap,
+    ) -> Result<Response, ApiError> {
         if let Some(token) = session_token(&headers)
-            && self.accounts.identify(token).is_some()
+            && let Some(identity) = self.accounts.identify(token)
         {
+            if let Some(Extension(ConnectInfo(peer))) = peer {
+                self.record_login(peer.ip(), &identity.username, true, "/api/logout", "");
+            }
             let accounts = self.accounts.clone();
             let token = token.to_owned();
             self.work(move || accounts.revoke(&token))
@@ -279,6 +310,7 @@ pub(super) fn mount(
     router: ApiRouter,
     accounts: Arc<AccountManager>,
     cookies: SessionCookies,
+    audit: Option<Arc<AuditLog>>,
     disabled: Vec<&'static str>,
     absent: Vec<&'static str>,
     passkeys: Option<Passkeys>,
@@ -286,6 +318,7 @@ pub(super) fn mount(
     let state = Arc::new(Sessions {
         accounts,
         cookies,
+        audit,
         workers: Arc::new(Semaphore::new(4)),
     });
     let login = state.clone();
@@ -310,7 +343,7 @@ pub(super) fn mount(
                 Method::POST,
                 "/api/logout",
                 "Sign out of the current session",
-                move |headers| logout.logout(headers),
+                move |peer, headers| logout.logout(peer, headers),
             )
             .modeled_route(
                 Method::GET,
@@ -434,6 +467,19 @@ pub(super) fn credential_error(error: anyhow::Error) -> ApiError {
         BUSY
     } else {
         ApiError::internal()
+    }
+}
+
+/// The i18n key stored in audit `detail` for a failed login. Only the key is
+/// recorded; the interface translates it per request language.
+pub(super) fn login_detail_key(error: &LoginError) -> &'static str {
+    match error {
+        LoginError::TotpRequired => "login.totp-required",
+        LoginError::InvalidCredentials => "login.invalid-credentials",
+        LoginError::Locked(_) => "login.locked",
+        LoginError::Flood => "login.flood",
+        LoginError::Busy => "login.busy",
+        LoginError::Internal(_) => "login.internal",
     }
 }
 

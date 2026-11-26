@@ -23,6 +23,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     AdminAssets, ApiError, Localizer, RouteModels, Translation,
+    audit::AuditLog,
     http::{Presentation, RenderPolicy, boundary},
     login::{self, COOKIE_NAME, SessionCookies, bearer_token, password_fix_allowed, session_token},
     response::MAX_TRANSFORMS,
@@ -111,6 +112,7 @@ pub struct ApiRouter {
     auth: Auth,
     tokens: Option<Arc<TokenManager>>,
     modules: Option<Arc<(Registry, Enabled)>>,
+    audit: Option<Arc<AuditLog>>,
     presentation: Presentation,
     assets: Option<AdminAssets>,
 }
@@ -131,12 +133,25 @@ impl ApiRouter {
             auth: Arc::new(move |headers| authenticate(headers).map(Authenticated::External)),
             tokens: None,
             modules: None,
+            audit: None,
             assets: None,
             presentation: Presentation {
                 localizer: None,
                 budget: Arc::new(Semaphore::new(MAX_TRANSFORMS)),
             },
         }
+    }
+
+    /// Enables operation auditing for protected routes declared afterwards
+    /// and mounts the query endpoint. Call before declaring routes; account
+    /// routes installed by [`ApiRouter::with_accounts`] are audited too.
+    pub fn with_audit(mut self, audit: Arc<AuditLog>) -> Self {
+        assert!(
+            self.operations.is_empty(),
+            "configure the audit log before declaring routes"
+        );
+        self.audit = Some(audit);
+        self
     }
 
     pub fn with_modules(mut self, registry: Registry, enabled: Enabled) -> Self {
@@ -236,8 +251,9 @@ impl ApiRouter {
                 }
             }
         }
+        let audit = self.audit.clone();
         Ok(login::mount(
-            self, accounts, cookies, disabled, absent, passkeys,
+            self, accounts, cookies, audit, disabled, absent, passkeys,
         ))
     }
 
@@ -445,6 +461,15 @@ impl ApiRouter {
         let route = if *operation.access == Access::Public {
             route
         } else {
+            // The audit layer is declared first so authentication wraps it:
+            // each record names the actor and observes the final status.
+            let route = match self.audit.clone() {
+                Some(audit) => route.route_layer(middleware::from_fn_with_state(
+                    audit,
+                    crate::audit::middleware::observe,
+                )),
+                None => route,
+            };
             let policy = Policy {
                 auth: self.auth.clone(),
                 tokens: self.tokens.clone(),
@@ -479,6 +504,9 @@ impl ApiRouter {
         self.mount(openapi, move || async move {
             ([(header::CONTENT_TYPE, "application/json")], spec).into_response()
         });
+        if let Some(audit) = self.audit.clone() {
+            self = crate::audit::mount_query(self, audit);
+        }
         let modules = self.modules;
         let assets = self.assets;
         let router = self

@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use fg_admin::{ApiRouter, ManagedThirdLogin, SecurityExposure, SettingsState};
+use fg_admin::{ApiRouter, AuditLog, Category, ManagedThirdLogin, SecurityExposure, SettingsState};
 use fg_auth::{AccountManager, LoginLimits, passkey::Url, token::TokenManager};
 use fg_config::ConfigStore;
 use fg_core::{
@@ -62,6 +62,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         std::future::ready(())
     })?;
     let origin = options.admin_origin.clone();
+    let setup_events = events.clone();
     let (accounts, tokens, settings) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
         let initial = std::env::var("FERRUMGATE_INITIAL_PASSWORD");
@@ -74,7 +75,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         if let Some(password) = generated {
             eprintln!("Initial administrator password: {password}");
         }
-        let manager = manager.with_login_events(events);
+        let manager = manager.with_login_events(setup_events);
         manager.apply_pending_reset()?;
         let tokens = TokenManager::open(store.clone(), [], Instant::now())?;
         if tokens.migrate_legacy_settings("ferrumgate", time::OffsetDateTime::now_utc())? {
@@ -117,6 +118,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
                 accounts,
                 tokens: tokens.clone(),
                 settings,
+                events,
             }
             .run(ready, logs)
             .await
@@ -150,6 +152,7 @@ struct ManagementService {
     accounts: Arc<AccountManager>,
     tokens: Arc<TokenManager>,
     settings: Arc<SettingsState>,
+    events: EventBus,
 }
 
 impl ManagementService {
@@ -160,13 +163,39 @@ impl ManagementService {
             accounts,
             tokens,
             settings,
+            events,
         } = self;
         let started = settings.snapshot();
         let updates = settings.subscribe();
         let directory = settings.directory().to_owned();
+        let audit = AuditLog::open(&directory).context("open the audit log")?;
+        {
+            let events = events.clone();
+            audit.set_hook(Box::new(move |entry| {
+                let kind = match entry.category {
+                    Category::Change => fg_core::events::Kind::AuditChange,
+                    Category::Access => fg_core::events::Kind::AuditAccess,
+                    Category::Login => return,
+                };
+                events.publish_with(|| {
+                    let mut event = fg_core::events::Event::new(kind, "audit");
+                    event.fields.push(("actor", entry.actor.clone()));
+                    event
+                        .fields
+                        .push(("ip", entry.ip.to_canonical().to_string()));
+                    if !entry.module.is_empty() {
+                        event.fields.push(("module", entry.module.clone()));
+                    }
+                    event.fields.push(("method", entry.method.clone()));
+                    event.fields.push(("path", entry.path.clone()));
+                    event
+                });
+            }));
+        }
         let router = ApiRouter::default()
             .with_modules(ready.registry, ready.enabled)
-            .with_token_authentication(tokens.clone());
+            .with_token_authentication(tokens.clone())
+            .with_audit(audit.clone());
         let origin = options.admin_origin.as_ref();
         let router = if let Some(origin) = origin {
             router.with_passkey_accounts(accounts.clone(), &options.admin_prefix, origin)?
@@ -183,6 +212,7 @@ impl ManagementService {
             settings.subscribe_third_login(),
             accounts.clone(),
             &options.admin_prefix,
+            Some(audit.clone()),
         )?);
         let admin = router
             .with_logs(logs.handle())
@@ -206,12 +236,14 @@ impl ManagementService {
         })
         .into_future();
         tokio::pin!(server);
-        tokio::select! {
+        let served = tokio::select! {
             result = &mut server => result.context("serve management"),
             () = maintenance => server.await.context("drain management"),
             () = runtime => server.await.context("serve management after settings watcher closed"),
             () = third_login.run() => server.await.context("serve management after OAuth settings watcher closed"),
-        }
+        };
+        audit.flush();
+        served
     }
 }
 
