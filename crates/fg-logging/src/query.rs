@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write},
@@ -10,8 +11,8 @@ use flate2::read::GzDecoder;
 use time::format_description::well_known::Rfc3339;
 
 use crate::{
-    Entry, Filter, Level, Logs, MAX_FILE_BYTES, MAX_JSON_LINE, MAX_LINES, MAX_RING_BYTES, Module,
-    Record,
+    Entry, Filter, Level, LogHandle, Logs, MAX_FILE_BYTES, MAX_JSON_LINE, MAX_LINES,
+    MAX_RING_BYTES, Module, Record,
     archive::{self, MAX_ARCHIVES, MAX_RAW},
     persist::open_regular,
 };
@@ -31,7 +32,49 @@ pub enum Format {
     Csv,
 }
 
+pub struct Export<'a> {
+    pub module: Module,
+    pub after: u64,
+    pub before: u64,
+    pub filter: &'a Filter,
+    pub format: Format,
+}
+
 impl Logs {
+    pub fn query(
+        &self,
+        module: Module,
+        after: u64,
+        before: u64,
+        limit: usize,
+        filter: &Filter,
+    ) -> io::Result<Page> {
+        self.handle().query(module, after, before, limit, filter)
+    }
+
+    pub fn export(
+        &self,
+        module: Module,
+        after: u64,
+        before: u64,
+        filter: &Filter,
+        format: Format,
+        output: impl Write,
+    ) -> io::Result<()> {
+        self.handle().export(
+            Export {
+                module,
+                after,
+                before,
+                filter,
+                format,
+            },
+            output,
+        )
+    }
+}
+
+impl LogHandle {
     /// Returns the latest matches in sequence order. A zero limit reads only memory.
     pub fn query(
         &self,
@@ -41,25 +84,59 @@ impl Logs {
         limit: usize,
         filter: &Filter,
     ) -> io::Result<Page> {
+        self.query_projected(module, after, before, limit, filter, |entry| {
+            Cow::Borrowed(entry)
+        })
+    }
+
+    /// Matches filters against projected records and returns the underlying records.
+    /// The projection must preserve timestamps for archive pruning.
+    pub fn query_projected(
+        &self,
+        module: Module,
+        after: u64,
+        before: u64,
+        limit: usize,
+        filter: &Filter,
+        mut project: impl for<'entry> FnMut(&'entry Entry) -> Cow<'entry, Entry>,
+    ) -> io::Result<Page> {
         if limit > MAX_LINES {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "log query limit exceeds 20000",
             ));
         }
-        let candidates = if limit > 0 && filter == &Filter::default() {
+        let unfiltered = filter == &Filter::default();
+        let mut matches = |entry: &Entry| unfiltered || filter.matches(&project(entry));
+        let candidates = if limit > 0 && unfiltered {
             limit + 1
         } else {
             0
         };
-        let mut entries = self.recent(module, after, before, candidates);
-        entries.retain(|entry| filter.matches(entry));
+        let (mut entries, imported_through) = if limit == 0 {
+            (self.recent(module, after, before, candidates), None)
+        } else {
+            let _destination = self
+                .0
+                .destinations
+                .lock()
+                .expect("log destination poisoned");
+            (
+                self.recent(module, after, before, candidates),
+                self.0
+                    .disk
+                    .load()
+                    .as_ref()
+                    .map(|disk| disk.imported_through[module as usize]),
+            )
+        };
+        if !unfiltered {
+            entries.retain(|entry| matches(entry));
+        }
         let complete_in_memory = limit > 0
             && entries.len() > limit
-            && self.disk.as_ref().is_none_or(|disk| {
-                entries[entries.len() - limit].seq > disk.imported_through[module as usize]
-            });
-        if limit == 0 || complete_in_memory || self.disk.is_none() {
+            && imported_through.is_none_or(|cutoff| entries[entries.len() - limit].seq > cutoff);
+        if complete_in_memory || imported_through.is_none() {
             let has_more = limit > 0 && entries.len() > limit;
             if has_more {
                 entries.drain(..entries.len() - limit);
@@ -79,7 +156,7 @@ impl Logs {
                 if entry.seq <= after {
                     return Ok(false);
                 }
-                if in_range(entry.seq, after, before) && filter.matches(entry) {
+                if in_range(entry.seq, after, before) && matches(entry) {
                     let received = entry.bytes();
                     if entries.len() == limit || bytes + received > MAX_RING_BYTES {
                         has_more = true;
@@ -99,32 +176,49 @@ impl Logs {
     }
 
     /// Streams the retained records oldest first. Call on a blocking worker for file-backed logs.
-    pub fn export(
+    pub fn export(&self, request: Export<'_>, output: impl Write) -> io::Result<()> {
+        self.export_projected(request, output, |entry| Cow::Borrowed(entry), || false)
+    }
+
+    /// Projects each matching record before serialization and observes cancellation while scanning.
+    pub fn export_projected(
         &self,
-        module: Module,
-        after: u64,
-        before: u64,
-        filter: &Filter,
-        format: Format,
+        request: Export<'_>,
         output: impl Write,
+        mut project: impl for<'entry> FnMut(&'entry Entry) -> Cow<'entry, Entry>,
+        cancelled: impl Fn() -> bool,
     ) -> io::Result<()> {
+        let Export {
+            module,
+            after,
+            before,
+            filter,
+            format,
+        } = request;
         let snapshot = self.snapshot(module, after, before)?;
         let mut output = BufWriter::with_capacity(BLOCK, output);
         if matches!(format, Format::Csv) {
             output.write_all(b"\xEF\xBB\xBFtime,level,source,message,ip,host,site,status,method,path,rule,user,deny\r\n")?;
         }
         snapshot.visit::<false>(filter, |row| {
+            if cancelled() {
+                return Err(io::ErrorKind::BrokenPipe.into());
+            }
             let entry = row.entry();
             if before != 0 && entry.seq >= before {
                 return Ok(false);
             }
-            if in_range(entry.seq, after, before) && filter.matches(entry) {
+            if in_range(entry.seq, after, before) {
+                let entry = project(entry);
+                if !filter.matches(&entry) {
+                    return Ok(true);
+                }
                 match format {
                     Format::JsonLines => {
-                        serde_json::to_writer(&mut output, entry)?;
+                        serde_json::to_writer(&mut output, entry.as_ref())?;
                         output.write_all(b"\n")?;
                     }
-                    Format::Csv => write_csv(&mut output, entry)?,
+                    Format::Csv => write_csv(&mut output, entry.as_ref())?,
                 }
             }
             Ok(true)
@@ -133,9 +227,15 @@ impl Logs {
     }
 
     fn snapshot(&self, module: Module, after: u64, before: u64) -> io::Result<Snapshot> {
-        let view = self.disk.as_ref().map(|disk| &disk.view);
+        let destination = self
+            .0
+            .destinations
+            .lock()
+            .expect("log destination poisoned");
+        let disk = self.0.disk.load();
+        let view = disk.as_ref().map(|disk| &disk.view);
         let files_guard = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
-        let buffer = self.layer.0.buffers[module as usize]
+        let buffer = self.0.buffers[module as usize]
             .lock()
             .expect("log buffer poisoned");
         let latest = buffer.latest;
@@ -144,8 +244,8 @@ impl Logs {
         let cutoff = files_guard
             .as_ref()
             .map_or(0, |files| files[module as usize].through);
-        if let Some(disk) = &self.disk {
-            disk.worker.queue.snapshot(|Record(origin, entry)| {
+        if let Some(disk) = &*disk {
+            disk.queue.snapshot(|Record(origin, entry)| {
                 if *origin == module
                     && entry.seq > cutoff
                     && entry.seq <= latest
@@ -178,6 +278,8 @@ impl Logs {
             }
         }
         drop(files_guard);
+        drop(disk);
+        drop(destination);
         live.sort_unstable_by_key(|entry| entry.seq);
         live.dedup_by_key(|entry| entry.seq);
         Ok(Snapshot {
@@ -528,7 +630,7 @@ mod tests {
             },
             io::sink(),
         )?;
-        let view = logs.snapshot(Module::System, 0, 0)?;
+        let view = logs.handle().snapshot(Module::System, 0, 0)?;
         fs::rename(&current, &rotated)?;
         fs::OpenOptions::new()
             .append(true)

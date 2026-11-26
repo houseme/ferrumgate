@@ -30,6 +30,8 @@ use tokio::{
 
 #[path = "admin/compat.rs"]
 mod compat;
+#[path = "admin/logs.rs"]
+mod logs;
 #[path = "admin/models.rs"]
 mod models;
 #[path = "admin/transport.rs"]

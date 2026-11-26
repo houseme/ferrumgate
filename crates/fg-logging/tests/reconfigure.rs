@@ -29,6 +29,7 @@ fn directory_switch_preserves_old_files_and_uses_destination_sequence() -> Resul
     let busy_logs = open(busy.path())?;
     fs::write(next.path().join("gately.log"), b"{\"seq\":90,\"time\":\"2026-11-26T00:00:00Z\",\"level\":\"info\",\"source\":\"imported\",\"message\":\"destination history\"}\n")?;
     let mut logs = open(old.path())?;
+    let handle = logs.handle();
     let layer = tracing_subscriber::registry().with(logs.layer());
     tracing::subscriber::with_default(layer, || -> Result<()> {
         tracing::info!(target: "fgate", "old first");
@@ -36,10 +37,11 @@ fn directory_switch_preserves_old_files_and_uses_destination_sequence() -> Resul
         assert!(logs.set_directory(Some("relative".into())).is_err());
         tracing::info!(target: "fgate", "remaining in old directory");
         logs.set_directory(Some(next.path().to_owned()))?;
-        let page = logs.query(Module::System, 0, 0, 1, &Filter::default())?;
+        let page = handle.query(Module::System, 0, 0, 1, &Filter::default())?;
         assert_eq!(page.entries[0].message, "destination history");
         assert!(
-            logs.sources(Module::System)
+            handle
+                .sources(Module::System)
                 .contains(&"imported".to_owned())
         );
         assert_eq!(
@@ -54,7 +56,7 @@ fn directory_switch_preserves_old_files_and_uses_destination_sequence() -> Resul
         logs.set_directory(Some(next.path().join(".")))?;
         logs.set_directory(None)?;
         tracing::info!(target: "fgate", "memory only");
-        assert_eq!(logs.recent(Module::System, 0, 0, 1)[0].seq, 92);
+        assert_eq!(handle.recent(Module::System, 0, 0, 1)[0].seq, 92);
         logs.set_directory(Some(old.path().to_owned()))?;
         tracing::info!(target: "fgate", "back in old directory");
         Ok(())
@@ -76,6 +78,10 @@ fn directory_switch_preserves_old_files_and_uses_destination_sequence() -> Resul
         [90, 91]
     );
     assert!(!busy.path().join("gately.log").exists());
+    let reopened = open(old.path())?;
+    handle.clear(Module::System)?;
+    assert_eq!(disk_entries(old.path())?.last().unwrap().seq, 93);
+    reopened.shutdown(Duration::from_secs(3))?;
     Ok(())
 }
 

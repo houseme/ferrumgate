@@ -5,6 +5,7 @@ mod collection;
 mod http;
 mod item_json;
 mod localize;
+mod logs;
 mod models;
 mod redact;
 mod response;

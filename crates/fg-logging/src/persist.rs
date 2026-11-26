@@ -19,7 +19,6 @@ pub(super) struct Disk {
     pub view: Arc<DiskView>,
     limit: u64,
     streams: [Stream; MODULES.len()],
-    _lock: File,
     encoded: Vec<u8>,
     archive: Option<ArchiveOptions>,
     maintenance_pending: bool,
@@ -30,6 +29,7 @@ pub(super) struct DiskView {
     pub dir: PathBuf,
     pub files: Mutex<[Clear; MODULES.len()]>,
     pub archive_web: bool,
+    _lock: File,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -95,9 +95,9 @@ impl Disk {
                 dir,
                 files: Mutex::new([Clear::default(); MODULES.len()]),
                 archive_web: archive.is_some(),
+                _lock: lock,
             }),
             limit,
-            _lock: lock,
             streams: std::array::from_fn(|_| Stream::default()),
             encoded: Vec::with_capacity(1024),
             archive,

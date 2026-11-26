@@ -20,7 +20,7 @@ use arc_swap::ArcSwapOption;
 pub use archive::ArchiveOptions;
 pub use filter::Filter;
 use persist::{Disk, DiskView};
-pub use query::{Format, Page};
+pub use query::{Export, Format, Page};
 use queue::{Queue, Worker};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -77,6 +77,7 @@ impl Module {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     Debug,
@@ -85,10 +86,12 @@ pub enum Level {
     Error,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Entry {
     pub seq: u64,
     #[serde(with = "time::serde::rfc3339")]
+    #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub time: OffsetDateTime,
     pub level: Level,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -172,11 +175,12 @@ struct Record(Module, Arc<Entry>);
 struct Shared {
     buffers: [Mutex<Buffer>; MODULES.len()],
     lines: usize,
-    disk: ArcSwapOption<Queue<Record>>,
+    disk: ArcSwapOption<DiskTarget>,
+    destinations: Mutex<()>,
 }
 
-struct ActiveDisk {
-    worker: Worker<Record>,
+struct DiskTarget {
+    queue: Arc<Queue<Record>>,
     view: Arc<DiskView>,
     imported_through: [u64; MODULES.len()],
 }
@@ -184,7 +188,7 @@ struct ActiveDisk {
 pub struct Logs {
     layer: LogLayer,
     echo: Worker<Vec<u8>>,
-    disk: Option<ActiveDisk>,
+    disk: Option<Worker<Record>>,
     draining_disk: Option<Worker<Record>>,
     file_bytes: u64,
     web_archive: Option<ArchiveOptions>,
@@ -233,13 +237,15 @@ impl Logs {
                 output.flush()
             },
         )?;
-        let disk = disk
-            .map(|sink| start_disk(sink, echo.queue.clone()))
-            .transpose()?;
+        let (disk, target) = disk
+            .map(|sink| start_disk(sink, echo.queue.clone(), [0; MODULES.len()]))
+            .transpose()?
+            .unzip();
         let layer = LogLayer(Arc::new(Shared {
             buffers: buffers.map(Mutex::new),
             lines: options.lines,
-            disk: ArcSwapOption::new(disk.as_ref().map(|disk| disk.worker.queue.clone())),
+            disk: ArcSwapOption::new(target),
+            destinations: Mutex::new(()),
         }));
         Ok(Self {
             layer,
@@ -249,6 +255,10 @@ impl Logs {
             file_bytes: options.file_bytes,
             web_archive: options.web_archive,
         })
+    }
+
+    pub fn handle(&self) -> LogHandle {
+        LogHandle(self.layer.0.clone())
     }
 
     pub fn layer(&self) -> LogLayer {
@@ -265,7 +275,10 @@ impl Logs {
         if let Some(path) = &directory {
             ensure!(path.is_absolute(), "log directory must be absolute");
             if self
+                .layer
+                .0
                 .disk
+                .load()
                 .as_ref()
                 .is_some_and(|disk| path.canonicalize().is_ok_and(|path| path == disk.view.dir))
             {
@@ -284,16 +297,21 @@ impl Logs {
 
         // The destination scan only needs its latest sequence per stream and known sources.
         let mut restored = std::array::from_fn(|_| Buffer::default());
-        let next = directory
+        let (next, target) = directory
             .map(|dir| {
                 let sink = Disk::open(dir, self.file_bytes, 1, self.web_archive, &mut restored)?;
-                let mut disk = start_disk(sink, self.echo.queue.clone())?;
-                disk.imported_through = restored.each_ref().map(|buffer| buffer.latest);
-                Ok::<_, anyhow::Error>(disk)
+                let cutoff = restored.each_ref().map(|buffer| buffer.latest);
+                Ok::<_, anyhow::Error>(start_disk(sink, self.echo.queue.clone(), cutoff)?)
             })
-            .transpose()?;
-        let queue = next.as_ref().map(|disk| disk.worker.queue.clone());
+            .transpose()?
+            .unzip();
         {
+            let _destination = self
+                .layer
+                .0
+                .destinations
+                .lock()
+                .expect("log destination poisoned");
             // Producers choose a queue under their stream lock, so no old-directory enqueue
             // can straddle this boundary.
             let mut buffers = self
@@ -311,11 +329,11 @@ impl Logs {
                     buffer.sources.insert(source);
                 }
             }
-            self.layer.0.disk.store(queue);
+            self.layer.0.disk.store(target);
         }
         if let Some(old) = std::mem::replace(&mut self.disk, next) {
-            old.worker.close();
-            if let Err(error) = old.worker.wait(Instant::now() + Duration::from_secs(3)) {
+            old.close();
+            if let Err(error) = old.wait(Instant::now() + Duration::from_secs(3)) {
                 let notice = format!(
                     "ferrumgate: previous log directory did not flush ({:?})\n",
                     error.kind()
@@ -324,7 +342,7 @@ impl Logs {
                 let bytes = notice.capacity();
                 self.echo.queue.push(notice, bytes);
                 if error.kind() == io::ErrorKind::TimedOut {
-                    self.draining_disk = Some(old.worker);
+                    self.draining_disk = Some(old);
                 }
             }
         }
@@ -332,7 +350,59 @@ impl Logs {
     }
 
     pub fn recent(&self, module: Module, after: u64, before: u64, limit: usize) -> Vec<Arc<Entry>> {
-        let buffer = self.layer.0.buffers[module as usize]
+        self.handle().recent(module, after, before, limit)
+    }
+
+    pub fn sources(&self, module: Module) -> Vec<String> {
+        self.handle().sources(module)
+    }
+
+    pub fn clear(&self, module: Module) -> io::Result<()> {
+        self.handle().clear(module)
+    }
+
+    pub fn shutdown(self, timeout: Duration) -> io::Result<()> {
+        let deadline = Instant::now() + timeout;
+        if let Some(disk) = &self.disk {
+            disk.close();
+        }
+        let disk = self
+            .disk
+            .as_ref()
+            .map(|disk| disk.wait(deadline))
+            .transpose();
+        let draining = self
+            .draining_disk
+            .as_ref()
+            .map(|worker| worker.wait(deadline))
+            .transpose();
+        self.echo.close();
+        let echo = self.echo.wait(deadline);
+        disk.and(draining).and(echo)
+    }
+}
+
+impl Drop for Logs {
+    fn drop(&mut self) {
+        if self.disk.is_some() {
+            let _destination = self
+                .layer
+                .0
+                .destinations
+                .lock()
+                .expect("log destination poisoned");
+            self.layer.0.disk.store(None);
+        }
+    }
+}
+
+/// Access to current logs without taking ownership of their workers.
+#[derive(Clone)]
+pub struct LogHandle(Arc<Shared>);
+
+impl LogHandle {
+    pub fn recent(&self, module: Module, after: u64, before: u64, limit: usize) -> Vec<Arc<Entry>> {
+        let buffer = self.0.buffers[module as usize]
             .lock()
             .expect("log buffer poisoned");
         let mut entries: Vec<_> = buffer
@@ -346,7 +416,7 @@ impl Logs {
     }
 
     pub fn sources(&self, module: Module) -> Vec<String> {
-        self.layer.0.buffers[module as usize]
+        self.0.buffers[module as usize]
             .lock()
             .expect("log buffer poisoned")
             .sources
@@ -357,12 +427,18 @@ impl Logs {
 
     /// Clears the selected stream and discards its already queued records.
     pub fn clear(&self, module: Module) -> io::Result<()> {
-        let view = self.disk.as_ref().map(|disk| &disk.view);
+        let _destination = self
+            .0
+            .destinations
+            .lock()
+            .expect("log destination poisoned");
+        let disk = self.0.disk.load();
+        let view = disk.as_ref().map(|disk| &disk.view);
         let mut files = view.map(|view| view.files.lock().expect("log file mutex poisoned"));
         if let Some(view) = view {
             view.clear_files(module)?;
         }
-        let mut buffer = self.layer.0.buffers[module as usize]
+        let mut buffer = self.0.buffers[module as usize]
             .lock()
             .expect("log buffer poisoned");
         if let Some(files) = &mut files {
@@ -378,29 +454,13 @@ impl Logs {
         drop((entries, sources));
         Ok(())
     }
-
-    pub fn shutdown(self, timeout: Duration) -> io::Result<()> {
-        let deadline = Instant::now() + timeout;
-        if let Some(disk) = &self.disk {
-            disk.worker.close();
-        }
-        let disk = self
-            .disk
-            .as_ref()
-            .map(|disk| disk.worker.wait(deadline))
-            .transpose();
-        let draining = self
-            .draining_disk
-            .as_ref()
-            .map(|worker| worker.wait(deadline))
-            .transpose();
-        self.echo.close();
-        let echo = self.echo.wait(deadline);
-        disk.and(draining).and(echo)
-    }
 }
 
-fn start_disk(mut sink: Disk, echo: Arc<Queue<Vec<u8>>>) -> io::Result<ActiveDisk> {
+fn start_disk(
+    mut sink: Disk,
+    echo: Arc<Queue<Vec<u8>>>,
+    imported_through: [u64; MODULES.len()],
+) -> io::Result<(Worker<Record>, Arc<DiskTarget>)> {
     let view = sink.view.clone();
     let worker = Worker::spawn(
         "fg-log-disk",
@@ -435,11 +495,12 @@ fn start_disk(mut sink: Disk, echo: Arc<Queue<Vec<u8>>>) -> io::Result<ActiveDis
             Ok(())
         },
     )?;
-    Ok(ActiveDisk {
-        worker,
+    let target = Arc::new(DiskTarget {
+        queue: worker.queue.clone(),
         view,
-        imported_through: [0; MODULES.len()],
-    })
+        imported_through,
+    });
+    Ok((worker, target))
 }
 
 #[derive(Clone)]
@@ -475,7 +536,7 @@ impl<S: Subscriber> Layer<S> for LogLayer {
         let bytes = entry.bytes();
         buffer.add(entry.clone(), bytes, self.0.lines);
         if let Some(disk) = &*self.0.disk.load() {
-            disk.push(Record(module, entry), bytes);
+            disk.queue.push(Record(module, entry), bytes);
         }
     }
 }

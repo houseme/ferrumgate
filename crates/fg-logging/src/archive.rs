@@ -377,7 +377,7 @@ pub(super) fn remove(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::{Buffer, persist::Disk};
 
     #[test]
     fn retention_expires_old_files_then_prunes_oldest_to_budget() -> Result<()> {
@@ -416,14 +416,15 @@ mod tests {
         let root = tempfile::tempdir()?;
         let raw = root.path().join("webservice.20261125T000000Z.log");
         fs::write(&raw, b"new file")?;
-        let mut files = [super::super::persist::Clear::default(); super::super::MODULES.len()];
-        files[Module::Web as usize].generation = 1;
-        let view = DiskView {
-            dir: root.path().to_owned(),
-            files: Mutex::new(files),
-            archive_web: true,
-        };
-        compress(&view, 0, &raw)?;
+        let disk = Disk::open(
+            root.path().to_owned(),
+            MAX_RAW,
+            1,
+            None,
+            &mut std::array::from_fn(|_| Buffer::default()),
+        )?;
+        disk.view.files.lock().unwrap()[Module::Web as usize].generation = 1;
+        compress(&disk.view, 0, &raw)?;
         assert!(raw.exists());
         assert!(!raw.with_extension("log.gz").exists());
         Ok(())
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn query_skips_disjoint_gzip_without_reading_its_body() -> Result<()> {
-        use super::super::{MODULES, persist::Clear, query::LogFile};
+        use crate::query::LogFile;
         use flate2::read::GzDecoder;
 
         let root = tempfile::tempdir()?;
@@ -443,12 +444,14 @@ mod tests {
                 "{\"seq\":2,\"level\":\"info\",\"time\":\"2026-11-25T00:00:00Z\",\"message\":\"earlier\"}\n",
             ),
         )?;
-        let view = DiskView {
-            dir: root.path().to_owned(),
-            files: Mutex::new([Clear::default(); MODULES.len()]),
-            archive_web: true,
-        };
-        compress(&view, 0, &raw)?;
+        let disk = Disk::open(
+            root.path().to_owned(),
+            MAX_RAW,
+            1,
+            None,
+            &mut std::array::from_fn(|_| Buffer::default()),
+        )?;
+        compress(&disk.view, 0, &raw)?;
         let path = raw.with_extension("log.gz");
         let header = GzDecoder::new(fs::File::open(&path)?);
         let extra = header.header().unwrap().extra().unwrap();

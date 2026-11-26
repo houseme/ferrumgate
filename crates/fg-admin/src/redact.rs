@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use axum::http::HeaderName;
+use fg_logging::Entry;
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
 use url::Url;
@@ -9,6 +10,36 @@ use crate::SECRET_MASK;
 
 pub(super) fn redact(value: &mut Value) {
     redact_value(value, false);
+}
+
+pub(super) fn redact_log(entry: &Entry) -> Cow<'_, Entry> {
+    let mut output = Cow::Borrowed(entry);
+    if let Some(source) = redact_urls(&entry.source) {
+        output.to_mut().source = source;
+    }
+    if let Some(message) = redact_urls(&entry.message) {
+        output.to_mut().message = message;
+    }
+    if !entry.fields.is_empty() {
+        let mut value = Value::Object(
+            entry
+                .fields
+                .iter()
+                .map(|(key, text)| (key.clone(), Value::String(text.clone())))
+                .collect(),
+        );
+        redact(&mut value);
+        if let Value::Object(fields) = value {
+            for (key, masked) in fields {
+                if let Value::String(masked) = masked
+                    && entry.fields.get(&key) != Some(&masked)
+                {
+                    output.to_mut().fields.insert(key, masked);
+                }
+            }
+        }
+    }
+    output
 }
 
 fn redact_value(value: &mut Value, credential: bool) {

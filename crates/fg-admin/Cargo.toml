@@ -8,19 +8,22 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 arc-swap = "1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 fg-config = { path = "../fg-config" }
 fg-core = { path = "../fg-core" }
+fg-logging = { path = "../fg-logging", features = ["schema"] }
 flate2 = "1"
 getrandom = "0.4"
 http-body = "1"
 http-body-util = "0.1"
 percent-encoding = "2"
 schemars = "1"
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tempfile.workspace = true
+time = { workspace = true, features = ["parsing"] }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio-stream = { version = "0.1", default-features = false }
 url = "2"
 
 [dev-dependencies]
