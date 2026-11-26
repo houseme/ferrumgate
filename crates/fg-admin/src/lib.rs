@@ -5,6 +5,6 @@ mod http;
 mod router;
 pub mod scope;
 
-pub use collection::{Collection, CollectionPaths};
+pub use collection::{Collection, CollectionPaths, ItemChange, SECRET_MASK, keep_secret};
 pub use http::{ApiError, ApiJson};
 pub use router::{Admin, ApiRouter, Principal};

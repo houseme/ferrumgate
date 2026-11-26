@@ -1,4 +1,8 @@
-use std::{fs, sync::Arc, time::Duration};
+use std::{
+    fs,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use anyhow::Result;
 use axum::{
@@ -6,7 +10,10 @@ use axum::{
     body::Body,
     http::{HeaderMap, Method, Request, StatusCode},
 };
-use fg_admin::{ApiError, ApiRouter, Collection, CollectionPaths, Principal};
+use fg_admin::{
+    ApiError, ApiRouter, Collection, CollectionPaths, ItemChange, Principal, SECRET_MASK,
+    keep_secret,
+};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::registry::Registry;
 use http_body_util::BodyExt;
@@ -89,6 +96,9 @@ fn principal(headers: &HeaderMap) -> Option<Principal> {
         "token" => Some(Principal::Token {
             scopes: vec!["ddns:read".into()],
         }),
+        "writer" => Some(Principal::Token {
+            scopes: vec!["ddns:write".into()],
+        }),
         _ => None,
     }
 }
@@ -101,10 +111,20 @@ struct Rule {
     name: String,
     #[serde(default)]
     secret: String,
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    group: String,
 }
 
-fn attach_collection(router: ApiRouter, store: Arc<ConfigStore>) -> Result<Router> {
-    let collection = Collection::<Rule>::open(
+const RULES: CollectionPaths = CollectionPaths {
+    list: "/api/ddns/rules",
+    item: "/api/ddns/rules/{key}",
+    batch_delete: "/api/ddns/rules/batch-delete",
+};
+
+fn open_collection(store: Arc<ConfigStore>) -> Result<Collection<Rule>> {
+    Collection::<Rule>::open(
         store,
         "ddns",
         8,
@@ -117,19 +137,352 @@ fn attach_collection(router: ApiRouter, store: Arc<ConfigStore>) -> Result<Route
             }
             Ok(())
         },
-        |row| json!({"key":row.key,"name":row.name}),
-    )?;
-    Ok(collection
-        .register(
-            router,
-            CollectionPaths {
-                list: "/api/ddns/rules",
-                item: "/api/ddns/rules/{key}",
-                batch_delete: "/api/ddns/rules/batch-delete",
-            },
-        )
+        |row| json!({"key":row.key,"name":row.name,"enable":row.enabled,"group":row.group}),
+    )
+}
+
+fn attach_collection(router: ApiRouter, store: Arc<ConfigStore>) -> Result<Router> {
+    Ok(open_collection(store)?
+        .register(router, RULES)
         .finish()
         .router)
+}
+
+fn rule(key: &str, name: &str) -> Rule {
+    Rule {
+        key: key.into(),
+        name: name.into(),
+        secret: format!("test-secret-{key}"),
+        enabled: false,
+        group: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn collection_batches_validate_once_publish_once_and_notify_in_request_order() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(&dir.path().join("config"))?;
+    store.save(
+        "ddns",
+        &vec![
+            rule("a", "exclusive"),
+            rule("b", "exclusive"),
+            rule("c", "pinned"),
+        ],
+    )?;
+    store.enable_history(20, &[]);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let events = observed.clone();
+    let collection = open_collection(store.clone())?
+        .enabled(|row| &mut row.enabled)
+        .group(|row| &mut row.group)
+        .check_enable(|rows, _| {
+            if rows
+                .iter()
+                .filter(|row| row.name == "exclusive" && row.enabled)
+                .count()
+                > 1
+            {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "exclusive items cannot run together",
+                ));
+            }
+            Ok(())
+        })
+        .before_remove(|rows, indices| {
+            if indices.iter().any(|&index| rows[index].name == "pinned") {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "item is still referenced",
+                ));
+            }
+            Ok(())
+        })
+        .on_change(move |change, key| events.lock().unwrap().push((change, key.to_owned())));
+    let admin = collection
+        .register(ApiRouter::new(principal), RULES)
+        .finish();
+    assert_eq!(
+        admin.document()["paths"]["/api/ddns/rules-enable"]["put"]["x-required-scope"],
+        "ddns:write"
+    );
+    assert!(admin.document()["paths"]["/api/ddns/rules-group"]["put"].is_object());
+    let server = Server::start(admin.router).await?;
+    let enable = "/api/ddns/rules-enable";
+    let before = store.load_raw("ddns")?;
+    for (keys, status) in [
+        (r#"["a","b"]"#, StatusCode::CONFLICT),
+        (r#"["a","missing"]"#, StatusCode::NOT_FOUND),
+    ] {
+        let body = format!(r#"{{"keys":{keys},"enable":true}}"#);
+        assert_eq!(server.call("PUT", enable, &EDIT, body).await?.0, status);
+    }
+    assert_eq!(store.load_raw("ddns")?, before);
+    assert!(store.versions("ddns")?.is_empty());
+    assert!(observed.lock().unwrap().is_empty());
+
+    let batch = r#"{"keys":["c","a","a"],"enable":true}"#;
+    assert_eq!(
+        server.call("PUT", enable, &EDIT, batch).await?.2,
+        json!({"changed":2})
+    );
+    assert_eq!(store.versions("ddns")?.len(), 1);
+    assert_eq!(
+        server.call("PUT", enable, &EDIT, batch).await?.2,
+        json!({"changed":0})
+    );
+    assert_eq!(store.versions("ddns")?.len(), 1);
+    assert_eq!(
+        server
+            .call(
+                "PUT",
+                "/api/ddns/rules/c/enable",
+                &EDIT,
+                r#"{"enable":false}"#
+            )
+            .await?
+            .2,
+        json!({"ok":true})
+    );
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        &[
+            (ItemChange::Updated, "c".into()),
+            (ItemChange::Updated, "a".into()),
+            (ItemChange::Updated, "c".into())
+        ]
+    );
+
+    let order = "/api/ddns/rules-order";
+    assert_eq!(
+        server
+            .call("PUT", order, &EDIT, r#"{"keys":["c","c","a"]}"#)
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        server
+            .call("PUT", order, &EDIT, r#"{"keys":["c","a","b"]}"#)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    let group = "/api/ddns/rules-group";
+    let grouped = r#"{"keys":["b","a","a"],"group":"  東區  "}"#;
+    assert_eq!(
+        server.call("PUT", group, &EDIT, grouped).await?.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server.call("PUT", group, &EDIT, grouped).await?.0,
+        StatusCode::OK
+    );
+    let too_long = json!({"keys":["a"],"group":"長".repeat(65)}).to_string();
+    assert_eq!(
+        server.call("PUT", group, &EDIT, too_long).await?.0,
+        StatusCode::BAD_REQUEST
+    );
+
+    let Loaded::Found(rows) = store.load::<Vec<Rule>>("ddns")? else {
+        panic!("persisted collection")
+    };
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.key.as_str(), row.group.as_str(), row.enabled))
+            .collect::<Vec<_>>(),
+        [("c", "", false), ("a", "東區", true), ("b", "東區", false)]
+    );
+    assert_eq!(store.versions("ddns")?.len(), 4);
+    assert_eq!(observed.lock().unwrap().len(), 3);
+    let delete = "/api/ddns/rules-delete";
+    assert_eq!(
+        server
+            .call("POST", delete, &EDIT, r#"{"keys":["a","c"]}"#)
+            .await?
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(store.versions("ddns")?.len(), 4);
+
+    let path = store.dir().join("ddns.json");
+    let saved = store.dir().join("original");
+    fs::rename(&path, &saved)?;
+    fs::create_dir(&path)?;
+    assert_eq!(
+        server
+            .call("PUT", enable, &EDIT, r#"{"keys":["a"],"enable":false}"#)
+            .await?
+            .0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    assert_eq!(observed.lock().unwrap().len(), 3);
+    let listed = server
+        .call("GET", "/api/ddns/rules", &EDIT, Body::empty())
+        .await?
+        .2;
+    assert_eq!(listed[1]["enable"], true);
+    fs::remove_dir(&path)?;
+    fs::rename(&saved, &path)?;
+
+    assert_eq!(
+        server
+            .call("POST", delete, &EDIT, r#"{"keys":["b","a","a"]}"#)
+            .await?
+            .2,
+        json!({"deleted":2})
+    );
+    assert_eq!(store.versions("ddns")?.len(), 5);
+    assert_eq!(
+        observed.lock().unwrap()[3..],
+        [
+            (ItemChange::Removed, "b".into()),
+            (ItemChange::Removed, "a".into())
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn collection_copy_and_secret_reads_share_the_unlocked_privilege_guard() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(&dir.path().join("config"))?;
+    store.save(
+        "ddns",
+        &vec![rule("template", "template"), rule("tail", "tail")],
+    )?;
+    let collection = open_collection(store.clone())?
+        .copy_with(|source, target| {
+            keep_secret(&source.secret, &mut target.secret);
+            Ok(())
+        })
+        .merge_with(|source, target| {
+            keep_secret(&source.secret, &mut target.secret);
+            Ok(())
+        })
+        .check(|rows, indices| {
+            let row = &rows[indices[0]];
+            if rows.iter().filter(|other| other.name == row.name).count() > 1 {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "item name already used",
+                ));
+            }
+            Ok(())
+        })
+        .secrets(|row| [("secret".to_owned(), row.secret.clone())].into())
+        .secrets_guard(|headers| {
+            if headers
+                .get("x-test-proof")
+                .is_some_and(|proof| proof == "verified")
+            {
+                Ok(())
+            } else {
+                Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "secret proof required",
+                ))
+            }
+        });
+    let admin = collection
+        .register(ApiRouter::new(principal), RULES)
+        .finish();
+    assert_eq!(
+        admin.document()["paths"]["/api/ddns/rules/{key}/secrets"]["get"]["x-required-scope"],
+        "ddns:write"
+    );
+    let server = Server::start(admin.router).await?;
+    let copy = json!({"key":"caller-key","name":" copy ","secret":SECRET_MASK}).to_string();
+    assert_eq!(
+        server
+            .call("POST", "/api/ddns/rules/missing/copy", &EDIT, copy.clone())
+            .await?
+            .2,
+        json!({"error":"secret proof required"})
+    );
+    assert_eq!(
+        server
+            .call(
+                "GET",
+                "/api/ddns/rules/missing/secrets",
+                &EDIT,
+                Body::empty()
+            )
+            .await?
+            .2,
+        json!({"error":"secret proof required"})
+    );
+
+    let verified = [EDIT[0], EDIT[1], ("x-test-proof", "verified")];
+    let before = store.load_raw("ddns")?;
+    let duplicate = json!({"key":"tail","name":"tail","secret":SECRET_MASK}).to_string();
+    assert_eq!(
+        server
+            .call(
+                "POST",
+                "/api/ddns/rules/template/copy",
+                &verified,
+                duplicate
+            )
+            .await?
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(store.load_raw("ddns")?, before);
+    let (status, _, copied) = server
+        .call("POST", "/api/ddns/rules/template/copy", &verified, copy)
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let key = copied["key"].as_str().unwrap();
+    assert_ne!(key, "caller-key");
+    assert!(key.len() == 12 && key.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    assert_eq!(copied["name"], "copy");
+    assert!(!copied.to_string().contains("test-secret-template"));
+    let secret_route = format!("/api/ddns/rules/{key}/secrets");
+    for user in ["token", "viewer"] {
+        assert_eq!(
+            server
+                .call(
+                    "GET",
+                    &secret_route,
+                    &[("x-test-id", user), ("x-test-proof", "verified")],
+                    Body::empty()
+                )
+                .await?
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    let secret = server
+        .call(
+            "GET",
+            &secret_route,
+            &[("x-test-id", "writer"), ("x-test-proof", "verified")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(secret.2, json!({"secret":"test-secret-template"}));
+    assert_eq!(secret.1["cache-control"], "no-store");
+    let change = json!({"name":"updated","secret":SECRET_MASK}).to_string();
+    assert_eq!(
+        server
+            .call("PUT", &format!("/api/ddns/rules/{key}"), &EDIT, change)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+
+    let Loaded::Found(rows) = store.load::<Vec<Rule>>("ddns")? else {
+        panic!("persisted collection")
+    };
+    assert_eq!(
+        rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(),
+        ["template", key, "tail"]
+    );
+    assert_eq!(rows[1].name, "updated");
+    assert_eq!(rows[1].secret, "test-secret-template");
+    Ok(())
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{borrow::Cow, fmt};
 
 use axum::http::Method;
 
@@ -17,13 +17,13 @@ impl Level {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Scope<'a> {
-    pub domain: &'a str,
+    pub domain: Cow<'a, str>,
     pub level: Level,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Access<'a> {
     Any,
     SessionOnly,
@@ -33,8 +33,21 @@ pub enum Access<'a> {
 }
 
 impl Access<'_> {
-    pub fn allows_token(self, grants: &[String]) -> bool {
-        let allows = |scope: Scope<'_>| {
+    pub(crate) fn into_owned(self) -> Access<'static> {
+        match self {
+            Self::Any => Access::Any,
+            Self::SessionOnly => Access::SessionOnly,
+            Self::Public => Access::Public,
+            Self::All(scopes) => Access::All(scopes),
+            Self::Scope(scope) => Access::Scope(Scope {
+                domain: Cow::Owned(scope.domain.into_owned()),
+                level: scope.level,
+            }),
+        }
+    }
+
+    pub fn allows_token(&self, grants: &[String]) -> bool {
+        let allows = |scope: &Scope<'_>| {
             grants.iter().any(|grant| {
                 grant == "*"
                     || grant.split_once(':').is_some_and(|(domain, level)| {
@@ -47,11 +60,11 @@ impl Access<'_> {
             Self::Any => true,
             Self::SessionOnly | Self::Public => false,
             Self::Scope(scope) => allows(scope),
-            Self::All(scopes) => scopes.iter().copied().all(allows),
+            Self::All(scopes) => scopes.iter().all(allows),
         }
     }
 
-    pub fn read_only(self) -> bool {
+    pub fn read_only(&self) -> bool {
         match self {
             Self::Any => true,
             Self::SessionOnly | Self::Public => false,
@@ -106,35 +119,35 @@ const FORBIDDEN: &[&str] = &[
 ];
 const FILE_USERS: &[Scope<'_>] = &[
     Scope {
-        domain: "webdav",
+        domain: Cow::Borrowed("webdav"),
         level: Level::Write,
     },
     Scope {
-        domain: "ftp",
+        domain: Cow::Borrowed("ftp"),
         level: Level::Write,
     },
     Scope {
-        domain: "smb",
+        domain: Cow::Borrowed("smb"),
         level: Level::Write,
     },
 ];
 const WOL_READ: &[Scope<'_>] = &[
     Scope {
-        domain: "wol",
+        domain: Cow::Borrowed("wol"),
         level: Level::Read,
     },
     Scope {
-        domain: "webterminal",
+        domain: Cow::Borrowed("webterminal"),
         level: Level::Read,
     },
 ];
 const WOL_WRITE: &[Scope<'_>] = &[
     Scope {
-        domain: "wol",
+        domain: Cow::Borrowed("wol"),
         level: Level::Write,
     },
     Scope {
-        domain: "webterminal",
+        domain: Cow::Borrowed("webterminal"),
         level: Level::Write,
     },
 ];
@@ -163,7 +176,12 @@ pub fn required<'a>(method: &Method, path: &'a str) -> Access<'a> {
     ) {
         return Access::SessionOnly;
     }
-    let scope = |domain, level| Access::Scope(Scope { domain, level });
+    let scope = |domain, level| {
+        Access::Scope(Scope {
+            domain: Cow::Borrowed(domain),
+            level,
+        })
+    };
     match path {
         "/api/session" | "/api/openapi.json" | "/api/geoip/lookup" => return Access::Any,
         "/api/status"

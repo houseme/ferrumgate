@@ -1,11 +1,14 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use anyhow::{Result, ensure};
 use arc_swap::ArcSwap;
 use axum::{
     Json,
     extract::{Path, rejection::PathRejection},
-    http::{Method, StatusCode},
+    http::{HeaderMap, Method, StatusCode},
 };
 use fg_config::{ConfigStore, Loaded};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -15,11 +18,37 @@ use tokio::sync::Semaphore;
 use crate::{ApiError, ApiJson, ApiRouter};
 
 type ApiResult<T> = Result<T, ApiError>;
+type ItemCheck<T> = fn(&[T], &[usize]) -> ApiResult<()>;
+type CopyHook<T> = fn(&T, &mut T) -> ApiResult<()>;
+type Secrets<T> = fn(&T) -> BTreeMap<String, String>;
+type SecretsGuard = Box<dyn Fn(&HeaderMap) -> ApiResult<()> + Send + Sync>;
+type OnChange = Box<dyn Fn(ItemChange, &str) + Send + Sync>;
+
+pub const SECRET_MASK: &str = "********";
+
+pub fn keep_secret(old: &str, submitted: &mut String) {
+    if submitted.is_empty() || submitted == SECRET_MASK {
+        submitted.clear();
+        submitted.push_str(old);
+    }
+}
 
 pub struct CollectionPaths {
     pub list: &'static str,
     pub item: &'static str,
     pub batch_delete: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ItemChange {
+    Updated,
+    Removed,
+}
+
+enum Mutation {
+    Unchanged,
+    Save,
+    Notify(ItemChange, Vec<String>),
 }
 
 /// One collection owns the named configuration file and serves immutable read snapshots.
@@ -33,6 +62,16 @@ pub struct Collection<T> {
     validate: fn(&mut T) -> ApiResult<()>,
     view: fn(&T) -> Value,
     limit: usize,
+    enabled: Option<fn(&mut T) -> &mut bool>,
+    group: Option<fn(&mut T) -> &mut String>,
+    check: Option<ItemCheck<T>>,
+    check_enable: Option<ItemCheck<T>>,
+    before_remove: Option<ItemCheck<T>>,
+    copy: Option<CopyHook<T>>,
+    merge: Option<CopyHook<T>>,
+    secrets: Option<Secrets<T>>,
+    secrets_guard: Option<SecretsGuard>,
+    on_change: Option<OnChange>,
 }
 
 impl<T> Collection<T>
@@ -70,111 +109,403 @@ where
             validate,
             view,
             limit,
+            enabled: None,
+            group: None,
+            check: None,
+            check_enable: None,
+            before_remove: None,
+            copy: None,
+            merge: None,
+            secrets: None,
+            secrets_guard: None,
+            on_change: None,
         })
+    }
+
+    pub fn enabled(mut self, field: fn(&mut T) -> &mut bool) -> Self {
+        self.enabled = Some(field);
+        self
+    }
+
+    pub fn group(mut self, field: fn(&mut T) -> &mut String) -> Self {
+        self.group = Some(field);
+        self
+    }
+
+    /// Checks the final candidate on create, copy and replacement.
+    pub fn check(mut self, check: ItemCheck<T>) -> Self {
+        self.check = Some(check);
+        self
+    }
+
+    /// Receives the final candidate, with all requested enables already applied.
+    pub fn check_enable(mut self, check: ItemCheck<T>) -> Self {
+        self.check_enable = Some(check);
+        self
+    }
+
+    pub fn before_remove(mut self, check: ItemCheck<T>) -> Self {
+        self.before_remove = Some(check);
+        self
+    }
+
+    pub fn copy_with(mut self, copy: CopyHook<T>) -> Self {
+        self.copy = Some(copy);
+        self
+    }
+
+    pub fn merge_with(mut self, merge: CopyHook<T>) -> Self {
+        self.merge = Some(merge);
+        self
+    }
+
+    pub fn secrets(mut self, view: Secrets<T>) -> Self {
+        self.secrets = Some(view);
+        self
+    }
+
+    /// Runs before looking up the source or reserving the collection writer.
+    pub fn secrets_guard(
+        mut self,
+        guard: impl Fn(&HeaderMap) -> ApiResult<()> + Send + Sync + 'static,
+    ) -> Self {
+        self.secrets_guard = Some(Box::new(guard));
+        self
+    }
+
+    /// Runs in commit order after publication. Keep this callback short and non-blocking.
+    pub fn on_change(mut self, notify: impl Fn(ItemChange, &str) + Send + Sync + 'static) -> Self {
+        self.on_change = Some(Box::new(notify));
+        self
     }
 
     pub fn register(self, router: ApiRouter, paths: CollectionPaths) -> ApiRouter {
         assert_eq!(paths.item.strip_suffix("/{key}"), Some(paths.list));
-        assert_eq!(
-            paths.batch_delete.strip_suffix("/batch-delete"),
-            Some(paths.list)
+        let batch_delete = format!("{}-delete", paths.list);
+        assert!(
+            paths.batch_delete == batch_delete
+                || paths.batch_delete.strip_suffix("/batch-delete") == Some(paths.list)
         );
         let state = Arc::new(self);
         let list = state.clone();
         let insert = state.clone();
         let update = state.clone();
         let delete = state.clone();
-        router
+        let batch = state.clone();
+        let copy = state.clone();
+        let order = state.clone();
+        let mut router = router
             .route(Method::GET, paths.list, "List items", move || async move {
                 Json(list.rows.load().iter().map(list.view).collect::<Vec<_>>())
             })
             .route(
-                Method::POST,
-                paths.list,
-                "Add an item",
-                move |ApiJson(mut item): ApiJson<T>| async move {
-                    insert
-                        .change(move |state, items| {
-                            if items.len() >= state.limit {
-                                return Err(ApiError::new(
-                                    StatusCode::CONFLICT,
-                                    "collection item limit reached",
-                                ));
-                            }
-                            (state.validate)(&mut item)?;
-                            let key = (state.key)(&item);
-                            if !valid_key(key) || items.iter().any(|row| (state.key)(row) == key) {
-                                let key = random_key(items, state.key)?;
-                                (state.set_key)(&mut item, key);
-                            }
-                            let view = (state.view)(&item);
-                            items.push(item);
-                            Ok(Json(view))
-                        })
-                        .await
+                Method::POST, paths.list, "Add an item",
+                move |ApiJson(item): ApiJson<T>| async move { insert.insert(None, item).await },
+            )
+            .route(
+                Method::PUT, paths.item, "Replace an item",
+                move |path: Result<Path<String>, PathRejection>, ApiJson(item): ApiJson<T>| async move {
+                    update.update(item_key(path)?, item).await
                 },
             )
             .route(
-                Method::PUT,
-                paths.item,
-                "Replace an item",
-                move |path: Result<Path<String>, PathRejection>, ApiJson(mut item): ApiJson<T>| async move {
-                    let key = item_key(path)?;
-                    update
-                        .change(move |state, items| {
-                            let row = items
-                                .iter_mut()
-                                .find(|row| (state.key)(row) == key)
-                                .ok_or_else(missing_item)?;
-                            (state.set_key)(&mut item, key.clone());
-                            (state.validate)(&mut item)?;
-                            (state.set_key)(&mut item, key);
-                            let view = (state.view)(&item);
-                            *row = item;
-                            Ok(Json(view))
-                        })
-                        .await
+                Method::DELETE, paths.item, "Remove an item",
+                move |path: Result<Path<String>, PathRejection>| async move {
+                    delete.remove(vec![item_key(path)?], "removed").await
                 },
             )
             .route(
-                Method::DELETE,
-                paths.item,
-                "Remove an item",
-                move |path: Result<Path<String>, PathRejection>| async move { delete.remove(vec![item_key(path)?]).await },
+                Method::POST, &batch_delete, "Remove multiple items",
+                move |ApiJson(batch_request): ApiJson<Keys>| async move {
+                    batch.remove(batch_request.keys, "deleted").await
+                },
             )
             .route(
+                Method::POST, format!("{}/copy", paths.item), "Copy an item",
+                move |headers: HeaderMap, path: Result<Path<String>, PathRejection>, ApiJson(item): ApiJson<T>| async move {
+                    copy.guard_secrets(&headers)?;
+                    copy.insert(Some(item_key(path)?), item).await
+                },
+            )
+            .route(
+                Method::PUT, format!("{}-order", paths.list), "Reorder items",
+                move |ApiJson(request): ApiJson<Keys>| async move { order.order(request.keys).await },
+            );
+        if paths.batch_delete != batch_delete {
+            let legacy = state.clone();
+            router = router.route(
                 Method::POST,
                 paths.batch_delete,
                 "Remove multiple items",
-                move |ApiJson(batch): ApiJson<Batch>| async move { state.remove(batch.keys).await },
-            )
+                move |ApiJson(request): ApiJson<Keys>| async move {
+                    legacy.remove(request.keys, "removed").await
+                },
+            );
+        }
+        if let Some(enabled) = state.enabled {
+            let single = state.clone();
+            let batch = state.clone();
+            router = router
+                .route(
+                    Method::PUT,
+                    format!("{}/enable", paths.item),
+                    "Enable or disable an item",
+                    move |path: Result<Path<String>, PathRejection>,
+                          ApiJson(request): ApiJson<Enable>| async move {
+                        single
+                            .enable(enabled, vec![item_key(path)?], request.enable)
+                            .await?;
+                        Ok::<_, ApiError>(Json(json!({"ok":true})))
+                    },
+                )
+                .route(
+                    Method::PUT,
+                    format!("{}-enable", paths.list),
+                    "Enable or disable multiple items",
+                    move |ApiJson(request): ApiJson<BatchEnable>| async move {
+                        let changed = batch.enable(enabled, request.keys, request.enable).await?;
+                        Ok::<_, ApiError>(Json(json!({"changed":changed})))
+                    },
+                );
+        }
+        if let Some(group) = state.group {
+            let grouped = state.clone();
+            router = router.route(
+                Method::PUT,
+                format!("{}-group", paths.list),
+                "Set item groups",
+                move |ApiJson(request): ApiJson<Group>| async move {
+                    grouped.set_group(group, request).await
+                },
+            );
+        }
+        if let Some(secrets) = state.secrets {
+            router = router.route(
+                Method::GET,
+                format!("{}/secrets", paths.item),
+                "Read item secrets",
+                move |headers: HeaderMap, path: Result<Path<String>, PathRejection>| async move {
+                    state.guard_secrets(&headers)?;
+                    let key = item_key(path)?;
+                    let items = state.rows.load();
+                    let item = items
+                        .iter()
+                        .find(|item| (state.key)(item) == key)
+                        .ok_or_else(missing_item)?;
+                    Ok::<_, ApiError>(Json(secrets(item)))
+                },
+            );
+        }
+        router
     }
 
-    async fn remove(self: Arc<Self>, keys: Vec<String>) -> ApiResult<Json<Value>> {
-        if keys.is_empty() || keys.len() > 500 || !keys.iter().all(|key| valid_key(key)) {
+    fn guard_secrets(&self, headers: &HeaderMap) -> ApiResult<()> {
+        self.secrets_guard
+            .as_ref()
+            .map_or(Ok(()), |guard| guard(headers))
+    }
+
+    async fn insert(
+        self: Arc<Self>,
+        template: Option<String>,
+        mut item: T,
+    ) -> ApiResult<Json<Value>> {
+        self.change(move |state, items| {
+            if items.len() >= state.limit {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "collection item limit reached",
+                ));
+            }
+            let at = if let Some(key) = &template {
+                let index = items
+                    .iter()
+                    .position(|row| (state.key)(row) == key)
+                    .ok_or_else(missing_item)?;
+                (state.set_key)(&mut item, String::new());
+                if let Some(copy) = state.copy {
+                    copy(&items[index], &mut item)?;
+                }
+                (state.set_key)(&mut item, String::new());
+                index + 1
+            } else {
+                items.len()
+            };
+            (state.validate)(&mut item)?;
+            let key = (state.key)(&item);
+            if template.is_some()
+                || !valid_key(key)
+                || items.iter().any(|row| (state.key)(row) == key)
+            {
+                let key = random_key(items, state.key)?;
+                (state.set_key)(&mut item, key);
+            }
+            Arc::make_mut(items).insert(at, item);
+            if let Some(check) = state.check {
+                check(items, &[at])?;
+            }
+            let change =
+                Mutation::Notify(ItemChange::Updated, vec![(state.key)(&items[at]).into()]);
+            let view = (state.view)(&items[at]);
+            Ok((Json(view), change))
+        })
+        .await
+    }
+
+    async fn update(self: Arc<Self>, key: String, mut item: T) -> ApiResult<Json<Value>> {
+        self.change(move |state, items| {
+            let index = items
+                .iter()
+                .position(|row| (state.key)(row) == key)
+                .ok_or_else(missing_item)?;
+            (state.set_key)(&mut item, key.clone());
+            if let Some(merge) = state.merge {
+                merge(&items[index], &mut item)?;
+            }
+            (state.validate)(&mut item)?;
+            (state.set_key)(&mut item, key.clone());
+            Arc::make_mut(items)[index] = item;
+            if let Some(check) = state.check {
+                check(items, &[index])?;
+            }
+            let view = (state.view)(&items[index]);
+            Ok((Json(view), Mutation::Notify(ItemChange::Updated, vec![key])))
+        })
+        .await
+    }
+
+    async fn remove(
+        self: Arc<Self>,
+        keys: Vec<String>,
+        count_field: &'static str,
+    ) -> ApiResult<Json<Value>> {
+        let keys = batch_keys(keys)?;
+        self.change(move |state, items| {
+            let indices = find_indices(items, &keys, state.key).ok_or_else(missing_item)?;
+            if let Some(check) = state.before_remove {
+                check(items, &indices)?;
+            }
+            let removed: HashSet<_> = keys.iter().map(String::as_str).collect();
+            Arc::make_mut(items).retain(|item| !removed.contains((state.key)(item)));
+            Ok((
+                Json(json!({(count_field): keys.len()})),
+                Mutation::Notify(ItemChange::Removed, keys),
+            ))
+        })
+        .await
+    }
+
+    async fn enable(
+        self: Arc<Self>,
+        enabled: fn(&mut T) -> &mut bool,
+        keys: Vec<String>,
+        value: bool,
+    ) -> ApiResult<usize> {
+        let keys = batch_keys(keys)?;
+        self.change(move |state, items| {
+            let mut indices = find_indices(items, &keys, state.key).ok_or_else(missing_item)?;
+            let items = Arc::make_mut(items);
+            indices.retain(|&index| {
+                let field = enabled(&mut items[index]);
+                if *field == value {
+                    false
+                } else {
+                    *field = value;
+                    true
+                }
+            });
+            if indices.is_empty() {
+                return Ok((0, Mutation::Unchanged));
+            }
+            if value && let Some(check) = state.check_enable {
+                check(items, &indices)?;
+            }
+            let changed = indices
+                .iter()
+                .map(|&index| (state.key)(&items[index]).to_owned())
+                .collect();
+            Ok((
+                indices.len(),
+                Mutation::Notify(ItemChange::Updated, changed),
+            ))
+        })
+        .await
+    }
+
+    async fn order(self: Arc<Self>, keys: Vec<String>) -> ApiResult<Json<Value>> {
+        self.change(move |state, items| {
+            if keys.len() != items.len() {
+                return Err(ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "order must include every item once",
+                ));
+            }
+            let indices = find_indices(items, &keys, state.key).ok_or_else(|| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    "order contains an unknown or duplicate key",
+                )
+            })?;
+            let unchanged = indices.iter().enumerate().all(|(index, &old)| index == old);
+            if unchanged {
+                return Ok((Json(json!({"ok":true})), Mutation::Unchanged));
+            }
+            let mut destination = vec![0; indices.len()];
+            for (new, old) in indices.into_iter().enumerate() {
+                destination[old] = new;
+            }
+            let items = Arc::make_mut(items);
+            for index in 0..destination.len() {
+                while destination[index] != index {
+                    let new = destination[index];
+                    items.swap(index, new);
+                    destination.swap(index, new);
+                }
+            }
+            Ok((Json(json!({"ok":true})), Mutation::Save))
+        })
+        .await
+    }
+
+    async fn set_group(
+        self: Arc<Self>,
+        group: fn(&mut T) -> &mut String,
+        request: Group,
+    ) -> ApiResult<Json<Value>> {
+        let keys = batch_keys(request.keys)?;
+        let name = request.group.trim().to_owned();
+        if name.chars().count() > 64 {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,
-                "expected between 1 and 500 valid keys",
+                "group name must have at most 64 characters",
             ));
         }
-        let keys: HashSet<_> = keys.into_iter().collect();
         self.change(move |state, items| {
-            let matching = items
-                .iter()
-                .filter(|item| keys.contains((state.key)(item)))
-                .count();
-            if matching != keys.len() {
-                return Err(missing_item());
+            let indices = find_indices(items, &keys, state.key).ok_or_else(missing_item)?;
+            let items = Arc::make_mut(items);
+            let mut changed = false;
+            for index in indices {
+                let field = group(&mut items[index]);
+                if *field != name {
+                    field.clone_from(&name);
+                    changed = true;
+                }
             }
-            items.retain(|item| !keys.contains((state.key)(item)));
-            Ok(Json(json!({"removed": matching})))
+            Ok((
+                Json(json!({"ok":true})),
+                if changed {
+                    Mutation::Save
+                } else {
+                    Mutation::Unchanged
+                },
+            ))
         })
         .await
     }
 
     async fn change<R: Send + 'static>(
         self: Arc<Self>,
-        change: impl FnOnce(&Self, &mut Vec<T>) -> ApiResult<R> + Send + 'static,
+        change: impl FnOnce(&Self, &mut Arc<Vec<T>>) -> ApiResult<(R, Mutation)> + Send + 'static,
     ) -> ApiResult<R> {
         let permit = self.writer.clone().try_acquire_owned().map_err(|_| {
             ApiError::new(
@@ -184,18 +515,29 @@ where
         })?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            let mut candidate = self.rows.load_full().as_ref().clone();
-            let result = change(&self, &mut candidate)?;
+            let mut candidate = self.rows.load_full();
+            let (result, mutation) = change(&self, &mut candidate)?;
+            if matches!(mutation, Mutation::Unchanged) {
+                return Ok(result);
+            }
             let mut bytes =
-                serde_json::to_vec_pretty(&candidate).map_err(|_| ApiError::internal())?;
+                serde_json::to_vec_pretty(candidate.as_ref()).map_err(|_| ApiError::internal())?;
             bytes.push(b'\n');
             let saved = self.store.write_raw(&self.name, &bytes);
-            // Directory sync or history pruning can fail after replacement became visible.
+            // A directory sync or history prune can fail after replacement became visible.
             if saved.is_ok()
                 || self.store.load_raw(&self.name).ok().flatten().as_deref()
                     == Some(bytes.as_slice())
             {
-                self.rows.store(Arc::new(candidate));
+                self.rows.store(candidate);
+                if saved.as_ref().map_or(true, |saved| saved.changed)
+                    && let (Some(notify), Mutation::Notify(change, keys)) =
+                        (&self.on_change, mutation)
+                {
+                    for key in keys {
+                        notify(change, &key);
+                    }
+                }
             }
             saved.map_err(|_| ApiError::internal())?;
             Ok(result)
@@ -207,8 +549,61 @@ where
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Batch {
+struct Keys {
     keys: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Enable {
+    enable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BatchEnable {
+    keys: Vec<String>,
+    enable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Group {
+    keys: Vec<String>,
+    group: String,
+}
+
+fn batch_keys(mut keys: Vec<String>) -> ApiResult<Vec<String>> {
+    if keys.is_empty() || keys.len() > 500 || !keys.iter().all(|key| valid_key(key)) {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "expected between 1 and 500 valid keys",
+        ));
+    }
+    let mut seen = HashSet::with_capacity(keys.len());
+    keys.retain(|key| seen.insert(key.clone()));
+    Ok(keys)
+}
+
+fn find_indices<T>(items: &[T], keys: &[String], key: fn(&T) -> &str) -> Option<Vec<usize>> {
+    let mut slots: HashMap<_, _> = keys
+        .iter()
+        .enumerate()
+        .map(|(slot, key)| (key.as_str(), slot))
+        .collect();
+    if slots.len() != keys.len() {
+        return None;
+    }
+    let mut indices = vec![0; keys.len()];
+    for (index, item) in items.iter().enumerate() {
+        if let Some(slot) = slots.remove(key(item)) {
+            indices[slot] = index;
+            if slots.is_empty() {
+                break;
+            }
+        }
+    }
+    slots.is_empty().then_some(indices)
 }
 
 fn missing_item() -> ApiError {

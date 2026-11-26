@@ -29,15 +29,15 @@ type Auth = Arc<dyn Fn(&HeaderMap) -> Option<Principal> + Send + Sync>;
 
 struct Operation {
     method: Method,
-    path: &'static str,
+    path: String,
     summary: &'static str,
-    access: Access<'static>,
+    access: Arc<Access<'static>>,
 }
 
 #[derive(Clone)]
 struct Policy {
     auth: Auth,
-    access: Access<'static>,
+    access: Arc<Access<'static>>,
 }
 
 pub struct ApiRouter {
@@ -77,7 +77,7 @@ impl ApiRouter {
     pub fn route<H, T>(
         mut self,
         method: Method,
-        path: &'static str,
+        path: impl Into<String>,
         summary: &'static str,
         handler: H,
     ) -> Self
@@ -85,25 +85,26 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
+        let path = path.into();
         assert!(
-            module_of(path).is_some(),
+            module_of(&path).is_some(),
             "admin route requires an /api/ path"
         );
         assert_ne!(
             path, "/api/openapi.json",
             "OpenAPI is installed by the builder"
         );
-        if matches!(self.status(path), Some(Status::Disabled | Status::Absent)) {
+        if matches!(self.status(&path), Some(Status::Disabled | Status::Absent)) {
             return self;
         }
         let operation = Operation {
-            access: required(&method, path),
+            access: Arc::new(required(&method, &path).into_owned()),
             method,
             path,
             summary,
         };
         assert_ne!(
-            operation.access,
+            *operation.access,
             Access::Public,
             "public API routes must provide their own authentication"
         );
@@ -120,10 +121,10 @@ impl ApiRouter {
             MethodFilter::try_from(operation.method.clone()).expect("supported API method");
         let policy = Policy {
             auth: self.auth.clone(),
-            access: operation.access,
+            access: operation.access.clone(),
         };
         self.router = std::mem::take(&mut self.router).route(
-            operation.path,
+            &operation.path,
             on::<_, _, ()>(method, handler)
                 .route_layer(middleware::from_fn_with_state(policy, authorize)),
         );
@@ -138,9 +139,9 @@ impl ApiRouter {
     pub fn finish(mut self) -> Admin {
         let openapi = Operation {
             method: Method::GET,
-            path: "/api/openapi.json",
+            path: "/api/openapi.json".into(),
             summary: "Get the management API schema",
-            access: required(&Method::GET, "/api/openapi.json"),
+            access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
@@ -246,14 +247,14 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
         let tag = if route.path == "/api/openapi.json" {
             "system"
         } else {
-            module_of(route.path).expect("API route")
+            module_of(&route.path).expect("API route")
         };
         tags.insert(tag);
-        match route.access {
+        match route.access.as_ref() {
             Access::Scope(scope) => {
-                domains.insert(scope.domain);
+                domains.insert(scope.domain.as_ref());
             }
-            Access::All(scopes) => domains.extend(scopes.iter().map(|scope| scope.domain)),
+            Access::All(scopes) => domains.extend(scopes.iter().map(|scope| scope.domain.as_ref())),
             Access::Any | Access::SessionOnly | Access::Public => {}
         }
         let parameters: Vec<_> = route
@@ -262,13 +263,13 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
             .filter_map(|piece| piece.strip_prefix('{')?.strip_suffix('}'))
             .map(|name| json!({"name":name,"in":"path","required":true,"schema":{"type":"string"}}))
             .collect();
-        let token = !matches!(route.access, Access::SessionOnly | Access::Public);
+        let token = !matches!(*route.access, Access::SessionOnly | Access::Public);
         let security = if token {
             json!([{"bearerAuth":[]}, {"sessionCookie":[]}])
         } else {
             json!([{"sessionCookie":[]}])
         };
-        paths.entry(route.path).or_insert_with(|| json!({}))
+        paths.entry(route.path.clone()).or_insert_with(|| json!({}))
             [route.method.as_str().to_ascii_lowercase()] = json!({
             "summary":route.summary, "tags":[tag], "parameters":parameters,
             "responses":{"200":{"description":"Success"},"401":{"description":"Authentication required"},"403":{"description":"Insufficient permission"}},
