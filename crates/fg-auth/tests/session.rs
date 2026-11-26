@@ -290,3 +290,81 @@ async fn lockout_notifies_once_and_remembers_successful_subnets_after_restart() 
     assert_eq!(login_ips[0]["key"], "2001:db8:1::/64");
     Ok(())
 }
+
+#[test]
+fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
+    use ring::hmac;
+
+    let (dir, store, mut account) = fixture()?;
+    account["totpSecret"] = json!("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    store.save("account", &account)?;
+    let (manager, _) = AccountManager::open(store.clone(), None)?;
+    let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"12345678901234567890");
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let digest = hmac::sign(&key, &(now / 30).to_be_bytes());
+    let bytes = digest.as_ref();
+    let start = usize::from(bytes[19] & 15);
+    let value = u32::from_be_bytes(bytes[start..start + 4].try_into()?) & 0x7fff_ffff;
+    let code = format!("{:06}", value % 1_000_000);
+    let addr = "192.0.2.5".parse()?;
+    assert!(matches!(
+        manager.login_from(addr, "operator", PASSWORD),
+        Err(LoginError::TotpRequired)
+    ));
+    let path = dir.path().join("account.json");
+    let backup = dir.path().join("account-fixture-backup");
+    fs::rename(&path, &backup)?;
+    fs::create_dir(&path)?;
+    assert!(matches!(
+        manager.login_with_totp_from(addr, "operator", PASSWORD, Some(&code)),
+        Err(LoginError::Internal(_))
+    ));
+    fs::remove_dir(&path)?;
+    fs::rename(&backup, &path)?;
+
+    let guard = std::sync::Barrier::new(2);
+    let results = std::thread::scope(|scope| {
+        let (manager, code, guard) = (&manager, &code, &guard);
+        let tasks = [addr, "198.51.100.9".parse().unwrap()].map(|addr| {
+            scope.spawn(move || {
+                guard.wait();
+                manager.login_with_totp_from(addr, "operator", PASSWORD, Some(code))
+            })
+        });
+        tasks.map(|task| task.join().unwrap())
+    });
+    assert_eq!(results.iter().filter(|attempt| attempt.is_ok()).count(), 1);
+    assert!(
+        results
+            .iter()
+            .any(|attempt| matches!(attempt, Err(LoginError::InvalidCredentials)))
+    );
+    let session = results
+        .into_iter()
+        .find_map(Result::ok)
+        .context("accepted TOTP")?;
+    drop(manager);
+    let (manager, _) = AccountManager::open(store, None)?;
+    assert!(manager.identify(&session.token).is_some());
+    manager.configure_login_limits(LoginLimits {
+        max_failures: 2,
+        ..LoginLimits::default()
+    })?;
+    assert!(matches!(
+        manager.login_with_totp_from(addr, "operator", PASSWORD, Some(&code)),
+        Err(LoginError::InvalidCredentials)
+    ));
+    assert!(matches!(
+        manager.login_from(addr, "operator", PASSWORD),
+        Err(LoginError::TotpRequired)
+    ));
+    assert!(matches!(
+        manager.login_with_totp_from(addr, "operator", PASSWORD, Some("not-a-code")),
+        Err(LoginError::InvalidCredentials)
+    ));
+    assert!(matches!(
+        manager.login_from(addr, "operator", PASSWORD),
+        Err(LoginError::Locked(_))
+    ));
+    Ok(())
+}

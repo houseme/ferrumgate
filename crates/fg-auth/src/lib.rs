@@ -4,6 +4,7 @@ mod account;
 mod lockout;
 mod password;
 mod session;
+mod totp;
 
 pub use account::{AccountManager, CredentialChangeRejected};
 pub use lockout::{LoginError, LoginLimits};

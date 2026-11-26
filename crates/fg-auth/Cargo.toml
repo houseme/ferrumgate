@@ -10,12 +10,14 @@ anyhow.workspace = true
 arc-swap = "1"
 base64 = "0.22"
 bcrypt = "0.19"
+data-encoding = "2"
 fg-config = { path = "../fg-config" }
 fg-core = { path = "../fg-core" }
 getrandom = "0.4"
 ring = "0.17"
 serde.workspace = true
 serde_json.workspace = true
+subtle = "2"
 time = { workspace = true, features = ["formatting", "parsing", "serde", "std"] }
 
 [target.'cfg(unix)'.dependencies]

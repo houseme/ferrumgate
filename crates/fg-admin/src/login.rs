@@ -151,7 +151,12 @@ impl Sessions {
         let outcome = self
             .work(move || {
                 accounts
-                    .login_from(peer.ip(), &request.username, &request.password)
+                    .login_with_totp_from(
+                        peer.ip(),
+                        &request.username,
+                        &request.password,
+                        request.code.as_deref(),
+                    )
                     .map(|session| (session, request.username))
             })
             .await?;
@@ -192,15 +197,57 @@ impl Sessions {
             )
         })
         .await?
-        .map_err(|error| {
-            if let Some(issue) = error.downcast_ref::<PasswordIssue>() {
-                ApiError::new(StatusCode::BAD_REQUEST, issue.code())
-            } else if let Some(rejection) = error.downcast_ref::<CredentialChangeRejected>() {
-                ApiError::new(StatusCode::BAD_REQUEST, rejection.0)
-            } else {
-                ApiError::internal()
-            }
-        })?;
+        .map_err(credential_error)?;
+        Ok(self.cookies.clear())
+    }
+
+    async fn prepare_totp(
+        self: Arc<Self>,
+        headers: HeaderMap,
+        identity: Identity,
+    ) -> Result<Json<TotpSetup>, ApiError> {
+        let accounts = self.accounts.clone();
+        let token = session_token(&headers)
+            .ok_or(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "administrator session required",
+            ))?
+            .to_owned();
+        let secret = self
+            .work(move || accounts.prepare_totp(&token))
+            .await?
+            .map_err(credential_error)?;
+        let mut url = url::Url::parse("otpauth://totp").expect("static otpauth URL");
+        url.path_segments_mut()
+            .expect("hierarchical otpauth URL")
+            .push(&format!("FerrumGate:{}", identity.username));
+        url.query_pairs_mut()
+            .append_pair("secret", &secret)
+            .append_pair("issuer", "FerrumGate")
+            .append_pair("digits", "6")
+            .append_pair("period", "30");
+        Ok(Json(TotpSetup {
+            secret,
+            url: url.into(),
+        }))
+    }
+
+    async fn set_totp(
+        self: Arc<Self>,
+        headers: HeaderMap,
+        request: TotpRequest,
+        enabled: bool,
+    ) -> Result<Response, ApiError> {
+        let accounts = self.accounts.clone();
+        let token = session_token(&headers)
+            .ok_or(ApiError::new(
+                StatusCode::UNAUTHORIZED,
+                "administrator session required",
+            ))?
+            .to_owned();
+        self.work(move || accounts.set_totp(&token, &request.password, &request.code, enabled))
+            .await?
+            .map_err(credential_error)?;
         Ok(self.cookies.clear())
     }
 }
@@ -220,6 +267,10 @@ pub(super) fn mount(
     let login = state.clone();
     let logout = state.clone();
     let revoke = state.clone();
+    let change = state.clone();
+    let totp_status = state.clone();
+    let totp_setup = state.clone();
+    let totp_enable = state.clone();
     let disabled = Arc::new(disabled);
     let absent = Arc::new(absent);
     router
@@ -245,7 +296,7 @@ pub(super) fn mount(
             RouteModels::default().response::<OkResponse>(), move || revoke.revoke())
         .modeled_route(Method::PUT, "/api/account", "Change administrator credentials",
             RouteModels::default().request::<ChangePassword>().response::<OkResponse>(),
-            move |ApiJson(request)| state.change(request))
+            move |ApiJson(request)| change.change(request))
         .modeled_route(Method::POST, "/api/account/password-check", "Check a proposed password",
             RouteModels::default().request::<PasswordCheck>().response::<PasswordFeedback>(),
             |Extension(identity): Extension<Identity>, ApiJson(request): ApiJson<PasswordCheck>| async move {
@@ -253,10 +304,36 @@ pub(super) fn mount(
                 let code = check_password_strength(username, &request.password).err().map(PasswordIssue::code);
                 Json(PasswordFeedback { ok: code.is_none(), code })
             })
+        .modeled_route(Method::GET, "/api/account/totp", "Get two-step verification status",
+            RouteModels::default().response::<TotpStatus>(),
+            move || async move { Json(TotpStatus { enabled: totp_status.accounts.totp_enabled() }) })
+        .modeled_route(Method::POST, "/api/account/totp/setup", "Prepare two-step verification",
+            RouteModels::default().response::<TotpSetup>(),
+            move |headers, Extension(identity)| totp_setup.prepare_totp(headers, identity))
+        .modeled_route(Method::POST, "/api/account/totp/enable", "Enable two-step verification",
+            RouteModels::default().request::<TotpRequest>().response::<OkResponse>(),
+            move |headers, ApiJson(request)| totp_enable.set_totp(headers, request, true))
+        .modeled_route(Method::POST, "/api/account/totp/disable", "Disable two-step verification",
+            RouteModels::default().request::<TotpRequest>().response::<OkResponse>(),
+            move |headers, ApiJson(request)| state.set_totp(headers, request, false))
+}
+
+fn credential_error(error: anyhow::Error) -> ApiError {
+    if let Some(issue) = error.downcast_ref::<PasswordIssue>() {
+        ApiError::new(StatusCode::BAD_REQUEST, issue.code())
+    } else if let Some(rejection) = error.downcast_ref::<CredentialChangeRejected>() {
+        ApiError::new(StatusCode::BAD_REQUEST, rejection.0)
+    } else {
+        ApiError::internal()
+    }
 }
 
 fn login_error(error: LoginError) -> Response {
     match error {
+        LoginError::TotpRequired => (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error":"two-step verification code required", "totpRequired":true})),
+        ).into_response(),
         LoginError::InvalidCredentials => ApiError::new(
             StatusCode::UNAUTHORIZED,
             "invalid administrator credentials",
@@ -289,8 +366,25 @@ fn login_error(error: LoginError) -> Response {
 struct LoginRequest {
     username: String,
     password: String,
-    #[serde(rename = "code")]
-    _code: Option<String>,
+    code: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TotpRequest {
+    password: String,
+    code: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct TotpStatus {
+    enabled: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct TotpSetup {
+    secret: String,
+    url: String,
 }
 
 #[derive(Serialize)]

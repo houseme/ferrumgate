@@ -1,5 +1,7 @@
 use anyhow::Context;
+use data_encoding::BASE32_NOPAD;
 use fg_auth::{AccountManager, LoginLimits};
+use ring::hmac;
 
 use super::*;
 
@@ -352,5 +354,158 @@ async fn login_http_limits_use_the_peer_and_logout_revokes_live_sessions() -> Re
             StatusCode::UNAUTHORIZED
         );
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_totp_enrollment_and_disable_revoke_sessions() -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    let password = "zPw9xK!m7Zr3";
+    store.save(
+        "account",
+        &json!({
+            "username": "admin",
+            "passwordHash": bcrypt::hash(password, 4)?,
+            "sessionSecret": "fixture-session-key-for-tests-only",
+        }),
+    )?;
+    let (accounts, _) = AccountManager::open(store, None)?;
+    let server = Server::start(
+        ApiRouter::default()
+            .with_accounts(Arc::new(accounts), "/panel", true)?
+            .finish()
+            .router,
+    )
+    .await?;
+    let login = credentials("admin", password);
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let (status, headers, _) = server
+            .call("POST", "/api/login", &[JSON], login.clone())
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        sessions.push(cookie_pair(cookie_header(&headers)?).to_owned());
+    }
+    let auth = [("cookie", sessions[0].as_str())];
+    let (_, _, status) = server
+        .call("GET", "/api/account/totp", &auth, Body::empty())
+        .await?;
+    assert_eq!(status, json!({"enabled":false}));
+    let (status, headers, setup) = server
+        .call("POST", "/api/account/totp/setup", &auth, Body::empty())
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers["cache-control"], "no-store");
+    let secret = setup["secret"].as_str().context("TOTP secret")?;
+    let uri = url::Url::parse(setup["url"].as_str().context("provisioning URI")?)?;
+    assert_eq!(uri.scheme(), "otpauth");
+    assert_eq!(uri.host_str(), Some("totp"));
+    assert!(
+        uri.query_pairs()
+            .any(|(key, value)| key == "secret" && value == secret)
+    );
+    let key = hmac::Key::new(
+        hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+        &BASE32_NOPAD.decode(secret.as_bytes())?,
+    );
+    let code = |step: u64| {
+        let digest = hmac::sign(&key, &step.to_be_bytes());
+        let bytes = digest.as_ref();
+        let offset = usize::from(bytes[19] & 15);
+        let value = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) & 0x7fff_ffff;
+        format!("{:06}", value % 1_000_000)
+    };
+    let elapsed = SystemTime::now().duration_since(UNIX_EPOCH)?;
+    let until_rollover = Duration::from_secs((elapsed.as_secs() / 30 + 1) * 30) - elapsed;
+    if until_rollover < Duration::from_secs(2) {
+        tokio::time::sleep(until_rollover + Duration::from_millis(20)).await;
+    }
+    let step = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() / 30;
+    let proof = |step| json!({"password":password, "code":code(step)}).to_string();
+    let enable = "/api/account/totp/enable";
+    assert_eq!(
+        server
+            .call(
+                "POST",
+                enable,
+                &[JSON, ("cookie", &sessions[1])],
+                proof(step - 1)
+            )
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (status, headers, _) = server
+        .call("POST", enable, &[JSON, auth[0]], proof(step - 1))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(cookie_header(&headers)?.contains("Max-Age=0; Path=/panel/"));
+    for cookie in &sessions {
+        assert_eq!(
+            server
+                .call("GET", "/api/session", &[("cookie", cookie)], Body::empty())
+                .await?
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let (status, headers, body) = server
+        .call("POST", "/api/login", &[JSON], login.clone())
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["totpRequired"], true);
+    assert!(headers.get("set-cookie").is_none());
+    let (status, _, body) = server
+        .call("POST", "/api/login", &[JSON], credentials("admin", "wrong"))
+        .await?;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(body.get("totpRequired").is_none());
+    let with_code =
+        |step| json!({"username":"admin", "password":password, "code":code(step)}).to_string();
+    assert_eq!(
+        server
+            .call("POST", "/api/login", &[JSON], with_code(step - 1))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, headers, _) = server
+        .call("POST", "/api/login", &[JSON], with_code(step))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let auth = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    let (_, _, details) = server
+        .call("GET", "/api/account/totp", &auth, Body::empty())
+        .await?;
+    assert_eq!(details, json!({"enabled":true}));
+    let disable = "/api/account/totp/disable";
+    assert_eq!(
+        server
+            .call("POST", disable, &[JSON, auth[0]], proof(step))
+            .await?
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        server
+            .call("POST", disable, &[JSON, auth[0]], proof(step + 1))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &auth, Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        server.call("POST", "/api/login", &[JSON], login).await?.0,
+        StatusCode::OK
+    );
     Ok(())
 }

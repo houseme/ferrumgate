@@ -19,6 +19,7 @@ use crate::{
     lockout::{KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
     password::{self, MAX_PASSWORD_BYTES, check_password_strength},
     session::{Identity, Session, Snapshot, unix_seconds},
+    totp::{PendingTotp, Totp},
 };
 
 const ACCOUNT: &str = "account";
@@ -35,6 +36,8 @@ pub(super) struct Account {
     pub token_ttl_hours: i64,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub totp_secret: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totp_last_step: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     users: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -79,7 +82,7 @@ impl std::error::Error for CredentialChangeRejected {}
 pub struct AccountManager {
     store: Arc<ConfigStore>,
     snapshot: ArcSwap<Snapshot>,
-    writer: Mutex<()>,
+    writer: Mutex<Option<PendingTotp>>,
     limiter: LoginLimiter,
     login_events: Option<EventBus>,
     _owner: File,
@@ -142,7 +145,7 @@ impl AccountManager {
             Self {
                 store,
                 snapshot: ArcSwap::from_pointee(snapshot),
-                writer: Mutex::new(()),
+                writer: Mutex::new(None),
                 limiter,
                 login_events: None,
                 _owner: owner,
@@ -155,7 +158,7 @@ impl AccountManager {
     pub fn login(&self, username: &str, password: &str) -> Result<Option<Session>> {
         match self.login_from(IpAddr::V4(Ipv4Addr::LOCALHOST), username, password) {
             Ok(session) => Ok(Some(session)),
-            Err(LoginError::InvalidCredentials) => Ok(None),
+            Err(LoginError::InvalidCredentials | LoginError::TotpRequired) => Ok(None),
             Err(error) => Err(error.into()),
         }
     }
@@ -177,34 +180,149 @@ impl AccountManager {
         username: &str,
         password: &str,
     ) -> Result<Session, LoginError> {
+        self.login_with_totp_from(address, username, password, None)
+    }
+
+    pub fn login_with_totp_from(
+        &self,
+        address: IpAddr,
+        username: &str,
+        password: &str,
+        code: Option<&str>,
+    ) -> Result<Session, LoginError> {
         let attempt = self.limiter.begin(address)?;
         let snapshot = self.snapshot.load_full();
         let account = &snapshot.account;
         let accepted = password::verify(password, &account.password_hash)
             .map_err(LoginError::Internal)?
             && account.username == username
-            && !account.password_login_off
-            && account.totp_secret.is_empty();
-        if !accepted {
-            let completion = attempt.complete(false);
-            if let Some(failures) = completion.flood
-                && let Some(events) = &self.login_events
-            {
-                events.publish_with(|| {
-                    let mut event = Event::new(Kind::AuthFlood, "auth");
-                    event.args.push(("failures", failures.to_string()));
-                    event
-                });
-            }
-            return Err(LoginError::InvalidCredentials);
+            && !account.password_login_off;
+        let session = if !accepted {
+            None
+        } else if account.totp_secret.is_empty() {
+            Some(
+                snapshot
+                    .issue(SystemTime::now())
+                    .map_err(LoginError::Internal)?,
+            )
+        } else if snapshot.totp.is_some() {
+            let code = code
+                .filter(|code| !code.trim().is_empty())
+                .ok_or(LoginError::TotpRequired)?;
+            self.issue_with_totp(account, code)
+                .map_err(LoginError::Internal)?
+        } else {
+            None
+        };
+        let completion = attempt.complete(session.is_some());
+        if let Some(failures) = completion.flood
+            && let Some(events) = &self.login_events
+        {
+            events.publish_with(|| {
+                let mut event = Event::new(Kind::AuthFlood, "auth");
+                event.args.push(("failures", failures.to_string()));
+                event
+            });
         }
-        let session = snapshot
-            .issue(SystemTime::now())
-            .map_err(LoginError::Internal)?;
-        if attempt.complete(true).save_known {
+        let session = session.ok_or(LoginError::InvalidCredentials)?;
+        if completion.save_known {
             self.save_login_sources();
         }
         Ok(session)
+    }
+
+    fn issue_with_totp(&self, verified: &Account, code: &str) -> Result<Option<Session>> {
+        let _writer = self.writer.lock().expect("account writer poisoned");
+        let current = self.snapshot.load();
+        let account = &current.account;
+        if account.username != verified.username
+            || account.password_hash != verified.password_hash
+            || account.totp_secret != verified.totp_secret
+            || account.password_login_off
+        {
+            return Ok(None);
+        }
+        let now = SystemTime::now();
+        let timestamp = unix_seconds(now).context("system clock predates Unix epoch")?;
+        let Some(step) = current.unused_totp_step(code, timestamp) else {
+            return Ok(None);
+        };
+        let session = current.issue(now)?;
+        let mut next = account.clone();
+        next.totp_last_step = Some(step);
+        self.save(next)?;
+        Ok(Some(session))
+    }
+
+    pub fn totp_enabled(&self) -> bool {
+        !self.snapshot.load().account.totp_secret.is_empty()
+    }
+
+    pub fn prepare_totp(&self, token: &str) -> Result<String> {
+        let mut writer = self.writer.lock().expect("account writer poisoned");
+        let snapshot = self.snapshot.load();
+        let timestamp =
+            unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
+        let (id, _) = snapshot
+            .verify(token, timestamp)
+            .ok_or(CredentialChangeRejected("administrator session is invalid"))?;
+        let pending = PendingTotp::new(id)?;
+        let secret = pending.secret.clone();
+        *writer = Some(pending);
+        Ok(secret)
+    }
+
+    pub fn set_totp(&self, token: &str, password: &str, code: &str, enabled: bool) -> Result<()> {
+        let verified = self.snapshot.load_full();
+        let timestamp =
+            unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
+        ensure!(
+            verified.verify(token, timestamp).is_some(),
+            CredentialChangeRejected("administrator session is invalid")
+        );
+        ensure!(
+            password::verify(password, &verified.account.password_hash)?,
+            CredentialChangeRejected("invalid administrator credentials")
+        );
+        let mut writer = self.writer.lock().expect("account writer poisoned");
+        let current = self.snapshot.load();
+        let timestamp =
+            unix_seconds(SystemTime::now()).context("system clock predates Unix epoch")?;
+        let (id, _) = current
+            .verify(token, timestamp)
+            .ok_or(CredentialChangeRejected("administrator session is invalid"))?;
+        ensure!(
+            current.account.password_hash == verified.account.password_hash,
+            CredentialChangeRejected("administrator credentials changed during verification")
+        );
+        let mut next = current.account.clone();
+        if enabled {
+            let pending = writer
+                .as_ref()
+                .filter(|pending| pending.valid_for(id))
+                .ok_or(CredentialChangeRejected(
+                    "TOTP enrollment is missing or expired",
+                ))?;
+            let step = Totp::parse(&pending.secret)
+                .and_then(|totp| totp.match_code(code, timestamp))
+                .ok_or(CredentialChangeRejected(
+                    "invalid two-step verification code",
+                ))?;
+            next.totp_secret.clone_from(&pending.secret);
+            next.totp_last_step = Some(step);
+        } else {
+            ensure!(
+                current.unused_totp_step(code, timestamp).is_some(),
+                CredentialChangeRejected("invalid two-step verification code")
+            );
+            next.totp_secret.clear();
+            next.totp_last_step = None;
+        }
+        next.session_secret = random_urlsafe::<32>()?;
+        next.invalidate_sessions()?;
+        self.save(next)?;
+        *writer = None;
+        Ok(())
     }
 
     fn save_login_sources(&self) {

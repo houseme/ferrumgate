@@ -41,6 +41,7 @@ impl Default for LoginLimits {
 #[derive(Debug)]
 pub enum LoginError {
     InvalidCredentials,
+    TotpRequired,
     Locked(Duration),
     Flood,
     Busy,
@@ -51,6 +52,7 @@ impl fmt::Display for LoginError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidCredentials => "invalid administrator credentials",
+            Self::TotpRequired => "two-step verification code required",
             Self::Locked(_) => "login source is temporarily locked",
             Self::Flood => "unfamiliar login source is temporarily limited",
             Self::Busy => "login verification is busy",

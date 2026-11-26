@@ -9,7 +9,10 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
 
-use crate::account::{Account, MAX_REVOKED, MAX_USERNAME_BYTES, random_urlsafe};
+use crate::{
+    account::{Account, MAX_REVOKED, MAX_USERNAME_BYTES, random_urlsafe},
+    totp::Totp,
+};
 
 const DEFAULT_TTL_HOURS: u64 = 72;
 const MAX_TOKEN_BYTES: usize = 4096;
@@ -58,6 +61,7 @@ struct Claims<'a> {
 
 pub(super) struct Snapshot {
     pub account: Account,
+    pub totp: Option<Totp>,
     key: hmac::Key,
     version: String,
     ttl: Duration,
@@ -102,6 +106,7 @@ impl Snapshot {
             .map(|entry| entry.id.clone())
             .collect();
         Ok(Self {
+            totp: Totp::parse(&account.totp_secret),
             account,
             key,
             version,
@@ -132,6 +137,13 @@ impl Snapshot {
         token.push('.');
         token.push_str(&sig);
         Ok(Session { token, expires_at })
+    }
+
+    pub fn unused_totp_step(&self, code: &str, timestamp: u64) -> Option<u64> {
+        self.totp
+            .as_ref()?
+            .match_code(code, timestamp)
+            .filter(|&step| self.account.totp_last_step.is_none_or(|last| step > last))
     }
 
     pub fn verify<'a>(&self, token: &'a str, now: u64) -> Option<(&'a str, u64)> {

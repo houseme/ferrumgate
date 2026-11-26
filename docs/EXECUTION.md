@@ -839,6 +839,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 163 项工作区测试和 9 项本机 Pebble ACME 测试。两项新增回环用例覆盖首次登录和强制改密、写入失败时保留旧会话、Cookie 路径和安全属性、同源校验、重复 Cookie 拒绝、可信连接地址、HTTP 429、单会话与全部会话吊销，以及 API 令牌的会话查询权限。生产管理监听和 TOTP 仍按计划接入。
 
+### WP-12 TOTP 两步验证
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth totp
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login::login_totp
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 167 项工作区测试和 9 项本机 Pebble ACME 测试。新增用例覆盖 RFC 6238 SHA-1 向量、验证码前导零与时钟偏差、写入失败时拒发会话、并发与跨重启防重放、缺少验证码时保留失败计数，以及绑定会话限制和启停后的旧会话失效。[RFC 6238 附录 B](https://www.rfc-editor.org/rfc/rfc6238#appendix-B)
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

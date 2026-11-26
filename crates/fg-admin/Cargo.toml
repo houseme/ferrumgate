@@ -28,6 +28,9 @@ tokio-stream = { version = "0.1", default-features = false }
 url = "2"
 
 [dev-dependencies]
+bcrypt = "0.19"
+data-encoding = "2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+ring = "0.17"
 tokio = { workspace = true, features = ["macros", "net", "test-util"] }
