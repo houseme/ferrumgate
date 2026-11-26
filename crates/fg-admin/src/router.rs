@@ -11,6 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{MethodFilter, on},
 };
+use fg_auth::{AccountManager, Identity};
 use fg_core::registry::{CATALOG, Enabled, Registry, Status};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -18,6 +19,7 @@ use tokio::sync::Semaphore;
 use crate::{
     AdminAssets, ApiError, Localizer, RouteModels, Translation,
     http::{Presentation, RenderPolicy, boundary},
+    login::{self, COOKIE_NAME, SessionCookies, password_fix_allowed, session_token},
     response::MAX_TRANSFORMS,
     scope::{Access, bootstrap_route, module_of, required},
     upload,
@@ -38,7 +40,12 @@ pub enum StreamPolicy {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReadOnly(pub bool);
 
-type Auth = Arc<dyn Fn(&HeaderMap) -> Option<Principal> + Send + Sync>;
+enum Authenticated {
+    Account(Identity),
+    External(Principal),
+}
+
+type Auth = Arc<dyn Fn(&HeaderMap) -> Option<Authenticated> + Send + Sync>;
 
 struct Operation {
     method: Method,
@@ -113,7 +120,7 @@ impl ApiRouter {
         Self {
             router: Router::new(),
             operations: Vec::new(),
-            auth: Arc::new(authenticate),
+            auth: Arc::new(move |headers| authenticate(headers).map(Authenticated::External)),
             modules: None,
             assets: None,
             presentation: Presentation {
@@ -140,6 +147,45 @@ impl ApiRouter {
     pub fn with_assets(mut self, assets: AdminAssets) -> Self {
         self.assets = Some(assets);
         self
+    }
+
+    /// Installs account routes before other routes. Set `secure` for an externally HTTPS listener.
+    /// The listener must supply `ConnectInfo<SocketAddr>`. Other authenticators supply API tokens.
+    pub fn with_accounts(
+        mut self,
+        accounts: Arc<AccountManager>,
+        external_prefix: &str,
+        secure: bool,
+    ) -> Result<Self> {
+        assert!(
+            self.operations.is_empty(),
+            "configure accounts before declaring routes"
+        );
+        let cookies = SessionCookies::new(external_prefix, secure)?;
+        let previous = self.auth;
+        let verifier = accounts.clone();
+        self.auth = Arc::new(move |headers| {
+            if let Some(identity) =
+                session_token(headers).and_then(|token| verifier.identify(token))
+            {
+                return Some(Authenticated::Account(identity));
+            }
+            previous(headers).filter(|principal| {
+                matches!(principal, Authenticated::External(Principal::Token { .. }))
+            })
+        });
+        let mut disabled = Vec::new();
+        let mut absent = Vec::new();
+        if let Some((registry, enabled)) = self.modules.as_deref() {
+            for module in CATALOG {
+                match registry.status(enabled, module.id) {
+                    Some(Status::Disabled) => disabled.push(module.id),
+                    Some(Status::Absent) => absent.push(module.id),
+                    _ => {}
+                }
+            }
+        }
+        Ok(login::mount(self, accounts, cookies, disabled, absent))
     }
 
     pub fn route<H, T>(
@@ -440,12 +486,24 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
         ));
     };
     let (allowed, restricted) = match principal {
-        Principal::Session { read_only: false } => (true, false),
-        Principal::Session { read_only: true } => (
+        Authenticated::Account(identity) => {
+            if identity.must_change_password
+                && !password_fix_allowed(request.method(), request.uri().path())
+            {
+                return reject(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "administrator password must be changed",
+                ));
+            }
+            request.extensions_mut().insert(identity);
+            (true, false)
+        }
+        Authenticated::External(Principal::Session { read_only: false }) => (true, false),
+        Authenticated::External(Principal::Session { read_only: true }) => (
             policy.access.read_only() && matches!(*request.method(), Method::GET | Method::HEAD),
             true,
         ),
-        Principal::Token { scopes } => (
+        Authenticated::External(Principal::Token { scopes }) => (
             policy.access.allows_token(&scopes),
             !policy.access.allows_unredacted(&scopes),
         ),
@@ -580,6 +638,6 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
     }
     json!({"openapi":"3.0.3", "info":{"title":"FerrumGate Management API","version":env!("CARGO_PKG_VERSION")},
         "tags":tags.into_iter().map(|name| json!({"name":name})).collect::<Vec<_>>(),"paths":paths,
-        "components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"},"sessionCookie":{"type":"apiKey","in":"cookie","name":"gately_token"}}},
+        "components":{"securitySchemes":{"bearerAuth":{"type":"http","scheme":"bearer"},"sessionCookie":{"type":"apiKey","in":"cookie","name":COOKIE_NAME}}},
         "x-scope-domains":domains})
 }

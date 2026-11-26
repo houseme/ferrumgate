@@ -1,5 +1,6 @@
 use std::{
     cmp::Reverse,
+    fmt,
     fs::{File, OpenOptions},
     net::{IpAddr, Ipv4Addr},
     sync::{Arc, Mutex},
@@ -62,6 +63,17 @@ pub(super) struct Revoked {
 fn is_false(value: &bool) -> bool {
     !*value
 }
+
+#[derive(Debug)]
+pub struct CredentialChangeRejected(pub &'static str);
+
+impl fmt::Display for CredentialChangeRejected {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for CredentialChangeRejected {}
 
 /// Owns the only active writer for one account file.
 pub struct AccountManager {
@@ -211,6 +223,7 @@ impl AccountManager {
         let _ = snapshot.verify(token, now)?;
         Some(Identity {
             username: snapshot.account.username.clone(),
+            initial_password: snapshot.account.using_default_password,
             must_change_password: snapshot.account.using_default_password
                 || snapshot.account.weak_password,
         })
@@ -255,18 +268,18 @@ impl AccountManager {
         let username = username.trim();
         ensure!(
             !username.is_empty() && username.len() <= MAX_USERNAME_BYTES,
-            "invalid administrator username"
+            CredentialChangeRejected("invalid administrator username")
         );
         check_password_strength(username, new_password)?;
         ensure!(
             current_password != new_password,
-            "new password must differ from the current password"
+            CredentialChangeRejected("new password must differ from the current password")
         );
 
         let verified = self.snapshot.load_full();
         ensure!(
             password::verify(current_password, &verified.account.password_hash)?,
-            "invalid administrator credentials"
+            CredentialChangeRejected("invalid administrator credentials")
         );
         let new_hash = password::hash(new_password)?;
         let secret = random_urlsafe::<32>()?;
@@ -276,14 +289,14 @@ impl AccountManager {
         ensure!(
             account.username == verified.account.username
                 && account.password_hash == verified.account.password_hash,
-            "administrator credentials changed during verification"
+            CredentialChangeRejected("administrator credentials changed during verification")
         );
         ensure!(
             !account
                 .users
                 .iter()
                 .any(|user| user["username"].as_str() == Some(username)),
-            "administrator username conflicts with an existing user"
+            CredentialChangeRejected("administrator username conflicts with an existing user")
         );
         let mut next = account.clone();
         next.username = username.into();

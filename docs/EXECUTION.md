@@ -826,6 +826,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 161 项工作区测试和 9 项本机 Pebble ACME 测试。五项新增用例验证来源锁定的递增与上限、并发预占和取消释放、IPv4 映射与 IPv6 子网归并、陌生来源预算与单次事件、来源表容量与过期清理，以及已知来源重启后仍可登录。HTTP 登录与 Cookie 由下一步骤接入。
 
+### WP-12 HTTP 登录与会话
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login::
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 163 项工作区测试和 9 项本机 Pebble ACME 测试。两项新增回环用例覆盖首次登录和强制改密、写入失败时保留旧会话、Cookie 路径和安全属性、同源校验、重复 Cookie 拒绝、可信连接地址、HTTP 429、单会话与全部会话吊销，以及 API 令牌的会话查询权限。生产管理监听和 TOTP 仍按计划接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

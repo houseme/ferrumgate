@@ -30,6 +30,8 @@ use tokio::{
 
 #[path = "admin/compat.rs"]
 mod compat;
+#[path = "admin/login.rs"]
+mod login;
 #[path = "admin/logs.rs"]
 mod logs;
 #[path = "admin/models.rs"]
@@ -49,7 +51,12 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let listen = listener.local_addr()?;
         let task = tokio::spawn(async move {
-            axum::serve(listener, router).await.unwrap();
+            axum::serve(
+                listener,
+                router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await
+            .unwrap();
         });
         Ok(Self { listen, task })
     }

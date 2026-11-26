@@ -20,10 +20,23 @@ pub struct Session {
     pub expires_at: SystemTime,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Identity {
     pub username: String,
     pub must_change_password: bool,
+    pub initial_password: bool,
+}
+
+impl Identity {
+    pub fn password_issue(&self) -> &'static str {
+        if self.initial_password {
+            "default"
+        } else if self.must_change_password {
+            "weak"
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

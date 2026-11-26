@@ -43,11 +43,7 @@ pub(super) struct StaticResponse;
 impl AdminAssets {
     /// The prefix is the externally visible base URL. The gateway strips it before routing.
     pub fn new(index: &str, prefix: &str, assets: impl IntoIterator<Item = Asset>) -> Result<Self> {
-        let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
-        ensure!(
-            prefix.len() <= 1024 && (prefix.is_empty() || (valid_path(prefix) && prefix != "/")),
-            "invalid management interface prefix"
-        );
+        let prefix = normalized_prefix(prefix)?;
         ensure!(index.len() <= MAX_ASSET, "management index exceeds 16 MiB");
         ensure!(
             index.contains("<head>"),
@@ -235,6 +231,15 @@ impl Representation {
         }
         response
     }
+}
+
+pub(super) fn normalized_prefix(prefix: &str) -> Result<&str> {
+    let prefix = prefix.strip_suffix('/').unwrap_or(prefix);
+    ensure!(
+        prefix.len() <= 1024 && (prefix.is_empty() || (valid_path(prefix) && prefix != "/")),
+        "invalid management interface prefix"
+    );
+    Ok(prefix)
 }
 
 fn valid_path(path: &str) -> bool {

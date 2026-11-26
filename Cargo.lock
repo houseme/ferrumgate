@@ -597,6 +597,7 @@ dependencies = [
  "anyhow",
  "arc-swap",
  "axum",
+ "fg-auth",
  "fg-config",
  "fg-core",
  "fg-logging",
