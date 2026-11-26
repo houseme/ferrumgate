@@ -19,10 +19,34 @@ use fg_core::{
 use fg_gateway::ManagementReady;
 use tokio::{
     net::TcpListener,
-    sync::{oneshot, watch},
+    sync::{Notify, oneshot, watch},
 };
 
 use crate::logging::RuntimeLogs;
+
+/// How `bootstrap::serve` finished: a normal drain or a restart request.
+pub enum Outcome {
+    Exit,
+    Restart,
+}
+
+/// Shared signal behind `POST /api/system/restart`; the response is written
+/// before the trigger fires so the client observes it.
+#[derive(Clone, Default)]
+struct RestartTrigger(Arc<Notify>);
+
+impl RestartTrigger {
+    fn notify(&self) {
+        self.0.notify_one();
+    }
+
+    async fn notified(&self) {
+        self.0.notified().await;
+    }
+}
+
+/// Names that never get history snapshots: credential and runtime state.
+const HISTORY_SKIP: [&str; 3] = ["account", "tokens", "login-ips"];
 
 #[derive(Args)]
 pub struct AdminOptions {
@@ -46,9 +70,13 @@ impl AdminOptions {
     }
 }
 
-pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLogs) -> Result<()> {
+pub async fn serve(
+    config: PathBuf,
+    mut options: AdminOptions,
+    logs: &RuntimeLogs,
+) -> Result<Outcome> {
     let Some(directory) = options.admin_dir.take() else {
-        return fg_gateway::serve(config).await;
+        return fg_gateway::serve(config).await.map(|()| Outcome::Exit);
     };
     ensure!(
         options
@@ -63,8 +91,11 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
     })?;
     let origin = options.admin_origin.clone();
     let setup_events = events.clone();
-    let (accounts, tokens, settings) = tokio::task::spawn_blocking(move || {
+    let (accounts, tokens, settings, store) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
+        // Snapshot every configuration change except credential and
+        // runtime state, so offline rollback requests have versions to use.
+        store.enable_history(30, &HISTORY_SKIP);
         let initial = std::env::var("FERRUMGATE_INITIAL_PASSWORD");
         let initial = match &initial {
             Ok(password) => Some(password.as_str()),
@@ -81,8 +112,14 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         if tokens.migrate_legacy_settings("ferrumgate", time::OffsetDateTime::now_utc())? {
             tracing::info!(target: "fg_core::auth", "legacy API token migrated");
         }
-        let settings = SettingsState::open_with_origin(store, fg_gateway::REGISTRY, origin)?;
-        Ok::<_, anyhow::Error>((Arc::new(manager), Arc::new(tokens), Arc::new(settings)))
+        let settings =
+            SettingsState::open_with_origin(store.clone(), fg_gateway::REGISTRY, origin)?;
+        Ok::<_, anyhow::Error>((
+            Arc::new(manager),
+            Arc::new(tokens),
+            Arc::new(settings),
+            store,
+        ))
     })
     .await??;
     let started = settings.snapshot();
@@ -105,12 +142,14 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
     let listener = TcpListener::bind(address)
         .await
         .context("bind management listener")?;
-    let result = async {
+    let restart = RestartTrigger::default();
+    let result: Result<Outcome> = async {
         let (ready, waiting) = oneshot::channel();
         let gateway = fg_gateway::serve_with_management(config, &started.disabled_modules, ready);
+        let restarted = restart.clone();
         let management = async {
             let Ok(ready) = waiting.await else {
-                return Ok(());
+                return Ok(Outcome::Exit);
             };
             ManagementService {
                 listener,
@@ -118,7 +157,9 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
                 accounts,
                 tokens: tokens.clone(),
                 settings,
+                store,
                 events,
+                restart,
             }
             .run(ready, logs)
             .await
@@ -126,6 +167,9 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         tokio::pin!(gateway, management);
         tokio::select! {
             biased;
+            // Restart wins over concurrent drains: re-execute flushes state
+            // below and replaces the process in main.
+            () = restarted.notified() => Ok(Outcome::Restart),
             result = &mut gateway => {
                 result?;
                 tokio::time::timeout(Duration::from_secs(3), management).await
@@ -134,16 +178,18 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
             result = &mut management => {
                 result?;
                 // The gateway owns the process signal and data-plane drain.
-                gateway.await
+                gateway.await.map(|()| Outcome::Exit)
             }
         }
     }
     .await;
+    let outcome = result?;
     let flushed = tokio::task::spawn_blocking(move || tokens.flush_usage_on_shutdown())
         .await
         .context("join API token shutdown flush")
         .and_then(|saved| saved.context("flush API token usage on shutdown"));
-    result.and(flushed.map(|_| ()))
+    flushed?;
+    Ok(outcome)
 }
 
 struct ManagementService {
@@ -152,18 +198,22 @@ struct ManagementService {
     accounts: Arc<AccountManager>,
     tokens: Arc<TokenManager>,
     settings: Arc<SettingsState>,
+    store: Arc<ConfigStore>,
     events: EventBus,
+    restart: RestartTrigger,
 }
 
 impl ManagementService {
-    async fn run(self, ready: ManagementReady, logs: &RuntimeLogs) -> Result<()> {
+    async fn run(self, ready: ManagementReady, logs: &RuntimeLogs) -> Result<Outcome> {
         let Self {
             listener,
             options,
             accounts,
             tokens,
             settings,
+            store,
             events,
+            restart,
         } = self;
         let started = settings.snapshot();
         let updates = settings.subscribe();
@@ -214,16 +264,34 @@ impl ManagementService {
             &options.admin_prefix,
             Some(audit.clone()),
         )?);
+        let delayed = restart.clone();
         let admin = router
             .with_logs(logs.handle())
             .with_security_status(accounts.clone(), exposure)
             .with_token_management(tokens.clone())
             .with_managed_third_login(third_login.clone())
             .with_settings(settings, accounts.clone())
+            .route(
+                axum::http::Method::POST,
+                "/api/system/restart",
+                "Restart the service",
+                move || {
+                    let delayed = delayed.clone();
+                    async move {
+                        // Let the response leave before the process is
+                        // replaced.
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                            delayed.notify();
+                        });
+                        axum::Json(serde_json::json!({"ok": true}))
+                    }
+                },
+            )
             .finish();
         tracing::info!(listen = %listener.local_addr()?, "management ready");
         let mut drain = ready.drain;
-        let maintenance = poll_auth_maintenance(accounts.clone(), tokens, drain.clone());
+        let maintenance = poll_auth_maintenance(accounts.clone(), tokens, store, drain.clone());
         let runtime = apply_settings_updates(updates, started, &accounts, logs, &directory);
         let server = axum::serve(
             listener,
@@ -243,7 +311,7 @@ impl ManagementService {
             () = third_login.run() => server.await.context("serve management after OAuth settings watcher closed"),
         };
         audit.flush();
-        served
+        served.map(|()| Outcome::Exit)
     }
 }
 
@@ -324,6 +392,7 @@ async fn apply_settings_updates(
 async fn poll_auth_maintenance(
     accounts: Arc<AccountManager>,
     tokens: Arc<TokenManager>,
+    store: Arc<ConfigStore>,
     mut drain: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(2));
@@ -336,12 +405,29 @@ async fn poll_auth_maintenance(
         }
         let accounts = accounts.clone();
         let tokens = tokens.clone();
+        let rollback = store.clone();
         let work = tokio::task::spawn_blocking(move || {
             if accounts.apply_pending_reset().is_err() {
                 tracing::error!(target: "fg_core::auth", "administrator reset could not be applied");
             }
             if tokens.flush_usage(Instant::now()).is_err() {
                 tracing::error!(target: "fg_core::auth", "API token usage could not be persisted");
+            }
+            // Offline rollback requests are claimed in the configuration
+            // directory and applied while the service keeps running.
+            match fg_config::rollback::take_request(rollback.dir()) {
+                Ok(Some(request)) => match fg_config::rollback::apply_offline(&rollback, request) {
+                    Ok(summary) => {
+                        tracing::info!(target: "fg_config::rollback", summary = %summary, "offline rollback applied");
+                    }
+                    Err(error) => {
+                        tracing::error!(target: "fg_config::rollback", %error, "offline rollback failed");
+                    }
+                },
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(target: "fg_config::rollback", %error, "rollback request could not be read");
+                }
             }
         })
         .await;
@@ -374,7 +460,12 @@ mod tests {
         )?);
         tokens.authenticate(raw, now, Some("127.0.0.1".parse()?))?;
         let (shutdown, drain) = watch::channel(false);
-        let maintenance = tokio::spawn(poll_auth_maintenance(Arc::new(accounts), tokens, drain));
+        let maintenance = tokio::spawn(poll_auth_maintenance(
+            Arc::new(accounts),
+            tokens,
+            store.clone(),
+            drain,
+        ));
         let saved = tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let data = store.load_raw("tokens")?.context("persisted tokens")?;

@@ -858,3 +858,144 @@ async fn stop_management(child: &mut Child) -> Result<()> {
     assert!(timeout(DEADLINE, child.wait()).await??.success());
     Ok(())
 }
+
+#[tokio::test]
+async fn management_restart_reexeces_with_same_pid_and_listener() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let backend = Origin::http("restart fixture").await?;
+    let initial = "Fixture-initial$23";
+    let password = "Lk8$yN3-pv";
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        let (manager, _) = fg_auth::AccountManager::open(store, Some(initial))?;
+        manager.change_credentials(initial, "operator", password)?;
+    }
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", backend.addr, "/"), "", ""),
+    )?;
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let admin = probe.local_addr()?;
+    drop(probe);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .args(["--admin-listen", &admin.to_string(), "--admin-dir"])
+        .arg(&accounts)
+        .env_remove("FERRUMGATE_LOG_LEVEL")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let pid = child.id();
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    wait_listener(&mut lines, "management ready").await?;
+    let login = |password: &str| {
+        let mut request = request(
+            Method::POST,
+            "/api/login",
+            "localhost",
+            full(json!({"username":"operator","password":password}).to_string()),
+        );
+        request
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        request
+    };
+    let mut client = http_client(connect(admin).await?).await?;
+    let response = send(&mut client, login(password)).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let mut restart = request(Method::POST, "/api/system/restart", "localhost", full(""));
+    restart
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse()?);
+    let response = send(&mut client, restart).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(body["ok"], true, "the response is written before re-exec");
+    // The old image keeps serving until exec; wait for the restarted
+    // process to announce the same listener instead of racing a connect.
+    let restarted = timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let address = wait_listener(&mut lines, "management ready").await?;
+            if address == admin {
+                return Ok::<_, anyhow::Error>(address);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(restarted, admin);
+    assert_eq!(child.id(), pid, "exec replaces the image, not the process");
+    assert!(child.try_wait()?.is_none(), "service keeps running");
+    let mut client = http_client(connect(admin).await?).await?;
+    assert_eq!(
+        send(&mut client, login(password)).await?.status(),
+        StatusCode::OK,
+        "credentials survive the restart"
+    );
+    stop_management(&mut child).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn management_takes_offline_rollback_requests_while_running() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let backend = Origin::http("rollback fixture").await?;
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        store.enable_history(20, &[]);
+        store.save("ferrumgate", &json!({"language":"en"}))?;
+        store.save("ferrumgate", &json!({"language":"zh"}))?;
+    }
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", backend.addr, "/"), "", ""),
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+        .arg(&accounts)
+        .env_remove("FERRUMGATE_LOG_LEVEL")
+        .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    wait_listener(&mut lines, "management ready").await?;
+    let request = fg_config::rollback::RollbackRequest {
+        config: String::new(),
+        version: None,
+        last: true,
+        pending: false,
+        created_at: time::OffsetDateTime::now_utc(),
+    };
+    fg_config::rollback::write_request(&accounts, &request)?;
+    timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            if !accounts.join("rollback-request.state").exists()
+                && let Some(bytes) =
+                    fg_config::ConfigStore::open(&accounts)?.load_raw("ferrumgate")?
+                && let Ok(view) = serde_json::from_slice::<Value>(&bytes)
+                && view["language"] == "en"
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    })
+    .await??;
+    stop_management(&mut child).await?;
+    Ok(())
+}

@@ -2,6 +2,7 @@
 
 mod bootstrap;
 mod logging;
+mod restart;
 
 use std::{
     io::{self, Write},
@@ -89,9 +90,15 @@ async fn main() -> Result<()> {
             admin,
         } => {
             let logs = logging::RuntimeLogs::start(log_level, log_dir, admin.enabled())?;
-            let result = bootstrap::serve(config, admin, &logs).await;
+            let outcome = bootstrap::serve(config, admin, &logs).await;
             logs.shutdown().await;
-            result
+            match outcome? {
+                bootstrap::Outcome::Exit => Ok(()),
+                bootstrap::Outcome::Restart => restart::exec_self(
+                    std::env::current_exe()?,
+                    std::env::args_os().skip(1).collect(),
+                ),
+            }
         }
     }
 }
