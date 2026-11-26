@@ -68,6 +68,9 @@ pub struct AdminOptions {
     /// Apply declarative <name>.json files from this directory at startup.
     #[arg(long = "apply", env = "FERRUMGATE_APPLY_DIR", requires = "admin_dir")]
     apply_dir: Option<PathBuf>,
+    /// Run in read-only demo mode for visitors.
+    #[arg(long)]
+    demo: bool,
 }
 
 impl AdminOptions {
@@ -162,6 +165,10 @@ pub async fn serve(
     let listener = TcpListener::bind(address)
         .await
         .context("bind management listener")?;
+    if fg_admin::demo::from_environment_with(options.demo, |name| std::env::var(name).ok()) {
+        fg_admin::demo::enable();
+        tracing::info!(target: "fgate::bootstrap", "demo mode enabled: read-only visitor tour");
+    }
     let restart = RestartTrigger::default();
     let process_start = std::time::SystemTime::now();
     let result: Result<Outcome> = async {

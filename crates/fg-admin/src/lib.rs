@@ -3,6 +3,7 @@
 mod assets;
 mod audit;
 mod collection;
+pub mod demo;
 mod http;
 mod item_json;
 mod localize;

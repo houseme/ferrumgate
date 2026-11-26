@@ -1368,7 +1368,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-14 | 管理访问控制与界面入口 | M | WP-12、WP-31 | 部分实现（回环管理入口、前缀、同源与安全响应头），见 [验收记录](EXECUTION.md#wp-12-剩余链路与启动验收) |
 | WP-15 | CLI、回滚命令与 MCP | M | WP-02、WP-11、WP-13 | 已完成（ctl、mcp、rollback 与既有 reset-*），见 [验收记录](EXECUTION.md#wp-15-ctl-与-mcp) |
 | WP-16 | 事件总线 | S | — | 已完成，见 [验收记录](EXECUTION.md#wp-16-事件总线) |
-| WP-17 | 总览、自检与系统接口 | M | WP-01、WP-16 | 部分实现（独立回环监听的转发指标），见 [验收记录](EXECUTION.md#转发流量指标) |
+| WP-17 | 总览、自检与系统接口 | M | WP-01、WP-16 | 部分实现（状态/info、公网 IP、probe、自检系统项、存储、metrics 端点、onboarding、demo；诊断包与 GeoIP 随对应包），见 [验收记录](EXECUTION.md#wp-17-系统接口与演示模式) |
 | WP-20 | Web 服务配置模型 v2 | L | WP-01、WP-39 | 前置已接入（现有 TOML 路由与域名匹配，v2 模型待实现），见 [验收记录](EXECUTION.md#数据面交付记录) |
 | WP-21 | 监听器与传输协议 | L | WP-20、WP-31 | 部分实现（HTTP/1.1、HTTP/2、TLS/SNI 与 WebSocket），见 [验收记录](EXECUTION.md#数据面交付记录) |
 | WP-22 | 站点类型 | M | WP-20 | 部分实现（代理、重定向、固定文本与静态文件），见 [验收记录](EXECUTION.md#数据面交付记录) |

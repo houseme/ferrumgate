@@ -1073,3 +1073,92 @@ async fn management_applies_declarative_directory_before_config_load() -> Result
     stop_management(&mut child).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn demo_mode_refuses_writes_and_sensitive_reads_for_everyone() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let backend = Origin::http("demo fixture").await?;
+    {
+        let store = fg_config::ConfigStore::open(&accounts)?;
+        let (manager, _) = fg_auth::AccountManager::open(store, Some("Fixture-initial$23"))?;
+        manager.change_credentials("Fixture-initial$23", "operator", "Lk8$yN3-pv")?;
+    }
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", backend.addr, "/"), "", ""),
+    )?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+        .arg(&accounts)
+        .arg("--demo")
+        .env_remove("FERRUMGATE_LOG_LEVEL")
+        .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    let admin = wait_listener(&mut lines, "management ready").await?;
+    let login = |password: &str| {
+        let mut request = request(
+            Method::POST,
+            "/api/login",
+            "localhost",
+            full(json!({"username":"operator","password":password}).to_string()),
+        );
+        request
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        request
+    };
+    let mut client = http_client(connect(admin).await?).await?;
+    let response = send(&mut client, login("Lk8$yN3-pv")).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "demo still allows sign-in"
+    );
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()?
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    // Session-backed writes are refused with the demo message.
+    let mut put = request(
+        Method::PUT,
+        "/api/system/settings",
+        "localhost",
+        full(json!({"logLevel":"debug"}).to_string()),
+    );
+    put.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    put.headers_mut()
+        .insert(header::CONTENT_TYPE, "application/json".parse()?);
+    let response = send(&mut client, put).await?;
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body: Value = serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+    assert_eq!(body["error"], "演示模式下不可用");
+    // Sensitive reads are refused; ordinary reads pass.
+    let mut read = request(
+        Method::GET,
+        "/api/system/diagnostics",
+        "localhost",
+        full(""),
+    );
+    read.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    assert_eq!(
+        send(&mut client, read).await?.status(),
+        StatusCode::FORBIDDEN
+    );
+    let mut session = request(Method::GET, "/api/session", "localhost", full(""));
+    session
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse()?);
+    assert_eq!(send(&mut client, session).await?.status(), StatusCode::OK);
+    stop_management(&mut child).await?;
+    Ok(())
+}

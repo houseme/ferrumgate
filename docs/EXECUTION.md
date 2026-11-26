@@ -1175,6 +1175,22 @@ macOS arm64、Rust stable 1.100.0 上通过 275 项工作区测试和 9 项本�
 
 `fgate mcp` 通过标准输入输出提供 JSON-RPC 2.0 服务（每行一条消息）：`initialize` 返回协议版本 `2024-11-05` 与 `serverInfo`，`tools/list` 在首次请求时读取实例 OpenAPI 生成并缓存工具，`tools/call` 执行调用；通知与未知方法按 JSON-RPC 处理（前者不回复、后者返回 -32601）。工具名为方法加 `/api` 以下路径（转小写、非字母数字替换为 `_`、去掉花括号，最长 64 字符，重名追加序号）；路径参数成为必填字符串，GET 工具带可选 `query` 对象，带请求体的操作有 `body` 参数；描述包含摘要、方法路径与所需权限，标注 `readOnlyHint` 与 `destructiveHint`；结果超过 200000 个字符截断并说明。默认只读：仅暴露 GET/HEAD 工具且不含路径带 `secrets` 的接口，`--write` 后才提供写操作，令牌自身权限始终生效。单元用例覆盖只读默认与 secrets 隐藏、命名规则、长度上限、重名去重、截断、路径参数必填与 schema 结构；端到端用例经管道驱动子进程验证协议握手、默认列表仅 GET、隐藏工具不可调用、未知方法报错、工具调用含路径参数与 query 的实际转发，以及 `--write` 下写工具出现但只读令牌仍被实例以 403 拒绝。修复了日志归档目录尚未创建时查询返回 500 的问题：归档列表把目录缺失视为没有归档。MCP 客户端配置示例：以 `fgate mcp --url http://127.0.0.1:16680 --token <专用只读令牌>` 作为子进程接入 AI 客户端，验证流程后再按需换写令牌并加 `--write`。
 
+### WP-17 系统接口与演示模式
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-core
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --lib
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test system
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway demo_mode
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 301 项工作区测试和 9 项本机 Pebble ACME 测试。基础层：`CheckResult` 只含 id/status/params 且空参数省略键（有 schema 派生），Prometheus 0.0.4 输出按族聚合 HELP/TYPE 各一次、标签按键排序并转义、整数压实并支持 NaN/±Inf 拼写，sysstat 在 Linux 解析 `/proc`（含命令名带空格的 stat），其他平台以无损缺省返回。状态路由返回模块三态矩阵与运行时字段，info 报告构建内容（集成测试用真实监听验证 webservice=enabled、ssl 由依赖恢复、portforward=disabled、ddns=absent）。公网地址：并发刷新共享一次查询（两族共 2 次调用）、10 秒窗口零新增出站、族失败进 `errors`、GET 不出站。probe：目标解析拒绝凭据与非 http(s)、错误映射七类稳定类别。自检：组网网卡上的 CGNAT 地址不计入、直连公网按网卡命名、时钟阈值 90s/600s 分级、`Date` 头偏差估算；端点仅限会话。存储统计按分类累加且符号链接永不跟随（顶层与分类两处都用 symlink_metadata），外部日志目录单独列出。指标端点输出 `ferrumgate_` 前缀的全局 gauge 并要求 `metrics:read`。onboarding：场景校验/去重、清单项编号模式与 32 项上限、dismiss 清除 `scenePending` 且 `done` 保留、全新安装判定不触碰已有部署（单元测试固定）。演示模式：`--demo`/`FERRUMGATE_DEMO=1` 开启，守卫在鉴权之外，端到端用例验证真实进程下管理员会话的写请求与敏感读取被 403「演示模式下不可用」拒绝而普通读取与登录放行。诊断包、GeoIP 查询与模块摘要/指标随对应工作包接入。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。

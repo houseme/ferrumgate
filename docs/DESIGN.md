@@ -402,3 +402,21 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 `fgate mcp` 在标准输入输出上手写 JSON-RPC 2.0 分帧（每行一条消息）：`initialize` 返回 `2024-11-05` 与 `serverInfo`；`tools/list` 首次请求时读取实例 OpenAPI 生成工具并缓存；`tools/call` 填充路径参数、可选 `query` 对象与 `body` 后转发。工具名由方法与 `/api` 以下的路径段组成（小写、非字母数字转 `_`、去花括号、64 字符上限、重名加序号），路径参数是必填字符串，`readOnlyHint` 与 `destructiveHint` 如实标注，结果超过 200000 字符截断并说明。默认只读——仅 GET/HEAD 且不含 `secrets` 路径，`--write` 才暴露写操作，令牌权限始终是最终限制；建议为 AI 客户端创建专用只读令牌。连接信息与 `ctl` 同源。
 
 `fgate rollback` 与 `fgate reset-password`/`reset-totp` 是面向配置目录的两段式命令：先写离线请求文件并等待运行实例取走（200 毫秒一次、至多 6 秒，长于服务端 2 秒轮询），无人接手则取回并离线应用，被替换内容进入配置历史；Unix 上请求文件属主对齐账号文件。回滚目标可选交互序号、`--last`、`--pending` 或 `--config`+`--version`，执行前需 `yes` 或 `--yes`；命令拒绝没有全局设置或账号文件的外来目录。
+
+## 22. 系统接口与演示模式（WP-17）
+
+`GET /api/status`（`status:read`）返回版本、RFC 3339 进程启动时刻、运行秒数、OS 与架构、配置目录路径、进程常驻内存、设置中的时区，以及全部目录模块的 enabled/disabled/absent 状态；`GET /api/system/info`（`status:read`）报告构建内容：编译进本构建的模块、缺席模块、语言档位与注入的编译器版本。
+
+公网地址查询在内存里保存最近一次结果：`GET /api/system/public-ip`（`status:read`）只读缓存、绝不出站；`POST`（仅管理员会话）查询两个地址族，一次刷新内共享（并发的点击等待同一结果），10 秒内的重复查询直接返回上次结果，单个地址族失败记入 `errors`。默认查询走第三方回显服务列表，查询函数由管理进程注入，测试中替换。
+
+后端连通性测试 `POST /api/system/probe`（仅会话）对 `主机:端口` 做一次 TCP 连接、对 `http(s)://` 地址做一次不跟随跳转的 HEAD（由宿主注入的客户端执行，接受任意证书以识别自签名后端）；响应只有可达性、状态码、`insecure` 与失败类别（refused/timeout/dns/tls/protocol/unreachable/error），不返回头与体，最多 4 个并发。目标解析拒绝用户信息与非 http(s) 协议。
+
+自检 `POST /api/system/selfcheck`（仅会话）只在用户触发时运行，结果只含 `id`、`status` 与参数：地址检查按网卡区分直连公网（`net.direct`/`net.direct6`）、运营商级 NAT（100.64.0.0/10，`net.cgnat`）与内网，Tailscale/NetBird/EasyTier 等组网网卡的地址不计入；时钟偏差经 HTTP `Date` 头估算，90 秒内 ok、600 秒内 warn、超过 fail；端口检查绑定 80/443，区分空闲（ok）、被占用（info）与无权限（warn）。模块检查项在各自工作包以 `SelfCheck` 能力接入。
+
+存储占用 `GET /api/system/storage`（会话）按用途分类统计配置目录（历史、日志、访客、防护、通知、托管程序等），符号链接永不跟随；日志目录在配置目录之外时单独列出。指标 `GET /api/metrics`（`metrics:read`）输出 Prometheus 0.0.4 文本，全局指标统一 `ferrumgate_` 前缀：`ferrumgate_uptime_seconds`、`ferrumgate_proc_rss_bytes`、`ferrumgate_proc_threads`、`ferrumgate_proc_open_fds` 与带标签的 `ferrumgate_build_info`，模块指标随各模块接入。
+
+首次运行引导把 `scenePending`/`scenes`/`done` 存在 `onboarding.json`：全新安装（配置目录尚无任何 `*.json`）在写入任何配置前写入 `scenePending`；`POST …/scenes` 校验场景编号（未知返回 400）、去重后结束场景选择，不改模块开关（由界面经全局设置保存）；`POST …/done` 校验编号模式 `^[a-z][a-z0-9-]{0,31}$` 并最多 32 项；`POST …/dismiss` 清除 `scenePending`，`done` 作为历史保留。
+
+演示模式由 `--demo` 或 `FERRUMGATE_DEMO=1` 开启：守卫层位于鉴权之外，写请求除登录/登出、界面语言、密码校验与引导关闭外全部以 403「演示模式下不可用」拒绝；读请求中文件与存储内容、备份与诊断包、更新检查、终端与 Docker 前缀拒绝，缓存的 `update/state` 放行。docker 与 webterminal 模块强制关闭。响应示例值覆盖（`demo_overlay`）与访客演示账号的自动配置随 WP-80/WP-86 的界面与登录链路接入。
+
+诊断包、IP 归属地查询与模块摘要/指标能力随 GeoIP（WP-26）与各模块工作包接入；更新检查与升级见 WP-94。

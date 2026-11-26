@@ -542,13 +542,24 @@ impl ApiRouter {
             .method_not_allowed_fallback(|| async {
                 ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
             })
-            .layer(middleware::from_fn_with_state(self.presentation, boundary));
+            .layer(middleware::from_fn_with_state(self.presentation, boundary))
+            // The demo guard is outermost so blocked requests never reach
+            // authentication or handlers.
+            .layer(middleware::from_fn(demo_guard));
         Admin {
             router,
             operations: self.operations,
             document,
         }
     }
+}
+
+/// Refuses requests the demo rule table blocks; everything else passes.
+async fn demo_guard(request: Request, next: Next) -> Response {
+    if crate::demo::blocked(request.method(), request.uri().path()) {
+        return ApiError::new(StatusCode::FORBIDDEN, crate::demo::MESSAGE).into_response();
+    }
+    next.run(request).await
 }
 
 async fn authorize(State(policy): State<Policy>, mut request: Request, next: Next) -> Response {
