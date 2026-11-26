@@ -1365,7 +1365,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-11 | 管理 API 框架 | L | WP-01 | 基础链路已接入（权限、管理日志及运行中 OpenAPI，CLI 对齐待完成），见 [验收记录](EXECUTION.md#工作包状态核查与第三方登录评审) |
 | WP-12 | 管理员认证与会话 | L | WP-11 | 本地实现及回环验收（真实提供方和实机验收待完成），见 [验收记录](EXECUTION.md#wp-12-剩余链路与启动验收) |
 | WP-13 | API 令牌 | S | WP-11、WP-12 | 本地实现及回环验收（可信代理、持久化审计与备份由对应包验收），见 [验收记录](EXECUTION.md#wp-13-创建与使用-api-令牌) |
-| WP-14 | 管理访问控制与界面入口 | M | WP-12、WP-31 | 部分实现（回环管理入口、前缀、同源与安全响应头），见 [验收记录](EXECUTION.md#wp-12-剩余链路与启动验收) |
+| WP-14 | 管理访问控制与界面入口 | M | WP-12、WP-31 | 本地实现及回环验收（HTTP/HTTPS 监听装配与网关 Socket serve 链随后续增量），见 [验收记录](EXECUTION.md#wp-14-管理访问控制与统一网关) |
 | WP-15 | CLI、回滚命令与 MCP | M | WP-02、WP-11、WP-13 | 已完成（ctl、mcp、rollback 与既有 reset-*），见 [验收记录](EXECUTION.md#wp-15-ctl-与-mcp) |
 | WP-16 | 事件总线 | S | — | 已完成，见 [验收记录](EXECUTION.md#wp-16-事件总线) |
 | WP-17 | 总览、自检与系统接口 | M | WP-01、WP-16 | 部分实现（状态/info、公网 IP、probe、自检系统项、存储、metrics 端点、onboarding、demo；诊断包与 GeoIP 随对应包），见 [验收记录](EXECUTION.md#wp-17-系统接口与演示模式) |

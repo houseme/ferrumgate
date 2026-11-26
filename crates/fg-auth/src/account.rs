@@ -12,6 +12,7 @@ use arc_swap::ArcSwap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::events::{Event, EventBus, Kind};
+use ring::hmac;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -199,6 +200,18 @@ impl AccountManager {
 
     pub fn password_login_enabled(&self) -> bool {
         !self.snapshot.load().account.password_login_off
+    }
+
+    /// Domain-separated 32-byte key for the safe-entry marker cookie. The
+    /// key rotates together with the session secret, so clearing sessions
+    /// (TOTP changes, credential resets) also invalidates planted markers.
+    pub fn entry_marker_key(&self) -> [u8; 32] {
+        let domain = hmac::Key::new(hmac::HMAC_SHA256, b"ferrumgate entry-marker v1");
+        let snapshot = self.snapshot.load();
+        let secret = snapshot.account.session_secret.as_bytes();
+        let mut key = [0; 32];
+        key.copy_from_slice(hmac::sign(&domain, secret).as_ref());
+        key
     }
 
     pub fn set_session_hours(&self, hours: u64) -> Result<()> {
@@ -614,4 +627,29 @@ pub(super) fn open_lock(store: &ConfigStore, name: &str) -> Result<File> {
         "authentication lock must be a regular file"
     );
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_marker_key_is_stable_and_domain_separated() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (manager, _) = AccountManager::open(ConfigStore::open(dir.path())?, None)?;
+        let first = manager.entry_marker_key();
+        let second = manager.entry_marker_key();
+        assert_eq!(first, second, "repeated calls must derive the same key");
+        // Neither the ASCII session secret nor the raw bytes it encodes may
+        // be reused as the marker key.
+        let secret = manager.snapshot.load().account.session_secret.clone();
+        assert_ne!(&first[..], &secret.as_bytes()[..32]);
+        let raw = URL_SAFE_NO_PAD.decode(&secret).context("decode secret")?;
+        assert_ne!(&first[..], raw.as_slice());
+        // Rotation of the session secret (and thus the marker key) happens
+        // through set_totp/change_credentials, which require live
+        // administrator sessions; that flow is covered by the integration
+        // tests rather than this unit test.
+        Ok(())
+    }
 }

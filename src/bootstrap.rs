@@ -6,9 +6,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use axum::{
+    extract::{ConnectInfo, Request, State},
+    http::{HeaderName, Method, StatusCode, header},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+};
 use clap::Args;
 use fg_admin::{
     ApiRouter, AuditLog, Category, Localizer, ManagedThirdLogin, SecurityExposure, SettingsState,
+    access::{AccessConfig, DenyMode, GuardConfig, sanitize_deny_page},
 };
 use fg_auth::{AccountManager, LoginLimits, passkey::Url, token::TokenManager};
 use fg_config::ConfigStore;
@@ -20,6 +27,7 @@ use fg_core::{
 };
 use fg_gateway::ManagementReady;
 use fg_i18n::lang::{BUILT, SOURCE};
+use fg_net::{ProxyTrust, client_addr};
 use tokio::{
     net::TcpListener,
     sync::{Notify, oneshot, watch},
@@ -386,15 +394,113 @@ impl ManagementService {
         }
         .register(router)
         .finish();
+        // WP-14 management-entry access control: resolve the posture once
+        // from the startup settings snapshot and gate the whole router.
+        let safe_path = (!started.safe_path.is_empty()).then(|| started.safe_path.clone());
+        let deny_mode = match started.deny_mode.as_str() {
+            "" => DenyMode::Default,
+            "notfound" => DenyMode::NotFound,
+            "blank" => DenyMode::Blank,
+            "close" => DenyMode::Close,
+            "drop" => DenyMode::Drop,
+            "custom" => DenyMode::Custom,
+            other => {
+                tracing::warn!(
+                    target: "fgate::bootstrap",
+                    mode = %other,
+                    "unknown deny mode in settings; falling back to the default deny presentation"
+                );
+                DenyMode::Default
+            }
+        };
+        let deny_status = StatusCode::from_u16(started.deny_status.clamp(0, 65535) as u16)
+            .unwrap_or(StatusCode::NOT_FOUND);
+        // Sanitize again at startup, independently of the settings API: a
+        // page edited out-of-band must never reach clients with active
+        // content. On any removal the page is discarded entirely.
+        let deny_page = match sanitize_deny_page(&started.deny_page) {
+            Ok(clean) => clean,
+            Err(removals) => {
+                tracing::warn!(
+                    target: "fgate::bootstrap",
+                    removals = ?removals,
+                    "custom deny page contained removable content; serving an empty deny page"
+                );
+                String::new()
+            }
+        };
+        let access_config = AccessConfig {
+            safe_path,
+            lan_only: started.lan_only,
+            deny_mode,
+            deny_status,
+            deny_page,
+        };
+        // The marker-signing key derives from the account file, so session
+        // key rotations also invalidate planted entry markers.
+        let marker_key = Arc::new(accounts.entry_marker_key().to_vec());
+        // Forwarded headers are believed only from trusted proxies; loopback
+        // stays trusted inside fg_net itself.
+        let mut unparseable_proxies = Vec::new();
+        let trust = ProxyTrust {
+            enabled: !started.disable_proxy_headers,
+            local: Vec::new(),
+            extra: started
+                .trusted_proxies
+                .iter()
+                .filter_map(|cidr| match cidr.parse() {
+                    Ok(range) => Some(range),
+                    Err(_) => {
+                        unparseable_proxies.push(cidr.clone());
+                        None
+                    }
+                })
+                .collect(),
+        };
+        if !unparseable_proxies.is_empty() {
+            tracing::warn!(
+                target: "fgate::bootstrap",
+                entries = ?unparseable_proxies,
+                "trustedProxies entries that are not CIDR ranges were ignored"
+            );
+        }
+        tracing::info!(
+            target: "fgate::bootstrap",
+            entry_gate = access_config.safe_path.is_some(),
+            lan_only = access_config.lan_only,
+            deny_mode = ?access_config.deny_mode,
+            proxy_headers = trust.enabled,
+            force_https = started.force_https && !started.https_listen.is_empty(),
+            "management access posture"
+        );
+        // Layering, outermost first on the request path: force-HTTPS (when
+        // enabled), the access guard, client-address resolution, then the
+        // boundary/demo layers applied in `finish()`. The guard sits outside
+        // everything because it is the access gate; client-address
+        // resolution runs one step inside it so the guard reads the
+        // resolved address.
+        // TODO(WP-14): accept-time close/drop requires a custom serve loop;
+        // Close/Drop currently render at the HTTP layer (access::render).
+        let mut serving = admin
+            .router
+            .layer(middleware::from_fn_with_state(
+                GuardConfig(access_config, marker_key),
+                fg_admin::access::guard,
+            ))
+            .layer(middleware::from_fn_with_state(trust, client_addr_layer));
+        if started.force_https && !started.https_listen.is_empty() {
+            // TODO(WP-32): matching the redirect target against the
+            // configured certificate domain arrives with WP-32's certificate
+            // selection.
+            serving = serving.layer(middleware::from_fn(force_https_layer));
+        }
         tracing::info!(listen = %listener.local_addr()?, "management ready");
         let mut drain = ready.drain;
         let maintenance = poll_auth_maintenance(accounts.clone(), tokens, store, drain.clone());
         let runtime = apply_settings_updates(updates, started, &accounts, logs, &directory);
         let server = axum::serve(
             listener,
-            admin
-                .router
-                .into_make_service_with_connect_info::<SocketAddr>(),
+            serving.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {
             let _ = drain.wait_for(|&draining| draining).await;
@@ -532,6 +638,76 @@ async fn poll_auth_maintenance(
             tracing::error!(target: "fg_core::auth", %error, "authentication maintenance failed");
         }
     }
+}
+
+/// The `X-Forwarded-For` and `X-Real-IP` header names (not standard
+/// constants in the `http` crate).
+const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+
+/// Resolves the real client address from trusted-proxy headers and
+/// publishes it as the request's `ClientAddr` extension (keeping the raw
+/// peer address too). Runs one step inside the access guard so the guard
+/// decides on the resolved address, never on a raw forwarded claim.
+async fn client_addr_layer(
+    State(trust): State<ProxyTrust>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    // The make service puts `ConnectInfo<SocketAddr>` in the extensions;
+    // `Option<ConnectInfo<_>>` is not an extractor in axum 0.8, so read the
+    // extension instead of extracting it.
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|info| info.0)
+        .unwrap_or_else(|| SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
+    let resolved = {
+        let headers = request.headers();
+        let forwarded_for = headers
+            .get_all(X_FORWARDED_FOR)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let forwarded_for = (!forwarded_for.is_empty()).then_some(forwarded_for);
+        let real_ip = headers.get(X_REAL_IP).and_then(|value| value.to_str().ok());
+        // `resolve` believes forwarded headers only when the peer itself is
+        // a trusted proxy, walking the chain right to left.
+        client_addr::resolve(peer, forwarded_for.as_deref(), real_ip, &trust)
+    };
+    request.extensions_mut().insert(peer);
+    request.extensions_mut().insert(resolved);
+    next.run(request).await
+}
+
+/// Redirects cleartext page traffic to the same URL over HTTPS; methods
+/// with bodies are refused instead of redirected so they are never
+/// replayed in the clear.
+async fn force_https_layer(request: Request, next: Next) -> Response {
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
+        return StatusCode::MISDIRECTED_REQUEST.into_response();
+    }
+    let Some(host) = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .filter(|host| !host.is_empty())
+    else {
+        // Without a usable Host header the redirect target would be broken;
+        // serve the request instead.
+        return next.run(request).await;
+    };
+    let target = request
+        .uri()
+        .path_and_query()
+        .map(|path_and_query| path_and_query.as_str().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned());
+    (
+        StatusCode::FOUND,
+        [(header::LOCATION, format!("https://{host}{target}"))],
+    )
+        .into_response()
 }
 
 #[cfg(test)]

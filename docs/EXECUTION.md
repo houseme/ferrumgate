@@ -1220,6 +1220,23 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 325 项工作区测试和 9 项本机 Pebble ACME 测试。ApplyHold 用例覆盖暂缓队列语义：begin 返回上一批遗留项并可并入本批；defer_action 同模块同键只保留最后一个动作且保持原位；release 按登记顺序执行且不持有队列锁、动作可重入；drop_all 丢弃并结束暂缓；apply 之后暂缓保持到确认或放弃。访问路径用例覆盖 HMAC-SHA256 签名路径头与常量时间比较、8 跳上限、无登记时回退本机端点跳、missing 标记已删规则。九种风险各一正一反：编辑忽略名称/分组/备注等纯显示字段且仅对带键规则生效；删除/停用命中路径上的规则；模块关闭在路径穿越该模块时报告；站点迁移对比已存监听；管理监听变更、仅内网与强制 HTTPS 依赖访客来源；改用的监听地址做本机绑定测试并附系统原因。六个仅限会话的端点经 SystemRoutes 挂载：changeset begin/check/apply/discard 与 access-path 视图、access-path/check。模块的 defer_action 接入与 L4/Web 服务的跳登记随 portforward、protoroute、webservice 工作包落地；演示模式下批量修改同样受守卫限制。
 
+### WP-14 管理访问控制与统一网关
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-net
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --lib access
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --lib gateway
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin_access
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test gateway
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 372 项工作区测试和 9 项本机 Pebble ACME 测试。`fg-net` 的解析矩阵九例：不可信对端的转发头一律忽略、`X-Forwarded-For` 自右向左跳过可信代理取第一个不可信地址、双头不一致时公网优先（伪造内网地址不能绕过仅内网访问）、`verified`/`via` 语义、CGNAT 与 IPv6 ULA 的内网判定，以及 `trust_src` 登记表。accept 决策矩阵覆盖各拒绝方式与仅内网组合；256 连接上限与 64 KiB 丢弃上限用真实 socket 对实测——第 257 条挂起连接被直接断开、发送超过 64 KiB 后结束挂起、客户端放弃视为正常结束。安全入口标记 13 项：入口路径的合法与非法值、同密钥往返有效、伪造（篡改载荷与签名）、过期与换密钥后一律拒绝、Cookie 的安全属性与清除。五种响应方式集成测试：`notfound` 正文仿默认页且不含产品信息、`blank` 空体、`custom` 的可选状态码与沙箱 CSP（`default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox`）、默认方式的 403 不带 `Vary` 头、保存时清洗并报告移除内容。网关纯函数 8 项：前缀规范化、来源键与来源确认（仅管理员会话或管理员登录成功可确认，`same-site` 拒绝、无来源放行登录退出）、`gateway_origins.json` 的持久化与 16 项上限、网关客户端地址取 `X-Real-IP` 或最右 `X-Forwarded-For`、Cookie `Path` 与资源路径改写、`gately-base` 注入的 HTML 转义、按飞牛用户的限流键 `fnOS:<用户名>`；`listen_unix` 清理陈旧 Socket 并拒绝同名普通文件、权限 `0660`。HTTP/HTTPS 监听装配、accept 时 `close`/`drop` 的自定义 serve 循环、网关 Socket 的完整 serve 链与飞牛登录态登录随后续增量接入；HTTPS 证书经 WP-31/WP-32 联调。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
