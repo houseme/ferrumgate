@@ -2,6 +2,7 @@
 
 mod bootstrap;
 mod logging;
+mod offline;
 mod restart;
 
 use std::{
@@ -53,6 +54,35 @@ enum Command {
         #[arg(long)]
         admin_dir: PathBuf,
     },
+    /// Roll back a configuration change using the private configuration directory.
+    Rollback {
+        /// Private configuration directory (defaults to ./data).
+        #[arg(
+            short = 'c',
+            long = "admin-dir",
+            alias = "config-dir",
+            default_value = "./data"
+        )]
+        admin_dir: PathBuf,
+        /// List rollback candidates without changing anything.
+        #[arg(long)]
+        list: bool,
+        /// Undo the most recent configuration save.
+        #[arg(long)]
+        last: bool,
+        /// Roll back the pending unconfirmed change.
+        #[arg(long)]
+        pending: bool,
+        /// Target configuration name (requires --version).
+        #[arg(long, requires = "version")]
+        config: Option<String>,
+        /// Target history version (requires --config).
+        #[arg(long, requires = "config")]
+        version: Option<String>,
+        /// Skip the interactive confirmation.
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
 }
 
 #[tokio::main]
@@ -83,6 +113,31 @@ async fn main() -> Result<()> {
             confirm_reset()?;
             submit_reset(admin_dir, fg_auth::ResetRequest::totp()?)
         }
+        Command::Rollback {
+            admin_dir,
+            list,
+            pending,
+            last,
+            config,
+            version,
+            yes,
+        } => match offline::run(offline::RollbackOptions {
+            config_dir: admin_dir,
+            list,
+            pending,
+            last,
+            config,
+            version,
+            yes,
+        }) {
+            Ok(code) => {
+                std::process::exit(code);
+            }
+            Err(error) => {
+                eprintln!("Error: {error:#}");
+                std::process::exit(1);
+            }
+        },
         Command::Serve {
             config,
             log_level,

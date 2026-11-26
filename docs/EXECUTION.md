@@ -1145,6 +1145,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 253 项工作区测试和 9 项本机 Pebble ACME 测试。`fg-i18n` 用例覆盖规范化（大小写、分隔符、简繁与地区归并、未知标签）、`Accept-Language` 的 q 值与顺序、`*` 与未编译档位回退、服务端环境变量链、`tr` 源语言与空值键回退、`tr_args` 以键为模板渲染与占位符规则、`tr_deep`/`tr_fields` 的字段选择（用户字段不翻译）。`build.rs` 在编译期校验并压缩嵌入 9 个语言目录，运行时按语言惰性建表。`xtask` 的提取器识别第二参数为含中文字面量的 `tr!` 调用（含转义与嵌套括号）并跳过 `tests/` 目录；一致性检查作为 `cargo test -p xtask` 的一部分运行，覆盖键集合、占位符与译文等于键三类违规，删译文失败的用例以临时目录固定。管理进程把 `Localizer` 接入响应链，默认语言取规范化的设置 `language`、缺失时回退环境变量链，按请求 `Accept-Language` 协商。已核实上游快照不含服务端译文文件（由 `i18nsync` 生成、键值待翻译，仅界面目录随仓库分发），因此 9 个语言目录以空键集就绪，译文随各模块 `tr!` 键经 `cargo run -p xtask -- i18n-extract` 同步后补齐；新增文案流程已写入 `docs/AGENT.md`。界面目录（WP-80）与语言档位（WP-90）另行接入。
 
+### WP-15 回滚命令
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test rollback
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 257 项工作区测试和 9 项本机 Pebble ACME 测试。`fgate rollback --admin-dir <目录>` 支持交互选择、`--last`、`--pending`、`--config`+`--version`、`--list` 与 `--yes`；执行前要求输入 `yes`，非交互且无 `--yes` 时取消并提示。命令先确认目录内存在全局设置或账号文件，外来目录直接拒绝且不写任何内容。回滚请求经 `write_request` 写入后，每 200 毫秒检查一次是否被运行实例取走（至多 6 秒，大于服务端 2 秒轮询），取走则提示「已交给运行中的实例处理」；超时则取回请求并离线 `apply_offline`，提示改写内容已入历史。Unix 上请求文件的属主对齐账号文件。端到端用例覆盖离线改写（文件内容回到上一版本且被替换内容入历史）、外来目录拒绝、缺确认取消（配置不变、无请求文件残留）与委托运行实例（真实 `fgate serve` 进程取走请求并完成回滚后 SIGINT 干净退出）。`ctl` 与 `mcp` 子命令随后续步骤接入。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
