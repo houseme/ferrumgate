@@ -81,8 +81,8 @@ impl Proxy {
         }
     }
 
-    pub async fn monitor_health(&self) {
-        crate::health::monitor(self, &self.routes).await;
+    pub async fn monitor_health(&self, events: &fg_core::events::EventBus) {
+        crate::health::monitor(self, &self.routes, events).await;
     }
 
     pub async fn probe_http(&self, request: Request<RequestBody>, h2c: bool) -> bool {

@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use fg_core::{module::Module, registry::Registry};
+use fg_core::{events::EventBus, module::Module, registry::Registry};
 use tokio::{net::TcpListener, sync::watch, task::JoinSet, time::timeout};
 
 use crate::{
@@ -138,6 +138,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
             settings: settings.clone(),
             state: state.clone(),
             generations,
+            events: EventBus::default(),
         };
         start(web, drain_rx.clone(), &mut modules);
     }

@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use fg_core::module::Module;
+use fg_core::{events::EventBus, module::Module};
 use hyper::{
     server::conn::{http1, http2},
     service::service_fn,
@@ -31,6 +31,7 @@ pub(crate) struct Web {
     pub settings: Settings,
     pub state: Arc<ArcSwap<Generation>>,
     pub generations: watch::Receiver<Arc<Generation>>,
+    pub events: EventBus,
 }
 
 impl Module for Web {
@@ -42,6 +43,7 @@ impl Module for Web {
             settings,
             state,
             mut generations,
+            events,
         } = self;
         let mut connections = JoinSet::new();
         let mut http = http1::Builder::new();
@@ -62,7 +64,7 @@ impl Module for Web {
                 loop {
                     let current = generations.borrow_and_update().clone();
                     tokio::select! {
-                        _ = current.proxy.monitor_health() => {
+                        _ = current.proxy.monitor_health(&events) => {
                             if generations.changed().await.is_err() {
                                 break;
                             }

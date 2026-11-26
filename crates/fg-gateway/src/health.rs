@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use anyhow::{Result, ensure};
+use fg_core::events::{Event, EventBus, Kind};
 use futures_util::{StreamExt, stream::FuturesUnordered};
 use hyper::{Request, Uri, Version, body::Bytes, header::HOST, http::uri::PathAndQuery};
 use serde::Deserialize;
@@ -99,7 +100,7 @@ impl HealthCheck {
     }
 }
 
-pub(crate) async fn monitor(proxy: &Proxy, routes: &Routes) {
+pub(crate) async fn monitor(proxy: &Proxy, routes: &Routes, events: &EventBus) {
     let slots = Semaphore::new(MAX_CONCURRENT_PROBES);
     let mut jobs = FuturesUnordered::new();
     for (host, route) in routes.iter() {
@@ -107,7 +108,9 @@ pub(crate) async fn monitor(proxy: &Proxy, routes: &Routes) {
             && let Some(check) = &route.health
         {
             for backend in route.backends.iter() {
-                jobs.push(run_check(proxy, host, route, backend, check, &slots));
+                jobs.push(run_check(
+                    proxy, host, route, backend, check, &slots, events,
+                ));
             }
         }
     }
@@ -121,6 +124,7 @@ async fn run_check(
     backend: &Backend,
     check: &HealthCheck,
     slots: &Semaphore,
+    events: &EventBus,
 ) {
     let mut streak = 0i8;
     loop {
@@ -162,17 +166,94 @@ async fn run_check(
         .unwrap_or(false);
         drop(slot);
 
-        if healthy {
+        let changed = if healthy {
             streak = (streak.max(0) + 1).min(check.passes);
-            if streak == check.passes && backend.mark_active(true) {
-                tracing::info!(site = host, backend = %backend.authority, "upstream recovered");
-            }
+            streak == check.passes && backend.mark_active(true)
         } else {
             streak = (streak.min(0) - 1).max(-check.fails);
-            if streak == -check.fails && backend.mark_active(false) {
+            streak == -check.fails && backend.mark_active(false)
+        };
+        if changed {
+            let kind = if healthy {
+                tracing::info!(site = host, backend = %backend.authority, "upstream recovered");
+                Kind::UpstreamUp
+            } else {
                 tracing::warn!(site = host, backend = %backend.authority, "upstream unavailable");
-            }
+                Kind::UpstreamDown
+            };
+            events.publish_with(|| {
+                let mut event = Event::new(kind, "webservice");
+                event.args = vec![
+                    ("site", host.to_owned()),
+                    ("upstream", backend.authority.to_string()),
+                ];
+                event
+            });
         }
         sleep(check.interval).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use tokio::{net::TcpListener, sync::mpsc};
+
+    #[tokio::test]
+    async fn active_health_transitions_publish_loopback_events() -> Result<()> {
+        let reserved = TcpListener::bind("127.0.0.1:0").await?;
+        let upstream = reserved.local_addr()?;
+        drop(reserved);
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("health.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+schema_version = 1
+[[routes]]
+host = "app.test"
+upstream = "http://{upstream}"
+[routes.health]
+mode = "tcp"
+interval_secs = 1
+fails = 1
+passes = 1
+"#
+            ),
+        )?;
+        let config = config::load(&path, std::sync::Arc::default()).await?;
+        let proxy = Proxy::new(config.routes, &config.settings, config.tls.client);
+        let events = EventBus::default();
+        let (send, mut receive) = mpsc::unbounded_channel();
+        let _subscription = events.subscribe(move |event| {
+            send.send(event).unwrap();
+            std::future::ready(())
+        })?;
+        let transitions = async {
+            let down = receive.recv().await.expect("down event");
+            assert_eq!(down.kind, Kind::UpstreamDown);
+            assert_eq!(down.module, "webservice");
+            assert_eq!(
+                down.args,
+                [
+                    ("site", "app.test".into()),
+                    ("upstream", upstream.to_string())
+                ]
+            );
+            let _origin = TcpListener::bind(upstream).await?;
+            let up = receive.recv().await.expect("up event");
+            assert_eq!(up.kind, Kind::UpstreamUp);
+            assert_eq!(up.args, down.args);
+            Ok(())
+        };
+        timeout(Duration::from_secs(4), async {
+            tokio::select! {
+                () = proxy.monitor_health(&events) => anyhow::bail!("health monitor stopped"),
+                result = transitions => result,
+            }
+        })
+        .await?
     }
 }
