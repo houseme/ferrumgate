@@ -733,6 +733,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 138 项默认测试及 9 项本机 Pebble ACME 测试。新增两项回环用例覆盖空集合新增、展示结果整对象替换与复制、未知和重复可写键拒绝、语言标签及权重协商、错误翻译和翻译后的序列化安全。用例确认配置字段仍保持原文，译文中的 URL 凭据在 gzip 之前被掩码。真实词典由 WP-10 接入。
 
+### WP-11 大文件上传与管理资源
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin transport::
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-admin --depth 1
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 141 项默认测试及 9 项本机 Pebble ACME 测试。两个新增回环用例验证 5 MiB 分块上传、长度及累计超限、授权边界和 HTTP/1 未读完时关闭连接，以及静态首页前缀、gzip 原样发送和身份变体、HEAD、Range、缓存规则及 API 路径隔离。虚拟时间用例验证空闲超时、低速拒绝和合规上传超过 60 秒时能完整读取。生产管理监听和实际资源包仍随对应工作包接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

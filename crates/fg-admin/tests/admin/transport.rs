@@ -1,4 +1,5 @@
 use super::*;
+use fg_admin::{AdminAssets, Asset};
 use http_body::{Body as HttpBody, Frame};
 use std::{
     convert::Infallible,
@@ -97,5 +98,150 @@ async fn uploads_stream_past_json_limit_and_reject_sizes_and_unauthorized_writes
     assert_eq!(overshoot.1["connection"], "close");
     assert_eq!(overshoot.2, json!({"error":"upload exceeds route limit"}));
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn management_assets_preserve_gateway_prefix_variants_and_cache_boundaries() -> Result<()> {
+    let script = "console.log('admin fixture');".repeat(128);
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(script.as_bytes())?;
+    let gzip = Bytes::from(encoder.finish()?);
+    let asset_path = "/assets/app-a1b2c3d4.js";
+    let assets = AdminAssets::new(
+        "<!doctype html><html><head><script src=\"assets/app-a1b2c3d4.js\"></script></head><body>Status</body></html>",
+        "/gateway/panel",
+        [
+            Asset {
+                path: asset_path,
+                content_type: "application/javascript",
+                identity: None,
+                gzip: Some(gzip.clone()),
+                immutable: true,
+            },
+            Asset {
+                path: "/manifest.webmanifest",
+                content_type: "application/manifest+json",
+                identity: Some(Bytes::from_static(b"{}")),
+                gzip: None,
+                immutable: false,
+            },
+        ],
+    )?;
+    let server = Server::start(
+        ApiRouter::new(principal)
+            .with_assets(assets)
+            .finish()
+            .router,
+    )
+    .await?;
+    for page in ["/", "/index.html", "/settings/detail"] {
+        let (status, headers, body) = server
+            .call_raw("GET", page, &[("accept-encoding", "gzip")], Body::empty())
+            .await?;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers["cache-control"], "no-cache");
+        assert_eq!(headers["content-type"], "text/html; charset=utf-8");
+        assert!(
+            headers["content-security-policy"]
+                .to_str()?
+                .contains("base-uri 'self'")
+        );
+        assert!(std::str::from_utf8(&body)?.contains("<base href=\"/gateway/panel/\">"));
+    }
+    let (status, headers, bytes) = server
+        .call_raw(
+            "GET",
+            asset_path,
+            &[("accept-encoding", "gzip")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(headers["content-type"], "application/javascript");
+    assert_eq!(headers["vary"], "Accept-Encoding");
+    assert_eq!(
+        headers["content-length"].to_str()?.parse::<usize>()?,
+        gzip.len()
+    );
+    assert_eq!(bytes, gzip);
+    let (_, headers, identity) = server
+        .call_raw(
+            "GET",
+            asset_path,
+            &[("accept-encoding", "gzip;q=0, *;q=1")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(identity, script.as_str());
+    assert!(!headers.contains_key("content-encoding"));
+    assert_eq!(headers["vary"], "Accept-Encoding");
+
+    let (status, headers, bytes) = server
+        .call_raw(
+            "HEAD",
+            asset_path,
+            &[("accept-encoding", "gzip")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.is_empty());
+    assert_eq!(
+        headers["content-length"].to_str()?.parse::<usize>()?,
+        gzip.len()
+    );
+    let (status, headers, range) = server
+        .call_raw(
+            "GET",
+            asset_path,
+            &[("accept-encoding", "gzip"), ("range", "bytes=2-5")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(!headers.contains_key("content-encoding"));
+    assert_eq!(
+        headers["content-range"],
+        format!("bytes 2-5/{}", script.len())
+    );
+    assert_eq!(range, &script.as_bytes()[2..6]);
+    let (status, headers, _) = server
+        .call_raw(
+            "GET",
+            asset_path,
+            &[("range", "bytes=999999-")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(
+        headers["content-range"],
+        format!("bytes */{}", script.len())
+    );
+    let manifest = server
+        .call_raw("GET", "/manifest.webmanifest", &[], Body::empty())
+        .await?;
+    assert_eq!(manifest.1["cache-control"], "no-cache");
+    assert_eq!(manifest.1["content-type"], "application/manifest+json");
+    for unknown in ["/api", "/api/missing", "/assets/missing", "/%2e%2e/secret"] {
+        let response = server.call("GET", unknown, &[], Body::empty()).await?;
+        assert_eq!(response.0, StatusCode::NOT_FOUND, "{unknown}");
+        assert_eq!(response.1["cache-control"], "no-store");
+    }
+    assert_eq!(
+        server
+            .call("GET", "/api/openapi.json", &[], Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(AdminAssets::new("<head></head>", "/with\"-quote", []).is_err());
     Ok(())
 }

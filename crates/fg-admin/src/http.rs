@@ -14,6 +14,7 @@ use tokio::sync::Semaphore;
 
 use crate::{
     Localizer, Translation,
+    assets::StaticResponse,
     response::{accepts_gzip, transform},
     upload::close_incomplete,
 };
@@ -144,14 +145,19 @@ pub(crate) async fn boundary(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let language = presentation
-        .localizer
-        .as_ref()
-        .map(|localizer| localizer.negotiate(request.headers()));
+    let api = request.uri().path().starts_with("/api/");
+    let language = if api {
+        presentation
+            .localizer
+            .as_ref()
+            .map(|localizer| localizer.negotiate(request.headers()))
+    } else {
+        None
+    };
     if let Some(language) = &language {
         request.extensions_mut().insert(language.clone());
     }
-    let gzip = accepts_gzip(request.headers());
+    let gzip = api && accepts_gzip(request.headers());
     let mut response = if same_origin(&request) {
         next.run(request).await
     } else {
@@ -162,6 +168,10 @@ pub(crate) async fn boundary(
         }
         response
     };
+    let asset = response
+        .extensions_mut()
+        .remove::<StaticResponse>()
+        .is_some();
     let close = response
         .headers()
         .get(header::CONNECTION)
@@ -170,7 +180,7 @@ pub(crate) async fn boundary(
         .extensions_mut()
         .remove::<RenderPolicy>()
         .unwrap_or_default();
-    if !render.stream {
+    if !asset && !render.stream {
         let localized =
             presentation
                 .localizer
@@ -192,7 +202,9 @@ pub(crate) async fn boundary(
     if close {
         headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
-    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if !asset {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -202,11 +214,12 @@ pub(crate) async fn boundary(
         header::REFERRER_POLICY,
         HeaderValue::from_static("same-origin"),
     );
-
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
-    );
+    if !asset || !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+        );
+    }
     if headers
         .get(header::CONTENT_TYPE)
         .is_some_and(|value| value == "application/json")

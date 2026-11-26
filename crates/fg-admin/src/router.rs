@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use crate::{
-    ApiError, Localizer, Translation,
+    AdminAssets, ApiError, Localizer, Translation,
     http::{Presentation, RenderPolicy, boundary},
     response::MAX_TRANSFORMS,
     scope::{Access, module_of, required},
@@ -68,6 +68,7 @@ pub struct ApiRouter {
     auth: Auth,
     modules: Option<Arc<(Registry, Enabled)>>,
     presentation: Presentation,
+    assets: Option<AdminAssets>,
 }
 
 impl Default for ApiRouter {
@@ -85,6 +86,7 @@ impl ApiRouter {
             operations: Vec::new(),
             auth: Arc::new(authenticate),
             modules: None,
+            assets: None,
             presentation: Presentation {
                 localizer: None,
                 budget: Arc::new(Semaphore::new(MAX_TRANSFORMS)),
@@ -103,6 +105,11 @@ impl ApiRouter {
 
     pub fn with_localizer(mut self, localizer: Localizer) -> Self {
         self.presentation.localizer = Some(localizer);
+        self
+    }
+
+    pub fn with_assets(mut self, assets: AdminAssets) -> Self {
+        self.assets = Some(assets);
         self
     }
 
@@ -281,10 +288,17 @@ impl ApiRouter {
             ([(header::CONTENT_TYPE, "application/json")], spec).into_response()
         });
         let modules = self.modules;
+        let assets = self.assets;
         let router = self
             .router
             .fallback(move |request: Request| async move {
                 let path = request.uri().path();
+                if path != "/api"
+                    && !path.starts_with("/api/")
+                    && let Some(assets) = assets.as_ref()
+                {
+                    return assets.serve(path, request.method(), request.headers());
+                }
                 if let Some((registry, enabled)) = modules.as_deref()
                     && let Some(id) = module_of(path)
                 {
