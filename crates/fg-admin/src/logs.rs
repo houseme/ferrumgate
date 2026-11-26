@@ -13,7 +13,7 @@ use axum::{
 };
 use fg_logging::{Entry, Export, Filter, Format, Level, LogHandle, Module};
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tokio::{
     sync::{Semaphore, mpsc},
@@ -21,7 +21,10 @@ use tokio::{
 };
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::{ApiError, ApiRouter, ReadOnly, RouteModels, StreamPolicy, redact::redact_log};
+use crate::{
+    ApiError, ApiRouter, ReadOnly, RouteModels, StreamPolicy, models::OkResponse,
+    redact::redact_log,
+};
 
 const NDJSON: &str = "application/x-ndjson";
 const CSV: &str = "text/csv";
@@ -108,11 +111,11 @@ impl ApiRouter {
                     Method::DELETE,
                     path,
                     "Clear retained module logs",
-                    RouteModels::default().response::<Cleared>(),
+                    RouteModels::default().response::<OkResponse>(),
                     move || async move {
                         blocking(clear_budget, move || {
                             clear_logs.clear(module)?;
-                            Ok(Json(Cleared { ok: true }).into_response())
+                            Ok(Json(OkResponse { ok: true }).into_response())
                         })
                         .await
                     },
@@ -215,11 +218,6 @@ enum LogFormat {
     #[default]
     Jsonl,
     Csv,
-}
-
-#[derive(Serialize, JsonSchema)]
-struct Cleared {
-    ok: bool,
 }
 
 fn log_flag<'de, D: Deserializer<'de>>(input: D) -> Result<bool, D::Error> {

@@ -761,6 +761,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 143 项默认测试和 9 项本机 Pebble ACME 测试。新增回环用例覆盖历史查询、只读筛选和导出脱敏、JSON Lines 和 CSV、模块清空权限、模块状态与 OpenAPI 一致性，以及模型与实际 Serde 请求和响应结构一致。日志重配置用例验证管理句柄随目录切换，以及旧句柄在日志所有者退出后只能清理自身内存。接口通过路由器显式挂载，生产管理监听和正式身份解析待接入。
 
+### WP-11 集合接口模型
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin collection
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 143 项默认测试和 9 项本机 Pebble ACME 测试。集合回环用例验证展示字段回传、嵌套配置的严格校验、删除计数字段、接口文档导出，以及只读身份读取的 OpenAPI 与静态定义一致。只读身份仍无法通过密钥接口读取实际值。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

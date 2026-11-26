@@ -1,7 +1,8 @@
 use super::*;
 use fg_admin::{Localizer, RequestLanguage, Translation};
+use schemars::JsonSchema;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Item {
     #[serde(default)]
@@ -10,27 +11,85 @@ struct Item {
     settings: Settings,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Settings {
     port: u16,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct ItemView {
+    key: String,
+    name: String,
+    settings: Settings,
+    running: bool,
+    stats: Stats,
+}
+
+#[derive(Serialize, JsonSchema)]
+struct Stats {
+    count: u64,
 }
 
 #[tokio::test]
 async fn collection_round_trips_declared_display_fields_with_strict_writable_keys() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let store = ConfigStore::open(&dir.path().join("config"))?;
-    let collection = Collection::<Item>::open(store.clone(), "ddns", 8, |row| &row.key, |row, key| row.key = key,
-        |_| Ok(()), |row| json!({"key":row.key,"name":row.name,"settings":row.settings,"running":true,"stats":{"count":17}}),
-    )?.view_only(&["running", "stats"]);
-    let server = Server::start(
-        collection
-            .register(ApiRouter::new(principal), RULES)
-            .finish()
-            .router,
-    )
-    .await?;
+    let collection = Collection::<Item, ItemView>::open(
+        store.clone(),
+        "ddns",
+        8,
+        |row| &row.key,
+        |row, key| row.key = key,
+        |_| Ok(()),
+        |row| ItemView {
+            key: row.key.clone(),
+            name: row.name.clone(),
+            settings: row.settings.clone(),
+            running: true,
+            stats: Stats { count: 17 },
+        },
+    )?
+    .with_item_schema()
+    .view_only(&["running", "stats"]);
     let path = "/api/ddns/rules";
+    let admin = collection
+        .register(ApiRouter::new(principal), RULES)
+        .finish();
+    let paths = &admin.document()["paths"];
+    let list = &paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"];
+    let view = &list["items"];
+    assert_eq!(list["type"], "array");
+    assert_eq!(view["properties"]["running"]["type"], "boolean");
+    assert_eq!(
+        view["properties"]["stats"]["properties"]["count"]["type"],
+        "integer"
+    );
+    for (path, method) in [
+        (path, "post"),
+        (RULES.item, "put"),
+        ("/api/ddns/rules/{key}/copy", "post"),
+    ] {
+        let operation = &paths[path][method];
+        let request = &operation["requestBody"]["content"]["application/json"]["schema"];
+        let output = &operation["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(request["required"], json!(["name", "settings"]));
+        assert_eq!(request["additionalProperties"], false);
+        assert_eq!(
+            request["properties"]["settings"]["additionalProperties"],
+            false
+        );
+        assert_eq!(request["properties"]["running"], json!({}));
+        assert_eq!(request["properties"]["stats"], json!({}));
+        assert_eq!(output["properties"], view["properties"]);
+    }
+    assert!(paths["/api/ddns/rules-enable"].is_null());
+    let export = dir.path().join("api");
+    admin.export(&export)?;
+    let exported: Value = serde_json::from_slice(&fs::read(export.join("openapi.json"))?)?;
+    assert_eq!(exported, *admin.document());
+    assert!(fs::read_to_string(export.join("API.md"))?.contains("`/api/ddns/rules/{key}/copy`"));
+    let server = Server::start(admin.router).await?;
     let draft =
         r#"{"name":"created","settings":{"port":80},"running":false,"stats":{"unchecked":[1,2]}}"#;
     let (status, _, created) = server.call("POST", path, &EDIT, draft).await?;

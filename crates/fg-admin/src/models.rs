@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::StreamPolicy;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct RouteModels {
     pub(crate) parameters: Vec<Value>,
     pub(crate) request: Option<Value>,
@@ -36,6 +36,24 @@ impl RouteModels {
         self
     }
 
+    pub(crate) fn ignored_request_fields(mut self, names: &[&str]) -> Self {
+        if !names.is_empty()
+            && let Some(request) = &mut self.request
+        {
+            let model = &mut request["content"]["application/json"]["schema"];
+            if model["properties"].is_null() {
+                model["properties"] = json!({});
+            }
+            let properties = model["properties"]
+                .as_object_mut()
+                .expect("named item properties");
+            for &name in names {
+                properties.entry(name).or_insert_with(|| json!({}));
+            }
+        }
+        self
+    }
+
     pub fn response<T: JsonSchema>(mut self) -> Self {
         self.response = Some(json!({"application/json":{"schema":schema::<T>(true)}}));
         self
@@ -56,6 +74,11 @@ impl RouteModels {
         ));
         self
     }
+}
+
+#[derive(serde::Serialize, JsonSchema)]
+pub(crate) struct OkResponse {
+    pub ok: bool,
 }
 
 fn schema<T: JsonSchema>(response: bool) -> Value {

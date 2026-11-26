@@ -389,7 +389,7 @@ fn principal(headers: &HeaderMap) -> Option<Principal> {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct Rule {
     #[serde(default)]
@@ -639,6 +639,7 @@ async fn collection_copy_and_secret_reads_share_the_unlocked_privilege_guard() -
         &vec![rule("template", "template"), rule("tail", "tail")],
     )?;
     let collection = open_collection(store.clone())?
+        .with_item_schema()
         .copy_with(|source, target| {
             keep_secret(&source.secret, &mut target.secret);
             Ok(())
@@ -674,11 +675,39 @@ async fn collection_copy_and_secret_reads_share_the_unlocked_privilege_guard() -
     let admin = collection
         .register(ApiRouter::new(principal), RULES)
         .finish();
+    let paths = &admin.document()["paths"];
+    for (path, method, field, kind) in [
+        ("/api/ddns/rules/{key}", "delete", "removed", "integer"),
+        ("/api/ddns/rules-delete", "post", "deleted", "integer"),
+        ("/api/ddns/rules/batch-delete", "post", "removed", "integer"),
+        ("/api/ddns/rules-order", "put", "ok", "boolean"),
+    ] {
+        let response =
+            &paths[path][method]["responses"]["200"]["content"]["application/json"]["schema"];
+        assert_eq!(response["required"], json!([field]));
+        assert_eq!(response["properties"][field]["type"], kind);
+    }
     assert_eq!(
-        admin.document()["paths"]["/api/ddns/rules/{key}/secrets"]["get"]["x-required-scope"],
+        paths["/api/ddns/rules/{key}/secrets"]["get"]["x-required-scope"],
         "ddns:write"
     );
+    let expected = admin.document().clone();
+    assert_eq!(
+        paths["/api/ddns/rules"]["post"]["requestBody"]["content"]["application/json"]["schema"]["properties"]
+            ["secret"]["type"],
+        "string"
+    );
     let server = Server::start(admin.router).await?;
+    let (status, _, document) = server
+        .call(
+            "GET",
+            "/api/openapi.json",
+            &[("x-test-id", "viewer")],
+            Body::empty(),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(document, expected);
     let copy = json!({"key":"caller-key","name":" copy ","secret":SECRET_MASK}).to_string();
     assert_eq!(
         server
