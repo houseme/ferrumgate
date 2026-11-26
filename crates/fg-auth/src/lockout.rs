@@ -86,6 +86,24 @@ impl LoginLimiter {
         (state.known_dirty, new_source)
     }
 
+    pub(super) fn clear_failures(&self) {
+        let mut state = self.state();
+        let now = Instant::now();
+        state.sources.retain(|_, source| {
+            if source.running == 0 {
+                return false;
+            }
+            source.started = now;
+            source.failed = 0;
+            source.locked_until = now;
+            source.strike = None;
+            true
+        });
+        state.unknown.started = now;
+        state.unknown.failed = 0;
+        state.unknown.reported = false;
+    }
+
     pub fn load(store: &ConfigStore) -> Result<Self> {
         let mut state = State::new(Instant::now());
         if let Loaded::Found(entries) = store.load::<Vec<KnownSource>>(KNOWN_FILE)? {

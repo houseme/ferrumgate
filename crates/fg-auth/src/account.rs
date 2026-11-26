@@ -23,7 +23,7 @@ use crate::{
     totp::{PendingTotp, Totp},
 };
 
-const ACCOUNT: &str = "account";
+pub(super) const ACCOUNT: &str = "account";
 const LEGACY_DEFAULT_PASSWORD: &str = "gately.cn";
 pub(super) const MAX_USERNAME_BYTES: usize = 256;
 pub(super) const MAX_REVOKED: usize = 1024;
@@ -57,6 +57,8 @@ pub(super) struct Account {
     pub session_epoch: u64,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub revoked: Vec<Revoked>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) last_reset: Option<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -84,7 +86,7 @@ impl std::error::Error for CredentialChangeRejected {}
 
 /// Owns the only active writer for one account file.
 pub struct AccountManager {
-    store: Arc<ConfigStore>,
+    pub(super) store: Arc<ConfigStore>,
     pub(super) snapshot: ArcSwap<Snapshot>,
     pub(super) writer: Mutex<Option<PendingTotp>>,
     pub(super) limiter: LoginLimiter,
@@ -98,22 +100,7 @@ impl AccountManager {
         store: Arc<ConfigStore>,
         initial_password: Option<&str>,
     ) -> Result<(Self, Option<String>)> {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options
-                .mode(0o600)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
-        }
-        let owner = options
-            .open(store.dir().join(".account.lock"))
-            .context("open account lock")?;
-        ensure!(
-            owner.metadata()?.is_file(),
-            "account lock must be a regular file"
-        );
+        let owner = open_lock(&store, ".account.lock")?;
         owner
             .try_lock()
             .context("account directory already has a writer")?;
@@ -387,6 +374,18 @@ impl AccountManager {
         }
     }
 
+    pub(super) fn report_reset(&self) {
+        if let Some(events) = &self.login_events {
+            events.publish_with(|| {
+                let mut event = Event::new(Kind::AuditChange, "auth");
+                event
+                    .fields
+                    .push(("operation", "administrator-reset".into()));
+                event
+            });
+        }
+    }
+
     pub fn identify(&self, token: &str) -> Option<Identity> {
         let snapshot = self.snapshot.load();
         let now = unix_seconds(SystemTime::now())?;
@@ -538,4 +537,24 @@ pub(super) fn random_urlsafe<const N: usize>() -> Result<String> {
     getrandom::fill(&mut bytes)
         .map_err(|_| anyhow!("get randomness for administrator credentials"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+pub(super) fn open_lock(store: &ConfigStore, name: &str) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options
+        .open(store.dir().join(name))
+        .context("open authentication lock")?;
+    ensure!(
+        file.metadata()?.is_file(),
+        "authentication lock must be a regular file"
+    );
+    Ok(file)
 }
