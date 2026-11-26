@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 mod bootstrap;
+mod ctl;
 mod logging;
+mod mcp;
 mod offline;
 mod restart;
 
@@ -11,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(name = "fgate", version, about = "FerrumGate reverse proxy")]
@@ -83,6 +85,63 @@ enum Command {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+    /// Call the management API of a running instance with an API token.
+    Ctl {
+        /// Instance base URL (defaults to the saved config, then http://127.0.0.1:16680).
+        #[arg(long, short = 'u')]
+        url: Option<String>,
+        /// API token (defaults to the saved config or FERRUMGATE_TOKEN).
+        #[arg(long, short = 't')]
+        token: Option<String>,
+        /// Skip TLS certificate verification.
+        #[arg(long)]
+        insecure: bool,
+        /// Print the response body verbatim instead of formatted JSON.
+        #[arg(long)]
+        raw: bool,
+        #[command(subcommand)]
+        verb: CtlVerb,
+    },
+    /// Serve the management API as MCP tools over standard input/output.
+    Mcp {
+        #[command(flatten)]
+        args: McpArgs,
+    },
+}
+
+#[derive(Subcommand)]
+enum CtlVerb {
+    /// List operations the token may call, optionally filtered by keyword.
+    Ls { filter: Option<String> },
+    /// GET an API path.
+    Get { path: String },
+    /// POST an API path with a JSON body (literal, @file or -).
+    Post { path: String, body: Option<String> },
+    /// PUT an API path with a JSON body (literal, @file or -).
+    Put { path: String, body: Option<String> },
+    /// DELETE an API path.
+    Delete { path: String },
+    /// PATCH an API path with a JSON body (literal, @file or -).
+    Patch { path: String, body: Option<String> },
+    /// Verify a token against an instance and save the connection.
+    Login { url: String, token: String },
+}
+
+/// `fgate mcp`: expose the management API as MCP tools over stdio.
+#[derive(Args)]
+struct McpArgs {
+    /// Instance base URL (defaults to the saved config, then FERRUMGATE_URL).
+    #[arg(long, short = 'u')]
+    url: Option<String>,
+    /// API token (defaults to the saved config or FERRUMGATE_TOKEN).
+    #[arg(long, short = 't')]
+    token: Option<String>,
+    /// Also expose write operations (GET/HEAD only by default).
+    #[arg(long)]
+    write: bool,
+    /// Skip TLS certificate verification.
+    #[arg(long)]
+    insecure: bool,
 }
 
 #[tokio::main]
@@ -112,6 +171,91 @@ async fn main() -> Result<()> {
         Command::ResetTotp { admin_dir } => {
             confirm_reset()?;
             submit_reset(admin_dir, fg_auth::ResetRequest::totp()?)
+        }
+        Command::Ctl {
+            url,
+            token,
+            insecure,
+            raw,
+            verb,
+        } => {
+            let command = match verb {
+                CtlVerb::Ls { filter } => ctl::commands::Command::Ls { filter },
+                CtlVerb::Get { path } => ctl::commands::Command::Get { path },
+                CtlVerb::Post { path, body } => ctl::commands::Command::Call {
+                    method: hyper::Method::POST,
+                    path,
+                    body,
+                },
+                CtlVerb::Put { path, body } => ctl::commands::Command::Call {
+                    method: hyper::Method::PUT,
+                    path,
+                    body,
+                },
+                CtlVerb::Delete { path } => ctl::commands::Command::Call {
+                    method: hyper::Method::DELETE,
+                    path,
+                    body: None,
+                },
+                CtlVerb::Patch { path, body } => ctl::commands::Command::Call {
+                    method: hyper::Method::PATCH,
+                    path,
+                    body,
+                },
+                CtlVerb::Login { url, token } => ctl::commands::Command::Login { url, token },
+            };
+            // Usage problems exit with 2; transport errors abort with 1.
+            match ctl::run(
+                ctl::CtlOptions {
+                    url,
+                    token,
+                    insecure,
+                    raw,
+                },
+                command,
+            )
+            .await
+            {
+                Err(error) => {
+                    eprintln!("Error: {error:#}");
+                    std::process::exit(2);
+                }
+                Ok(code) if code != 0 => std::process::exit(code),
+                Ok(_) => Ok(()),
+            }
+        }
+        Command::Mcp { args } => {
+            let McpArgs {
+                url,
+                token,
+                write,
+                insecure,
+            } = args;
+            let environment = match (
+                std::env::var("FERRUMGATE_URL"),
+                std::env::var("FERRUMGATE_TOKEN"),
+            ) {
+                (Ok(url), Ok(token)) => Some((url, token)),
+                (Ok(url), Err(_)) => Some((url, String::new())),
+                (Err(_), Ok(token)) => Some((String::new(), token)),
+                (Err(_), Err(_)) => None,
+            };
+            let config = ctl::config::CtlConfig::resolve(
+                ctl::config::CtlConfig::load(),
+                environment,
+                ctl::config::Overrides {
+                    url,
+                    token,
+                    insecure,
+                },
+            );
+            mcp::run(mcp::McpOptions {
+                url: config.url,
+                token: config.token,
+                insecure: config.insecure,
+                write,
+            })
+            .await
         }
         Command::Rollback {
             admin_dir,

@@ -104,9 +104,16 @@ fg-core.workspace = true
 fg-gateway.workspace = true
 fg-i18n.workspace = true
 fg-logging.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
 rpassword.workspace = true
+rustls.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
+webpki-roots.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -117,8 +124,11 @@ path = "src/main.rs"
 
 
 [dev-dependencies]
+bcrypt.workspace = true
+data-encoding.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 h2.workspace = true
+ring.workspace = true
 hickory-proto.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

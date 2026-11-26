@@ -1065,7 +1065,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "bcrypt",
  "clap",
+ "data-encoding",
  "fg-admin",
  "fg-auth",
  "fg-config",
@@ -1078,10 +1080,13 @@ dependencies = [
  "hickory-proto",
  "http-body-util",
  "hyper",
+ "hyper-rustls",
  "hyper-util",
  "rcgen",
+ "ring",
  "rpassword",
  "rustls",
+ "serde",
  "serde_json",
  "tempfile",
  "time",
@@ -1090,6 +1095,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots",
  "x509-parser",
 ]
 

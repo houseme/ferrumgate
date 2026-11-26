@@ -394,3 +394,11 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 `crates/fg-i18n/locales/*.json` 是 9 个非源语言的目录文件，`build.rs` 在编译期校验并把每个文件压缩嵌入二进制，运行时首次用到某语言才解压建表。空值键视为未翻译。上游仓库不含服务端译文（其目录由同步工具生成、键值待翻译），因此目录从空开始，译文随各模块的 `tr!` 键由 `cargo run -p xtask -- i18n-extract` 同步后补齐。`cargo test -p xtask` 运行一致性检查：各语言键集合一致、占位符与键一致、译文不得等于键；提取器扫描源码第二参数为含中文字面量的 `tr!` 调用，跳过 `tests/` 目录。
 
 管理进程把 `Localizer` 接到响应链上：源语言为简中，默认语言取规范化的设置 `language`（缺失时回退环境变量链），翻译闭包装 `fg_i18n::tr`；按请求 `Accept-Language` 协商的结果沿用既有响应协商与脱敏链路。新增文案的三步流程记录在 `docs/AGENT.md`。
+
+## 21. CLI 与 MCP（WP-15）
+
+`fgate ctl` 经 HTTP 与 API 令牌调用运行实例的管理 API。连接信息的覆盖顺序是内置默认 `http://127.0.0.1:16680`、用户配置目录下的 `ferrumgate/ctl.json`（Unix 上目录 0700、文件 0600，内容为 `{url, token, insecure}`）、环境变量 `FERRUMGATE_URL` 与 `FERRUMGATE_TOKEN`、命令行选项；`insecure` 标志被任一层启用后保持。子命令 `ls`（可带关键字）只列出实例 OpenAPI 中令牌可访问的操作，`get`/`post`/`put`/`delete`/`patch` 要求路径以 `/api/` 开头，请求体接受 JSON 字面量、`@文件` 与 `-`（标准输入）并校验合法性；`login` 先经 `/api/session` 验证令牌再落盘。退出码 0 表示成功，1 表示接口非 2xx（输出 `错误: HTTP <状态>: <说明>`），2 表示参数问题。HTTPS 默认用 webpki 根证书验证，`--insecure` 换用接受任意证书的校验器。
+
+`fgate mcp` 在标准输入输出上手写 JSON-RPC 2.0 分帧（每行一条消息）：`initialize` 返回 `2024-11-05` 与 `serverInfo`；`tools/list` 首次请求时读取实例 OpenAPI 生成工具并缓存；`tools/call` 填充路径参数、可选 `query` 对象与 `body` 后转发。工具名由方法与 `/api` 以下的路径段组成（小写、非字母数字转 `_`、去花括号、64 字符上限、重名加序号），路径参数是必填字符串，`readOnlyHint` 与 `destructiveHint` 如实标注，结果超过 200000 字符截断并说明。默认只读——仅 GET/HEAD 且不含 `secrets` 路径，`--write` 才暴露写操作，令牌权限始终是最终限制；建议为 AI 客户端创建专用只读令牌。连接信息与 `ctl` 同源。
+
+`fgate rollback` 与 `fgate reset-password`/`reset-totp` 是面向配置目录的两段式命令：先写离线请求文件并等待运行实例取走（200 毫秒一次、至多 6 秒，长于服务端 2 秒轮询），无人接手则取回并离线应用，被替换内容进入配置历史；Unix 上请求文件属主对齐账号文件。回滚目标可选交互序号、`--last`、`--pending` 或 `--config`+`--version`，执行前需 `yes` 或 `--yes`；命令拒绝没有全局设置或账号文件的外来目录。

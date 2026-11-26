@@ -1158,6 +1158,23 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 257 项工作区测试和 9 项本机 Pebble ACME 测试。`fgate rollback --admin-dir <目录>` 支持交互选择、`--last`、`--pending`、`--config`+`--version`、`--list` 与 `--yes`；执行前要求输入 `yes`，非交互且无 `--yes` 时取消并提示。命令先确认目录内存在全局设置或账号文件，外来目录直接拒绝且不写任何内容。回滚请求经 `write_request` 写入后，每 200 毫秒检查一次是否被运行实例取走（至多 6 秒，大于服务端 2 秒轮询），取走则提示「已交给运行中的实例处理」；超时则取回请求并离线 `apply_offline`，提示改写内容已入历史。Unix 上请求文件的属主对齐账号文件。端到端用例覆盖离线改写（文件内容回到上一版本且被替换内容入历史）、外来目录拒绝、缺确认取消（配置不变、无请求文件残留）与委托运行实例（真实 `fgate serve` 进程取走请求并完成回滚后 SIGINT 干净退出）。`ctl` 与 `mcp` 子命令随后续步骤接入。
 
+### WP-15 ctl 与 MCP
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --bin fgate mcp
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test ctl
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test mcp
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 275 项工作区测试和 9 项本机 Pebble ACME 测试。`fgate ctl` 提供 `ls`/`get`/`post`/`put`/`delete`/`patch`/`login`：连接信息按内置默认（`http://127.0.0.1:16680`）→ 用户配置目录 `ferrumgate/ctl.json`（0700 目录内 0600 文件）→ `FERRUMGATE_URL`/`FERRUMGATE_TOKEN` → 命令行选项的顺序覆盖，`insecure` 一旦被任何一层启用即保持；路径必须以 `/api/` 开头，请求体接受 JSON 字面量、`@文件` 与 `-`（标准输入）且必须是合法 JSON；成功输出格式化 JSON（`--raw` 输出原文）并以 0 退出，接口非 2xx 输出 `错误: HTTP <状态>: <说明>` 以 1 退出，参数问题以 2 退出。`ls` 读取实例 OpenAPI 只列出 `x-token-allowed` 的操作并可按关键字过滤；`login` 先以 `/api/session` 验证令牌，无效令牌不落盘。HTTPS 经 webpki 根证书验证，`--insecure` 使用接受任意证书的校验器。单元用例覆盖覆盖顺序、文件 0600、路径校验与三种请求体来源；端到端用例（真实 `fgate serve` 实例与 `gtl_` 前缀 48 位十六进制令牌）覆盖退出码与格式化输出、`ls` 隐藏会话专属接口、`login` 拒绝无效令牌并持久化有效连接，以及配置文件在无命令行参数时供连接。
+
+`fgate mcp` 通过标准输入输出提供 JSON-RPC 2.0 服务（每行一条消息）：`initialize` 返回协议版本 `2024-11-05` 与 `serverInfo`，`tools/list` 在首次请求时读取实例 OpenAPI 生成并缓存工具，`tools/call` 执行调用；通知与未知方法按 JSON-RPC 处理（前者不回复、后者返回 -32601）。工具名为方法加 `/api` 以下路径（转小写、非字母数字替换为 `_`、去掉花括号，最长 64 字符，重名追加序号）；路径参数成为必填字符串，GET 工具带可选 `query` 对象，带请求体的操作有 `body` 参数；描述包含摘要、方法路径与所需权限，标注 `readOnlyHint` 与 `destructiveHint`；结果超过 200000 个字符截断并说明。默认只读：仅暴露 GET/HEAD 工具且不含路径带 `secrets` 的接口，`--write` 后才提供写操作，令牌自身权限始终生效。单元用例覆盖只读默认与 secrets 隐藏、命名规则、长度上限、重名去重、截断、路径参数必填与 schema 结构；端到端用例经管道驱动子进程验证协议握手、默认列表仅 GET、隐藏工具不可调用、未知方法报错、工具调用含路径参数与 query 的实际转发，以及 `--write` 下写工具出现但只读令牌仍被实例以 403 拒绝。修复了日志归档目录尚未创建时查询返回 500 的问题：归档列表把目录缺失视为没有归档。MCP 客户端配置示例：以 `fgate mcp --url http://127.0.0.1:16680 --token <专用只读令牌>` 作为子进程接入 AI 客户端，验证流程后再按需换写令牌并加 `--write`。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。

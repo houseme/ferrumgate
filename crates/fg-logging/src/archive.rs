@@ -112,7 +112,13 @@ pub(super) fn list(dir: &Path) -> io::Result<Vec<Archive>> {
     // Imported archives have a timestamp and optional short tie breaker. Our 20-digit
     // suffix is the stream sequence, which keeps ordering stable after a clock adjustment.
     let mut entries = BTreeMap::<(Option<u64>, OffsetDateTime, u64), Archive>::new();
-    for item in fs::read_dir(dir)? {
+    // No directory yet simply means nothing was ever archived.
+    let items = match fs::read_dir(dir) {
+        Ok(items) => items,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    for item in items {
         let item = item?;
         if !item.file_type()?.is_file() {
             continue;
