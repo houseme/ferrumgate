@@ -14,7 +14,7 @@
 | DDNS、STUN 与隧道 | 当前路线记录了提供商和运行生命周期的验收要求 | DDNS 提供商与真实读回、STUN/TCP/UDP 穿透、frp、Cloudflare Tunnel、Tailscale、NetBird、EasyTier |
 | 外围服务与发布 | Cargo workspace 产出单进程 `fgate`，Rust 测试经 Cargo 执行 | Docker、终端、文件和任务工具、配置迁移、定制构建、软件包、签名与跨平台发行 |
 
-当前交付优先闭合核心模块中的证书自动化和端口转发剩余能力，再接通管理与安全策略。部署契约和复验命令见 [DESIGN.md](docs/DESIGN.md) 与 [EXECUTION.md](docs/EXECUTION.md)。以下保留原始架构规划。
+当前交付优先闭合核心模块中的证书自动化和端口转发剩余能力，再接通管理与安全策略。逐模块的全量对齐执行方案见 [GATELY_PARITY_PLAN_ZH.md](docs/GATELY_PARITY_PLAN_ZH.md)，其中按工作包给出上游依据、行为契约、Rust 设计、验收标准与进度表；每个工作包另有一份细化文档，索引在 [docs/plan/README.md](docs/plan/README.md)，实现某个工作包时从它开始；与下方保留的原始架构规划冲突时，以该方案为准。部署契约和复验命令见 [DESIGN.md](docs/DESIGN.md) 与 [EXECUTION.md](docs/EXECUTION.md)。以下保留原始架构规划。
 
 # 项目命名
 
