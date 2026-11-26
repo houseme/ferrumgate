@@ -1,4 +1,11 @@
-use std::{net::SocketAddr, process::Stdio};
+use std::{
+    net::SocketAddr,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use anyhow::{Context, Result};
 use http_body_util::BodyExt;
@@ -11,7 +18,7 @@ use tokio::{
 };
 
 use super::common::{
-    DEADLINE, Origin, config, connect, full, get, http_client, request, route, send,
+    DEADLINE, Origin, config, connect, full, get, http_client, request, route, send, serve_http,
 };
 
 #[tokio::test]
@@ -627,6 +634,195 @@ async fn wait_log_message(lines: &mut Lines<BufReader<ChildStderr>>, message: &s
             }
         }
         anyhow::bail!("management log did not contain {message}")
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn management_switches_third_login_from_legacy_and_disables_pending_flows() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let store = fg_config::ConfigStore::open(&directory.path().join("management"))?;
+    store.save("ferrumgate", &json!({"listen":":0"}))?;
+    store.save("third-login", &json!({
+        "providers":[{"key":"legacy","name":"Legacy","type":"github","clientId":"legacy-client","clientSecret":"legacy-secret"}],
+        "allowed":["legacy:100"],
+    }))?;
+    let initial = "Fixture-initial$23";
+    let password = "Lk8$yN3-pv";
+    let (manager, _) = fg_auth::AccountManager::open(store.clone(), Some(initial))?;
+    manager.change_credentials(initial, "operator", password)?;
+    let session = manager
+        .login("operator", password)?
+        .context("fixture session")?;
+    let admin_cookie = format!("gately_token={}", session.token);
+    drop(manager);
+
+    let exchanges = Arc::new(AtomicUsize::new(0));
+    let counter = exchanges.clone();
+    let provider = Origin::spawn(move |stream| {
+        let counter = counter.clone();
+        async move {
+            let issuer = format!("http://{}", stream.local_addr()?);
+            serve_http(stream, move |request| {
+                let response = if request.uri().path() == "/.well-known/openid-configuration" {
+                    hyper::Response::new(full(json!({
+                        "issuer":issuer, "authorization_endpoint":format!("{issuer}/authorize"),
+                        "token_endpoint":format!("{issuer}/token"), "jwks_uri":format!("{issuer}/keys"),
+                    }).to_string()))
+                } else {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    hyper::Response::builder().status(StatusCode::BAD_REQUEST).body(full("{}")).unwrap()
+                };
+                std::future::ready(response)
+            }).await
+        }
+    }).await?;
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", provider.addr, "/"), "", ""),
+    )?;
+    let start = || -> Result<Child> {
+        Ok(Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--config"])
+            .arg(&config_path)
+            .arg("--admin-dir")
+            .arg(store.dir())
+            .args([
+                "--admin-origin",
+                "https://admin.test",
+                "--admin-prefix",
+                "/panel",
+                "--log-level",
+                "info",
+            ])
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?)
+    };
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("management output")?).lines();
+    let address = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(address).await?).await?;
+    wait_provider(&mut client, "legacy").await?;
+    assert_eq!(
+        get_admin_settings(&mut client, &admin_cookie).await?.1["thirdLogin"]["enable"],
+        true
+    );
+
+    let save = |origin, enable| {
+        let mut req = request(Method::PUT, "/api/system/settings", "admin.test", full(json!({
+            "listen":":0", "thirdLogin":{
+                "enable":enable, "callbackBase":origin,
+                "providers":[{"key":"local","name":"Local","type":"oidc","issuer":format!("http://{}",provider.addr),
+                    "clientId":"test-client","clientSecret":"fixture-client-secret"}],
+                "allowed":["local:fixture # exact subject"]
+            }
+        }).to_string()));
+        req.headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        req.headers_mut()
+            .insert(header::COOKIE, admin_cookie.parse().unwrap());
+        req
+    };
+    let wrong_origin = send(&mut client, save("https://wrong.test", true)).await?;
+    assert_eq!(wrong_origin.status(), StatusCode::BAD_REQUEST);
+    wrong_origin.into_body().collect().await?;
+    wait_provider(&mut client, "legacy").await?;
+    let saved = send(&mut client, save("https://admin.test", true)).await?;
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: Value = serde_json::from_slice(&saved.into_body().collect().await?.to_bytes())?;
+    assert_eq!(
+        saved["thirdLogin"]["providers"][0]["clientSecret"],
+        "********"
+    );
+    wait_provider(&mut client, "local").await?;
+
+    let location = send(
+        &mut client,
+        request(
+            Method::GET,
+            "/api/login/oauth/start?p=local",
+            "admin.test",
+            full(""),
+        ),
+    )
+    .await?;
+    assert_eq!(location.status(), StatusCode::SEE_OTHER);
+    let target = fg_auth::passkey::Url::parse(location.headers()[header::LOCATION].to_str()?)?;
+    assert_eq!(target.authority(), provider.addr.to_string());
+    let pairs: std::collections::HashMap<_, _> = target.query_pairs().collect();
+    assert_eq!(
+        pairs["redirect_uri"],
+        "https://admin.test/panel/api/login/oauth/callback"
+    );
+    assert_eq!(pairs["code_challenge_method"], "S256");
+    assert!(pairs.contains_key("nonce"));
+    let browser = location.headers()[header::SET_COOKIE].to_str()?;
+    assert!(browser.contains("Path=/panel/api/login/oauth") && browser.contains("; Secure"));
+    let browser = browser
+        .split(';')
+        .next()
+        .context("OAuth browser cookie")?
+        .to_owned();
+    location.into_body().collect().await?;
+
+    let disabled = send(&mut client, save("https://admin.test", false)).await?;
+    assert_eq!(disabled.status(), StatusCode::OK);
+    disabled.into_body().collect().await?;
+    let (status, body) = get(&mut client, "admin.test", "/api/login/providers").await?;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body)?["providers"],
+        json!([])
+    );
+    let callback = format!(
+        "/api/login/oauth/callback?state={}&code=fixture",
+        pairs["state"]
+    );
+    let mut req = request(Method::GET, &callback, "admin.test", full(""));
+    req.headers_mut().insert(header::COOKIE, browser.parse()?);
+    let refused = send(&mut client, req).await?;
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert!(!refused.headers().contains_key(header::SET_COOKIE));
+    assert_eq!(exchanges.load(Ordering::Relaxed), 0);
+    drop(client);
+    stop_management(&mut child).await?;
+
+    let mut restarted = start()?;
+    let mut lines = BufReader::new(restarted.stderr.take().context("restart output")?).lines();
+    let address = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(address).await?).await?;
+    let (status, body) = get(&mut client, "admin.test", "/api/login/providers").await?;
+    assert_eq!(status, 200);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&body)?["providers"],
+        json!([])
+    );
+    assert_eq!(
+        get_admin_settings(&mut client, &admin_cookie).await?.1["thirdLogin"]["enable"],
+        false
+    );
+    drop(client);
+    stop_management(&mut restarted).await?;
+    Ok(())
+}
+
+async fn wait_provider(
+    client: &mut hyper::client::conn::http1::SendRequest<super::common::TestBody>,
+    key: &str,
+) -> Result<()> {
+    timeout(DEADLINE, async {
+        loop {
+            let (status, body) = get(client, "admin.test", "/api/login/providers").await?;
+            assert_eq!(status, 200);
+            let body: Value = serde_json::from_slice(&body)?;
+            if body["providers"][0]["key"] == key {
+                return Ok(());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
     })
     .await?
 }

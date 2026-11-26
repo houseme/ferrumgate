@@ -378,15 +378,10 @@ impl Settings {
         check(
             third.callback_base.is_empty()
                 || absolute_url(&third.callback_base).is_some_and(|url| {
-                    matches!(url.scheme(), "http" | "https")
-                        && url.path() == "/"
-                        && url.query().is_none()
-                        && url.fragment().is_none()
-                        && url.username().is_empty()
-                        && url.password().is_none()
+                    valid_oauth_endpoint(&url) && url.path() == "/" && url.query().is_none()
                 }),
             "thirdLogin.callbackBase",
-            "expected an HTTP or HTTPS origin",
+            "expected an HTTPS or loopback HTTP origin",
         );
         let mut keys = HashSet::new();
         check(
@@ -404,11 +399,7 @@ impl Settings {
                         && match provider.kind.as_str() {
                             "github" | "google" | "qq" => true,
                             "oidc" => absolute_url(&provider.issuer).is_some_and(|url| {
-                                url.scheme() == "https"
-                                    && url.username().is_empty()
-                                    && url.password().is_none()
-                                    && url.query().is_none()
-                                    && url.fragment().is_none()
+                                valid_oauth_endpoint(&url) && url.query().is_none()
                             }),
                             _ => false,
                         }
@@ -418,11 +409,8 @@ impl Settings {
         );
         check(
             third.allowed.iter().all(|entry| {
-                let identity = entry
-                    .split_once(" #")
-                    .map_or(entry.as_str(), |(identity, _)| identity);
-                identity.split_once(':').is_some_and(|(key, subject)| {
-                    !key.trim().is_empty() && !subject.trim().is_empty()
+                allowed_identity(entry).is_some_and(|(key, _)| {
+                    !third.enable || third.providers.iter().any(|provider| provider.key == key)
                 })
             }),
             "thirdLogin.allowed",
@@ -470,6 +458,29 @@ impl Settings {
             "logDir": log_dir, "thirdLogin": third_login;
         BootOnly => "apiToken": legacy_api_token;
     }
+}
+
+pub fn allowed_identity(entry: &str) -> Option<(&str, &str)> {
+    let identity = entry
+        .split_once(" #")
+        .map_or(entry, |(identity, _)| identity);
+    let (key, subject) = identity.split_once(':')?;
+    let (key, subject) = (key.trim(), subject.trim());
+    (!key.is_empty() && !subject.is_empty() && subject != "*").then_some((key, subject))
+}
+
+pub fn valid_oauth_endpoint(url: &Url) -> bool {
+    let local = match url.host() {
+        Some(url::Host::Domain("localhost")) => true,
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        _ => false,
+    };
+    url.has_host()
+        && (url.scheme() == "https" || (url.scheme() == "http" && local))
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.fragment().is_none()
 }
 
 fn listener_address(value: &str) -> Option<SocketAddr> {

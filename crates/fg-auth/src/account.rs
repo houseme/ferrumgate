@@ -197,6 +197,10 @@ impl AccountManager {
         self.snapshot.load().ttl.as_secs() / 3600
     }
 
+    pub fn password_login_enabled(&self) -> bool {
+        !self.snapshot.load().account.password_login_off
+    }
+
     pub fn set_session_hours(&self, hours: u64) -> Result<()> {
         ensure!(
             (1..=MAX_SESSION_HOURS).contains(&hours),

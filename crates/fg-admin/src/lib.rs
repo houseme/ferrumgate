@@ -25,6 +25,7 @@ pub use collection::{Collection, CollectionPaths, ItemChange, SECRET_MASK, keep_
 pub use http::{ApiError, ApiJson};
 pub use localize::{Localizer, RequestLanguage, Translation};
 pub use models::RouteModels;
+pub use oauth_routes::ManagedThirdLogin;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
 pub use security_score::SecurityExposure;
 pub use settings_api::SettingsState;

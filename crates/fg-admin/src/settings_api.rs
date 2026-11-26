@@ -6,15 +6,16 @@ use axum::{
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use fg_auth::{AccountManager, MAX_SESSION_HOURS};
+use fg_auth::{AccountManager, MAX_SESSION_HOURS, third_login::ThirdLoginConfig};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::{
     registry::{CATALOG, Registry},
-    settings::{Effect, Settings},
+    settings::{Effect, Settings, ThirdLoginSettings},
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 use tokio::sync::{Semaphore, watch};
+use url::Url;
 
 use crate::{
     ApiError, ApiRouter, RouteModels, SECRET_MASK,
@@ -38,6 +39,8 @@ pub struct SettingsState {
     registry: Registry,
     started: Arc<Settings>,
     current: watch::Sender<Arc<Settings>>,
+    third_login: watch::Sender<Arc<ThirdLoginSettings>>,
+    origin: Option<Url>,
     writer: Arc<Semaphore>,
     modules: Arc<Vec<ModuleOption>>,
     effects: Arc<BTreeMap<String, Effect>>,
@@ -46,14 +49,42 @@ pub struct SettingsState {
 impl SettingsState {
     /// Opens settings after the startup migrations have run.
     pub fn open(store: Arc<ConfigStore>, registry: Registry) -> Result<Self> {
-        let mut settings = match store.load(FILE)? {
-            Loaded::Found(settings) => settings,
-            Loaded::Missing => Settings::default(),
+        Self::open_with_origin(store, registry, None)
+    }
+
+    pub fn open_with_origin(
+        store: Arc<ConfigStore>,
+        registry: Registry,
+        origin: Option<Url>,
+    ) -> Result<Self> {
+        let raw = store.load_raw(FILE)?;
+        let mut settings: Settings = match &raw {
+            Some(raw) => serde_json::from_slice(raw).map_err(|error| {
+                anyhow::anyhow!(
+                    "parse configuration {FILE} at line {}, column {}",
+                    error.line(),
+                    error.column()
+                )
+            })?,
+            None => Settings::default(),
         };
         ensure!(
             settings.legacy_api_token.is_empty(),
             "legacy API token must be migrated before loading settings"
         );
+        let has_third_login = settings.third_login != ThirdLoginSettings::default()
+            || raw.as_ref().is_some_and(|raw| {
+                serde_json::from_slice::<ThirdLoginPresence>(raw).is_ok_and(|fields| fields.present)
+            });
+        if !has_third_login
+            && let Loaded::Found(legacy) = store.load::<ThirdLoginConfig>("third-login")?
+        {
+            settings.third_login = legacy.into_settings(
+                origin
+                    .as_ref()
+                    .context("third-party login requires --admin-origin")?,
+            );
+        }
         settings.normalize();
         settings.validate(&registry).map_err(|errors| {
             let details = errors
@@ -62,6 +93,10 @@ impl SettingsState {
                 .collect::<Vec<_>>();
             anyhow::anyhow!("invalid global settings: {}", details.join(", "))
         })?;
+        ensure!(
+            matches_origin(&settings.third_login, origin.as_ref()),
+            "thirdLogin.callbackBase must match --admin-origin"
+        );
         let modules = CATALOG
             .iter()
             .filter(|module| !registry.absent().any(|absent| absent.id == module.id))
@@ -75,8 +110,10 @@ impl SettingsState {
         Ok(Self {
             store,
             registry,
+            third_login: watch::Sender::new(Arc::new(started.third_login.clone())),
             current: watch::Sender::new(started.clone()),
             started,
+            origin,
             writer: Arc::new(Semaphore::new(1)),
             modules: Arc::new(modules),
             effects: Arc::new(
@@ -89,6 +126,10 @@ impl SettingsState {
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<Settings>> {
         self.current.subscribe()
+    }
+
+    pub fn subscribe_third_login(&self) -> watch::Receiver<Arc<ThirdLoginSettings>> {
+        self.third_login.subscribe()
     }
 
     pub fn snapshot(&self) -> Arc<Settings> {
@@ -104,6 +145,11 @@ impl SettingsState {
         for provider in &mut settings.third_login.providers {
             if !provider.client_secret.is_empty() {
                 provider.client_secret = SECRET_MASK.into();
+            }
+            if Url::parse(&provider.proxy)
+                .is_ok_and(|url| !url.username().is_empty() || url.password().is_some())
+            {
+                provider.proxy = SECRET_MASK.into();
             }
         }
         SettingsView {
@@ -136,10 +182,19 @@ impl SettingsState {
                 .providers
                 .iter()
                 .find(|previous| previous.key == provider.key);
+            let credential_owner = previous.filter(|previous| {
+                previous.kind == provider.kind
+                    && previous.client_id == provider.client_id
+                    && (provider.kind != "oidc" || previous.issuer == provider.issuer)
+            });
             keep_secret(
-                previous.map_or("", |previous| &previous.client_secret),
+                credential_owner.map_or("", |previous| &previous.client_secret),
                 &mut provider.client_secret,
             );
+            if provider.proxy == SECRET_MASK {
+                provider.proxy =
+                    previous.map_or_else(String::new, |previous| previous.proxy.clone());
+            }
         }
         if let Err(errors) = next.validate(&self.registry) {
             return (
@@ -147,6 +202,13 @@ impl SettingsState {
                 Json(serde_json::json!({ "error": "invalid global settings", "fields": errors })),
             )
                 .into_response();
+        }
+        if !matches_origin(&next.third_login, self.origin.as_ref()) {
+            return ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "thirdLogin.callbackBase must match --admin-origin",
+            )
+            .into_response();
         }
         if !next.disable_log_persist
             && !next.log_dir.is_empty()
@@ -170,6 +232,10 @@ impl SettingsState {
             // A directory sync error can occur after the new file becomes visible.
             if saved.is_ok() || self.store.load_raw(FILE).ok().flatten().as_deref() == Some(&bytes)
             {
+                if next.third_login != old.third_login {
+                    self.third_login
+                        .send_replace(Arc::new(next.third_login.clone()));
+                }
                 self.current.send_replace(next.clone());
             }
             if saved.is_err() {
@@ -193,6 +259,23 @@ impl SettingsState {
         }
         Json(self.view(&next, accounts)).into_response()
     }
+}
+
+#[derive(Deserialize)]
+struct ThirdLoginPresence {
+    #[serde(default, rename = "thirdLogin", deserialize_with = "present")]
+    present: bool,
+}
+
+fn present<'de, D: Deserializer<'de>>(value: D) -> Result<bool, D::Error> {
+    IgnoredAny::deserialize(value).map(|_| true)
+}
+
+fn matches_origin(settings: &ThirdLoginSettings, origin: Option<&Url>) -> bool {
+    !settings.enable
+        || origin.is_none_or(|origin| {
+            Url::parse(&settings.callback_base).is_ok_and(|base| base == *origin)
+        })
 }
 
 impl ApiRouter {

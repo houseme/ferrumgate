@@ -917,22 +917,26 @@ fgate serve --config ferrumgate.example.toml \
   --admin-listen 127.0.0.1:8080 --admin-dir "$PWD/management"
 ```
 
-如管理服务由受信代理对外提供，配置 `--admin-origin`，必要时同时配置 `--admin-prefix`。第三方登录使用管理目录内权限受限的 `third-login.json`，允许列表按提供方与稳定身份指定，例如 `github:<数字 ID>`、`qq:<OpenID>` 或 `oidc:<sub>`。登录回调注册为外部管理地址下的 `/api/login/oauth/callback`。回调测试使用本地假 OIDC 提供方和真实签名，实际 GitHub、Google、QQ 及生产 OIDC 环境待验收。
+如管理服务由受信代理对外提供，配置 `--admin-origin`，必要时同时配置 `--admin-prefix`。第三方登录配置在 `ferrumgate.json` 的 `thirdLogin` 字段，也可通过管理员设置接口保存。允许列表按提供方与稳定身份指定，例如 `github:<数字 ID>`、`qq:<OpenID>` 或 `oidc:<sub>`。将外部管理地址与前缀拼接 `/api/login/oauth/callback`，作为提供方登记的回调地址。全局字段缺失时，兼容使用 `--admin-origin` 和旧文件 `third-login.json`。
 
 ```json
 {
-  "providers": [
-    {
-      "key": "oidc",
-      "name": "Organization login",
-      "type": "oidc",
-      "issuer": "https://identity.example.test",
-      "clientId": "<client id>",
-      "clientSecret": "<client secret>"
-    }
-  ],
-  "allowed": ["oidc:<subject>"],
-  "skipTotp": false
+  "thirdLogin": {
+    "enable": true,
+    "callbackBase": "https://admin.example.test",
+    "providers": [
+      {
+        "key": "oidc",
+        "name": "Organization login",
+        "type": "oidc",
+        "issuer": "https://identity.example.test",
+        "clientId": "<client id>",
+        "clientSecret": "<client secret>"
+      }
+    ],
+    "allowed": ["oidc:<subject>"],
+    "skipTotp": false
+  }
 }
 ```
 
@@ -1070,6 +1074,30 @@ git diff --check
 ```
 
 macOS arm64、Rust stable 1.100.0 上通过 207 项工作区测试和 9 项本机 Pebble ACME 测试。真实进程用例覆盖默认落盘、拒绝静态根下的目标、占用期间保留原目标、释放后自动切换、停用后继续查询内存环与恢复后序号递增。日志库用例覆盖同目录更新内存行数和轮转上限，以及按天数和容量淘汰归档。Web 请求访问日志生产者由 WP-28 接入。
+
+### WP-07 全局第三方登录
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway admin::management_switches_third_login_from_legacy_and_disables_pending_flows
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login_oidc
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 208 项工作区测试和 9 项本机 Pebble ACME 测试。真实管理进程测试覆盖旧文件兼容、运行中切换到本机 OIDC、回调源校验、路径前缀与 PKCE、停用时拒绝已开始的回调，以及重启后保持停用。签名 OIDC 用例覆盖合法身份与浏览器绑定，设置用例覆盖密钥和代理凭据脱敏及还原。真实 GitHub、Google、QQ 和生产 OIDC 环境待验收。
+
+### 工作包状态核查与第三方登录评审
+
+主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
+
+- 已修正第三方登录密钥还原条件。更换客户端身份后提交旧遮蔽值会拒绝保存，原配置和提供方快照保留。
+- 已修正 OAuth 配置切换中的登录记账。测试使用本地签名提供方，验证配置失效后的合法旧流程不会写入常用来源。
+- WP-11 的 `fgate api-docs` 目前导出默认路由器，仅包含 `/api/openapi.json`。运行实例的目录由真实路由装配生成。CLI 目录对齐待处理。
+
+本轮在 macOS arm64、Rust stable 1.100.0 上复跑并通过 208 项工作区测试、9 项本机 Pebble ACME 测试、工作区 Clippy、格式与 Git 差异检查。CLI 目录核查使用本机构建的 `fgate api-docs` 在临时目录生成并读回 OpenAPI 文件。
 
 ### 数据面交付记录
 

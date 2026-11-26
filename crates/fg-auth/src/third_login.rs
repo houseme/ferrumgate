@@ -6,6 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use fg_core::settings::{
+    IdentityProviderSettings, ThirdLoginSettings, allowed_identity, valid_oauth_endpoint,
+};
 use openidconnect::{
     ClientId, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
     core::{CoreIdToken, CoreIdTokenVerifier, CoreJsonWebKeySet, CoreJwsSigningAlgorithm},
@@ -30,6 +33,17 @@ enum Kind {
     Oidc,
 }
 
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Github => "github",
+            Self::Google => "google",
+            Self::Qq => "qq",
+            Self::Oidc => "oidc",
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThirdLoginConfig {
@@ -49,6 +63,81 @@ struct ProviderConfig {
     issuer: Option<Url>,
     client_id: String,
     client_secret: String,
+    #[serde(default)]
+    proxy: String,
+}
+
+impl ThirdLoginConfig {
+    pub fn from_settings(settings: &ThirdLoginSettings) -> Result<Self> {
+        let providers = settings
+            .providers
+            .iter()
+            .map(|provider| {
+                let kind = match provider.kind.as_str() {
+                    "github" => Kind::Github,
+                    "google" => Kind::Google,
+                    "qq" => Kind::Qq,
+                    "oidc" => Kind::Oidc,
+                    _ => anyhow::bail!("invalid third-party login provider type"),
+                };
+                Ok(ProviderConfig {
+                    key: provider.key.clone(),
+                    name: if provider.name.is_empty() {
+                        provider.key.clone()
+                    } else {
+                        provider.name.clone()
+                    },
+                    kind,
+                    issuer: if matches!(kind, Kind::Oidc) {
+                        Some(Url::parse(&provider.issuer)?)
+                    } else {
+                        None
+                    },
+                    client_id: provider.client_id.clone(),
+                    client_secret: provider.client_secret.clone(),
+                    proxy: provider.proxy.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let allowed = settings
+            .allowed
+            .iter()
+            .map(|entry| {
+                let (key, subject) =
+                    allowed_identity(entry).context("invalid allowed third-party identity")?;
+                Ok(format!("{key}:{subject}"))
+            })
+            .collect::<Result<HashSet<_>>>()?;
+        Ok(Self {
+            providers,
+            allowed,
+            skip_totp: settings.skip_totp,
+        })
+    }
+
+    pub fn into_settings(self, origin: &Url) -> ThirdLoginSettings {
+        let mut allowed: Vec<_> = self.allowed.into_iter().collect();
+        allowed.sort_unstable();
+        ThirdLoginSettings {
+            enable: true,
+            callback_base: origin.to_string(),
+            allowed,
+            skip_totp: self.skip_totp,
+            providers: self
+                .providers
+                .into_iter()
+                .map(|provider| IdentityProviderSettings {
+                    key: provider.key,
+                    name: provider.name,
+                    kind: provider.kind.as_str().into(),
+                    issuer: provider.issuer.map_or_else(String::new, Into::into),
+                    client_id: provider.client_id,
+                    client_secret: provider.client_secret,
+                    proxy: provider.proxy,
+                })
+                .collect(),
+        }
+    }
 }
 
 struct Provider {
@@ -56,6 +145,7 @@ struct Provider {
     authorize: Url,
     token: Url,
     oidc: Option<Oidc>,
+    http: reqwest::Client,
 }
 
 struct Oidc {
@@ -91,7 +181,6 @@ pub struct ProviderView {
 
 pub struct ThirdLogin {
     accounts: Arc<AccountManager>,
-    http: reqwest::Client,
     callback: Url,
     base: Url,
     providers: BTreeMap<String, Provider>,
@@ -122,12 +211,7 @@ impl ThirdLogin {
             "invalid management callback base"
         );
         ensure!(config.providers.len() <= 16, "too many identity providers");
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .no_proxy()
-            .timeout(REQUEST_TIMEOUT)
-            .user_agent("FerrumGate")
-            .build()?;
+        let http = oauth_client("")?;
         let mut providers = BTreeMap::new();
         for provider in config.providers {
             ensure!(
@@ -142,7 +226,12 @@ impl ThirdLogin {
             );
             let key = provider.key.clone();
             ensure!(!providers.contains_key(&key), "duplicate identity provider");
-            providers.insert(key, Provider::load(provider, &http).await?);
+            let client = if provider.proxy.is_empty() {
+                http.clone()
+            } else {
+                oauth_client(&provider.proxy)?
+            };
+            providers.insert(key, Provider::load(provider, client).await?);
         }
         for allowed in &config.allowed {
             ensure!(
@@ -155,7 +244,6 @@ impl ThirdLogin {
         let callback = base.join("api/login/oauth/callback")?;
         Ok(Self {
             accounts,
-            http,
             callback,
             base,
             providers,
@@ -170,7 +258,7 @@ impl ThirdLogin {
     }
 
     pub fn password_login_enabled(&self) -> bool {
-        !self.accounts.snapshot.load().account.password_login_off
+        self.accounts.password_login_enabled()
     }
 
     pub fn providers(&self) -> Vec<ProviderView> {
@@ -259,8 +347,24 @@ impl ThirdLogin {
         browser: &str,
         code: &str,
     ) -> Result<Session, LoginError> {
+        self.finish_while(address, state, browser, code, || true)
+            .await
+    }
+
+    /// Completes a flow only while its configuration still governs the login.
+    pub async fn finish_while(
+        &self,
+        address: IpAddr,
+        state: &str,
+        browser: &str,
+        code: &str,
+        is_current: impl FnOnce() -> bool,
+    ) -> Result<Session, LoginError> {
         let attempt = self.accounts.limiter.begin(address)?;
         let result = self.complete(state, browser, code).await;
+        if !is_current() {
+            return Err(LoginError::InvalidCredentials);
+        }
         let completion = attempt.complete(result.is_ok());
         self.accounts
             .report_login(address, result.is_ok(), &completion);
@@ -295,7 +399,7 @@ impl ThirdLogin {
         let provider = &self.providers[&flow.provider];
         let subject = tokio::time::timeout(
             REQUEST_TIMEOUT,
-            provider.subject(&self.http, &self.callback, code, &flow),
+            provider.subject(&self.callback, code, &flow),
         )
         .await
         .map_err(|_| LoginError::InvalidCredentials)?
@@ -320,7 +424,7 @@ impl ThirdLogin {
 }
 
 impl Provider {
-    async fn load(config: ProviderConfig, http: &reqwest::Client) -> Result<Self> {
+    async fn load(config: ProviderConfig, http: reqwest::Client) -> Result<Self> {
         let (authorize, token, oidc) = match config.kind {
             Kind::Github => (
                 Url::parse("https://github.com/login/oauth/authorize")?,
@@ -378,17 +482,13 @@ impl Provider {
             authorize,
             token,
             oidc,
+            http,
         })
     }
 
-    async fn subject(
-        &self,
-        http: &reqwest::Client,
-        callback: &Url,
-        code: &str,
-        flow: &Pending,
-    ) -> Result<String> {
+    async fn subject(&self, callback: &Url, code: &str, flow: &Pending) -> Result<String> {
         let config = &self.config;
+        let http = &self.http;
         let mut form = vec![
             ("grant_type", "authorization_code"),
             ("code", code),
@@ -463,20 +563,21 @@ impl Provider {
     }
 }
 
+fn oauth_client(proxy: &str) -> Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .timeout(REQUEST_TIMEOUT)
+        .user_agent("FerrumGate");
+    if !proxy.is_empty() {
+        builder = builder.proxy(reqwest::Proxy::all(proxy)?);
+    }
+    Ok(builder.build()?)
+}
+
 fn validate_url(url: &Url) -> Result<()> {
-    let local = url.host_str().is_some_and(|host| {
-        host == "localhost"
-            || host
-                .trim_matches(['[', ']'])
-                .parse::<IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    });
     ensure!(
-        url.has_host()
-            && (url.scheme() == "https" || (url.scheme() == "http" && local))
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.fragment().is_none(),
+        valid_oauth_endpoint(url),
         "identity provider URL must use HTTPS or loopback HTTP"
     );
     Ok(())

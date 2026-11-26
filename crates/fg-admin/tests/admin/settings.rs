@@ -32,12 +32,14 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
     let auth = [("cookie", admin.as_str())];
     let edit = [auth[0], ("content-type", "application/json")];
     let raw_secret = "fixture-client-secret";
+    let raw_proxy = "http://fixture-user:fixture-proxy-secret@proxy.test:8080";
     store.save("ferrumgate", &json!({
         "disabledModules":["waf"], "uiLanguage":"en",
-        "thirdLogin":{"providers":[{"key":"github","type":"github","clientId":"fixture","clientSecret":raw_secret}]},
+        "thirdLogin":{"providers":[{"key":"github","type":"github","clientId":"fixture","clientSecret":raw_secret,"proxy":raw_proxy}]},
     }))?;
     let state = Arc::new(SettingsState::open(store.clone(), REGISTRY)?);
     let mut updates = state.subscribe();
+    let providers = state.subscribe_third_login();
     let admin = ApiRouter::new(|headers| {
         (headers.get("authorization")?.to_str().ok()? == "Bearer fixture-token").then(|| {
             Principal::Token {
@@ -86,12 +88,21 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
         SECRET_MASK
     );
     assert!(!view.to_string().contains(raw_secret));
+    assert_eq!(view["thirdLogin"]["providers"][0]["proxy"], SECRET_MASK);
     let (status, headers, secrets) = server.call("GET", SECRETS, &auth, Body::empty()).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers["cache-control"], "no-store");
     assert_eq!(secrets, json!({"github":raw_secret}));
 
     let before = store.load_raw("ferrumgate")?;
+    let mut rebound = view.clone();
+    rebound["thirdLogin"]["providers"][0]["clientId"] = json!("replacement-client");
+    let (status, _, error) = server.call("PUT", PATH, &edit, rebound.to_string()).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(error["fields"][0]["field"], "thirdLogin.providers");
+    assert_eq!(store.load_raw("ferrumgate")?, before);
+    assert!(!providers.has_changed()?);
+
     let mut invalid = view.clone();
     invalid["logLines"] = json!(20_001);
     invalid["disabledModules"] = json!(["ssl"]);
@@ -161,6 +172,7 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
     assert!(log_dir.is_dir());
     assert_eq!(fs::read_dir(&log_dir)?.count(), 0);
     assert!(updates.has_changed()?);
+    assert!(!providers.has_changed()?);
     assert_eq!(updates.borrow_and_update().log_level, "warn");
     let Loaded::Found(persisted) = store.load::<Value>("ferrumgate")? else {
         anyhow::bail!("settings were not persisted");
@@ -170,6 +182,7 @@ async fn settings_routes_protect_secrets_validate_and_publish_only_saved_setting
         raw_secret
     );
     assert!(persisted.get("apiToken").is_none());
+    assert_eq!(persisted["thirdLogin"]["providers"][0]["proxy"], raw_proxy);
 
     assert_eq!(
         server.call("PUT", PATH, &edit, saved.to_string()).await?.0,

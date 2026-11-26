@@ -7,14 +7,9 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use clap::Args;
-use fg_admin::{ApiRouter, SecurityExposure, SettingsState};
-use fg_auth::{
-    AccountManager, LoginLimits,
-    passkey::Url,
-    third_login::{ThirdLogin, ThirdLoginConfig},
-    token::TokenManager,
-};
-use fg_config::{ConfigStore, Loaded};
+use fg_admin::{ApiRouter, ManagedThirdLogin, SecurityExposure, SettingsState};
+use fg_auth::{AccountManager, LoginLimits, passkey::Url, token::TokenManager};
+use fg_config::ConfigStore;
 use fg_core::{
     events::EventBus,
     settings::{
@@ -66,12 +61,9 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         tracing::info!(target: "fg_core::auth", kind = event.kind.info().name, "administrator authentication event");
         std::future::ready(())
     })?;
-    let (accounts, tokens, settings, third_login) = tokio::task::spawn_blocking(move || {
+    let origin = options.admin_origin.clone();
+    let (accounts, tokens, settings) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
-        let third_login = match store.load::<ThirdLoginConfig>("third-login")? {
-            Loaded::Found(config) => Some(config),
-            Loaded::Missing => None,
-        };
         let initial = std::env::var("FERRUMGATE_INITIAL_PASSWORD");
         let initial = match &initial {
             Ok(password) => Some(password.as_str()),
@@ -88,13 +80,8 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
         if tokens.migrate_legacy_settings("ferrumgate", time::OffsetDateTime::now_utc())? {
             tracing::info!(target: "fg_core::auth", "legacy API token migrated");
         }
-        let settings = SettingsState::open(store, fg_gateway::REGISTRY)?;
-        Ok::<_, anyhow::Error>((
-            Arc::new(manager),
-            Arc::new(tokens),
-            Arc::new(settings),
-            third_login,
-        ))
+        let settings = SettingsState::open_with_origin(store, fg_gateway::REGISTRY, origin)?;
+        Ok::<_, anyhow::Error>((Arc::new(manager), Arc::new(tokens), Arc::new(settings)))
     })
     .await??;
     let started = settings.snapshot();
@@ -117,22 +104,6 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
     let listener = TcpListener::bind(address)
         .await
         .context("bind management listener")?;
-    let third_login = if let Some(config) = third_login {
-        let mut base = options
-            .admin_origin
-            .clone()
-            .context("third-party login requires --admin-origin")?;
-        ensure!(
-            base.path() == "/" && base.query().is_none(),
-            "management origin cannot have a path or query"
-        );
-        base.set_path(&format!("{}/", options.admin_prefix.trim_end_matches('/')));
-        Some(Arc::new(
-            ThirdLogin::new(accounts.clone(), base, config).await?,
-        ))
-    } else {
-        None
-    };
     let result = async {
         let (ready, waiting) = oneshot::channel();
         let gateway = fg_gateway::serve_with_management(config, &started.disabled_modules, ready);
@@ -146,7 +117,6 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLog
                 accounts,
                 tokens: tokens.clone(),
                 settings,
-                third_login,
             }
             .run(ready, logs)
             .await
@@ -180,7 +150,6 @@ struct ManagementService {
     accounts: Arc<AccountManager>,
     tokens: Arc<TokenManager>,
     settings: Arc<SettingsState>,
-    third_login: Option<Arc<ThirdLogin>>,
 }
 
 impl ManagementService {
@@ -191,7 +160,6 @@ impl ManagementService {
             accounts,
             tokens,
             settings,
-            third_login,
         } = self;
         let started = settings.snapshot();
         let updates = settings.subscribe();
@@ -211,15 +179,16 @@ impl ManagementService {
             protected_entry: false,
             passkey_rp: origin.and_then(Url::domain).map(str::to_owned),
         };
-        let router = if let Some(service) = third_login {
-            router.with_third_login(service)?
-        } else {
-            router
-        };
+        let third_login = Arc::new(ManagedThirdLogin::new(
+            settings.subscribe_third_login(),
+            accounts.clone(),
+            &options.admin_prefix,
+        )?);
         let admin = router
             .with_logs(logs.handle())
             .with_security_status(accounts.clone(), exposure)
             .with_token_management(tokens.clone())
+            .with_managed_third_login(third_login.clone())
             .with_settings(settings, accounts.clone())
             .finish();
         tracing::info!(listen = %listener.local_addr()?, "management ready");
@@ -241,6 +210,7 @@ impl ManagementService {
             result = &mut server => result.context("serve management"),
             () = maintenance => server.await.context("drain management"),
             () = runtime => server.await.context("serve management after settings watcher closed"),
+            () = third_login.run() => server.await.context("serve management after OAuth settings watcher closed"),
         }
     }
 }

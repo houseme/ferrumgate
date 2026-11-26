@@ -23,7 +23,7 @@ serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tempfile.workspace = true
 time = { workspace = true, features = ["formatting", "parsing"] }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tokio-stream = { version = "0.1", default-features = false }
 tracing.workspace = true
 url = "2"

@@ -81,7 +81,7 @@ async fn login_oidc_uses_single_use_browser_state_pkce_and_signed_allowed_subjec
         &json!({"username":"operator","passwordHash":bcrypt::hash("fixture-password",4)?,
         "sessionSecret":"fixture-session-secret-for-tests-only"}),
     )?;
-    let (accounts, _) = AccountManager::open(store, None)?;
+    let (accounts, _) = AccountManager::open(store.clone(), None)?;
     let accounts = Arc::new(accounts);
     let config = serde_json::from_value(json!({
         "providers":[{"key":"fixture","name":"Fixture","type":"oidc","issuer":issuer,
@@ -96,6 +96,17 @@ async fn login_oidc_uses_single_use_browser_state_pkce_and_signed_allowed_subjec
         )
         .await?,
     );
+    let address = "127.0.0.1".parse()?;
+    let (target, browser) = service.begin("fixture", address)?;
+    let query: std::collections::HashMap<_, _> = target.query_pairs().into_owned().collect();
+    *flow.lock().unwrap() = (query["code_challenge"].clone(), query["nonce"].clone());
+    assert!(matches!(
+        service
+            .finish_while(address, &query["state"], &browser, "allowed", || false)
+            .await,
+        Err(fg_auth::LoginError::InvalidCredentials)
+    ));
+    assert!(store.load_raw("login-ips")?.is_none());
     let server = Server::start(
         ApiRouter::default()
             .with_accounts(accounts, "/panel", true)?
