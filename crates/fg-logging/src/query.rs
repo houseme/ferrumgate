@@ -68,22 +68,23 @@ impl Logs {
         entries.clear();
         let mut has_more = false;
         let mut bytes = 0usize;
-        self.snapshot(module, after, before)?.visit::<true>(|row| {
-            let entry = row.entry();
-            if entry.seq <= after {
-                return Ok(false);
-            }
-            if in_range(entry.seq, after, before) && filter.matches(entry) {
-                let received = entry.bytes();
-                if entries.len() == limit || bytes + received > MAX_RING_BYTES {
-                    has_more = true;
+        self.snapshot(module, after, before)?
+            .visit::<true>(filter, |row| {
+                let entry = row.entry();
+                if entry.seq <= after {
                     return Ok(false);
                 }
-                bytes += received;
-                entries.push(row.into_arc());
-            }
-            Ok(true)
-        })?;
+                if in_range(entry.seq, after, before) && filter.matches(entry) {
+                    let received = entry.bytes();
+                    if entries.len() == limit || bytes + received > MAX_RING_BYTES {
+                        has_more = true;
+                        return Ok(false);
+                    }
+                    bytes += received;
+                    entries.push(row.into_arc());
+                }
+                Ok(true)
+            })?;
         entries.reverse();
         Ok(Page {
             oldest_seq: entries.first().map_or(0, |entry| entry.seq),
@@ -107,7 +108,7 @@ impl Logs {
         if matches!(format, Format::Csv) {
             output.write_all(b"\xEF\xBB\xBFtime,level,source,message,ip,host,site,status,method,path,rule,user,deny\r\n")?;
         }
-        snapshot.visit::<false>(|row| {
+        snapshot.visit::<false>(filter, |row| {
             let entry = row.entry();
             if before != 0 && entry.seq >= before {
                 return Ok(false);
@@ -207,10 +208,19 @@ impl LogFile {
 
     pub fn visit<const REVERSE: bool>(
         self,
+        filter: Option<&Filter>,
         visit: &mut impl FnMut(Entry) -> io::Result<bool>,
     ) -> io::Result<bool> {
         if self.gzip {
             let decoder = GzDecoder::new(self.file.take(self.size));
+            if filter.is_some_and(|filter| {
+                archive::outside_time_range(
+                    decoder.header().and_then(|header| header.extra()),
+                    filter,
+                )
+            }) {
+                return Ok(true);
+            }
             if REVERSE {
                 let mut contents = Vec::new();
                 decoder.take(MAX_RAW + 1).read_to_end(&mut contents)?;
@@ -225,7 +235,7 @@ impl LogFile {
             } else {
                 scan_lines(
                     BufReader::with_capacity(BLOCK, decoder.take(MAX_RAW)),
-                    visit,
+                    |line| decode(line, visit),
                 )
             }
         } else if REVERSE {
@@ -260,6 +270,7 @@ impl Row {
 impl Snapshot {
     fn visit<const REVERSE: bool>(
         mut self,
+        filter: &Filter,
         mut visit: impl FnMut(Row) -> io::Result<bool>,
     ) -> io::Result<()> {
         let peek = |live: &VecDeque<Arc<Entry>>| {
@@ -304,7 +315,7 @@ impl Snapshot {
             visit(Row::File(entry))
         };
         for file in self.files {
-            let proceed = file.visit::<REVERSE>(&mut merge)?;
+            let proceed = file.visit::<REVERSE>(Some(filter), &mut merge)?;
             if !proceed {
                 return Ok(());
             }
@@ -319,9 +330,17 @@ impl Snapshot {
 }
 
 pub(super) fn scan_forward(
-    mut file: File,
+    file: File,
     size: u64,
     mut visit: impl FnMut(Entry) -> io::Result<bool>,
+) -> io::Result<bool> {
+    scan_forward_lines(file, size, |line| decode(line, &mut visit))
+}
+
+pub(super) fn scan_forward_lines(
+    mut file: File,
+    size: u64,
+    visit: impl FnMut(&[u8]) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let start = size.saturating_sub(MAX_FILE_BYTES);
     file.seek(SeekFrom::Start(start))?;
@@ -329,28 +348,29 @@ pub(super) fn scan_forward(
     if start != 0 {
         reader.skip_until(b'\n')?;
     }
-    scan_lines(reader, &mut visit)
+    scan_lines(reader, visit)
 }
 
 fn scan_lines(
     mut reader: impl BufRead,
-    visit: &mut impl FnMut(Entry) -> io::Result<bool>,
+    mut visit: impl FnMut(&[u8]) -> io::Result<bool>,
 ) -> io::Result<bool> {
     let mut line = Vec::new();
     loop {
         line.clear();
         let read = reader
             .by_ref()
-            .take((MAX_JSON_LINE + 1) as u64)
+            .take((MAX_JSON_LINE + 2) as u64)
             .read_until(b'\n', &mut line)?;
         if read == 0 {
             return Ok(true);
         }
-        if read > MAX_JSON_LINE {
+        let content = line.strip_suffix(b"\n").unwrap_or(&line);
+        if content.len() > MAX_JSON_LINE {
             if line.last() != Some(&b'\n') {
                 reader.skip_until(b'\n')?;
             }
-        } else if !decode(&line, visit)? {
+        } else if !content.is_empty() && !visit(content)? {
             return Ok(false);
         }
     }
@@ -511,7 +531,7 @@ mod tests {
             .write_all(record(3).as_bytes())?;
         fs::write(&current, record(4))?;
         let mut sequences = Vec::new();
-        view.visit::<false>(|item| {
+        view.visit::<false>(&Filter::default(), |item| {
             sequences.push(item.entry().seq);
             Ok(true)
         })?;

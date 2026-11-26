@@ -7,15 +7,17 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use flate2::{Compression, write::GzEncoder};
+use flate2::{Compression, Crc, GzBuilder};
+use serde::Deserialize;
 use time::{
     Duration, OffsetDateTime, PrimitiveDateTime, format_description::BorrowedFormatItem,
     macros::format_description,
 };
 
 use super::{
-    Module,
+    Filter, Module,
     persist::{DiskView, open_regular, private_file},
+    query::scan_forward_lines,
 };
 
 pub(super) const MAX_RAW: u64 = 16 << 20;
@@ -211,17 +213,52 @@ pub(super) fn maintain(view: &DiskView, options: ArchiveOptions) -> io::Result<(
 }
 
 fn compress(view: &DiskView, generation: u64, path: &Path) -> io::Result<()> {
-    let Some(source) = open_regular(path, false)? else {
+    let Some(mut source) = open_regular(path, false)? else {
         return Ok(());
     };
-    let modified = source.metadata()?.modified()?;
+    let metadata = source.metadata()?;
+    if metadata.len() > MAX_RAW {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Web log archive exceeds uncompressed limit",
+        ));
+    }
+    let modified = metadata.modified()?;
+    let mut minimum = i64::MAX;
+    let mut maximum = i64::MIN;
+    #[derive(Deserialize)]
+    struct Timestamp {
+        #[serde(with = "time::serde::rfc3339")]
+        time: OffsetDateTime,
+    }
+    scan_forward_lines(source.try_clone()?, metadata.len(), |line| {
+        if let Ok(entry) = serde_json::from_slice::<Timestamp>(line) {
+            let time = entry.time.unix_timestamp();
+            minimum = minimum.min(time);
+            maximum = maximum.max(time);
+        }
+        Ok(true)
+    })?;
+    std::io::Seek::rewind(&mut source)?;
     let mut file = tempfile::Builder::new()
         .prefix(".fg-log-archive.")
         .suffix(".tmp")
         .tempfile_in(&view.dir)
         .map_err(|error| io::Error::from(error.kind()))?;
     private_file(file.as_file())?;
-    let mut encoder = GzEncoder::new(file.as_file_mut(), Compression::fast());
+    let mut gzip = GzBuilder::new();
+    if minimum <= maximum {
+        // A gzip FEXTRA subfield with two inclusive UTC seconds and a checksum.
+        let mut bounds = [0; 24];
+        bounds[..4].copy_from_slice(b"FG\x14\0");
+        bounds[4..12].copy_from_slice(&minimum.to_le_bytes());
+        bounds[12..20].copy_from_slice(&maximum.to_le_bytes());
+        let mut crc = Crc::new();
+        crc.update(&bounds[4..20]);
+        bounds[20..24].copy_from_slice(&crc.sum().to_le_bytes());
+        gzip = gzip.extra(bounds);
+    }
+    let mut encoder = gzip.write(file.as_file_mut(), Compression::fast());
     if io::copy(&mut source.take(MAX_RAW + 1), &mut encoder)? > MAX_RAW {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -240,6 +277,27 @@ fn compress(view: &DiskView, generation: u64, path: &Path) -> io::Result<()> {
         remove_copied_plain(&view.dir, path)?;
     }
     Ok(())
+}
+
+pub(super) fn outside_time_range(extra: Option<&[u8]>, filter: &Filter) -> bool {
+    let Some([b'F', b'G', 20, 0, bounds @ ..]) = extra else {
+        return false;
+    };
+    let Ok(bounds) = <&[u8; 20]>::try_from(bounds) else {
+        return false;
+    };
+    let mut crc = Crc::new();
+    crc.update(&bounds[..16]);
+    if bounds[16..] != crc.sum().to_le_bytes() {
+        return false;
+    }
+    let minimum = i64::from_le_bytes(bounds[..8].try_into().expect("eight-byte timestamp"));
+    let maximum = i64::from_le_bytes(bounds[8..16].try_into().expect("eight-byte timestamp"));
+    minimum <= maximum
+        && (filter
+            .from
+            .is_some_and(|from| maximum < from.unix_timestamp())
+            || filter.to.is_some_and(|to| minimum > to.unix_timestamp()))
 }
 
 fn remove_copied_plain(dir: &Path, path: &Path) -> io::Result<()> {
@@ -368,6 +426,63 @@ mod tests {
         compress(&view, 0, &raw)?;
         assert!(raw.exists());
         assert!(!raw.with_extension("log.gz").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn query_skips_disjoint_gzip_without_reading_its_body() -> Result<()> {
+        use super::super::{MODULES, persist::Clear, query::LogFile};
+        use flate2::read::GzDecoder;
+
+        let root = tempfile::tempdir()?;
+        let raw = root.path().join("webservice.20261126T000000Z.log");
+        fs::write(
+            &raw,
+            concat!(
+                "{\"seq\":1,\"level\":\"info\",\"time\":\"2026-11-26T00:00:00.900Z\",\"message\":\"later\"}\n",
+                "{\"seq\":2,\"level\":\"info\",\"time\":\"2026-11-25T00:00:00Z\",\"message\":\"earlier\"}\n",
+            ),
+        )?;
+        let view = DiskView {
+            dir: root.path().to_owned(),
+            files: Mutex::new([Clear::default(); MODULES.len()]),
+            archive_web: true,
+        };
+        compress(&view, 0, &raw)?;
+        let path = raw.with_extension("log.gz");
+        let header = GzDecoder::new(fs::File::open(&path)?);
+        let extra = header.header().unwrap().extra().unwrap();
+        let earlier = OffsetDateTime::parse(
+            "2026-11-25T00:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let upper = OffsetDateTime::parse(
+            "2026-11-26T00:00:00.950Z",
+            &time::format_description::well_known::Rfc3339,
+        )?;
+        let mut filter = Filter::default();
+        filter.from = Some(earlier);
+        filter.to = Some(upper);
+        assert!(!outside_time_range(Some(extra), &filter));
+        filter.from = Some(upper);
+        assert!(!outside_time_range(Some(extra), &filter));
+        filter.from = Some(upper + Duration::seconds(1));
+        filter.to = None;
+        assert!(outside_time_range(Some(extra), &filter));
+        let mut invalid_extra = extra.to_vec();
+        invalid_extra[4] ^= 1;
+        assert!(!outside_time_range(Some(&invalid_extra), &filter));
+        assert!(!outside_time_range(None, &filter));
+        drop(header);
+
+        let mut corrupt = fs::read(&path)?;
+        let footer = corrupt.len() - 8;
+        corrupt[footer] ^= 1;
+        fs::write(&path, corrupt)?;
+        let read = LogFile::open(&path, true)?.unwrap();
+        assert!(read.visit::<true>(Some(&filter), &mut |_| panic!("archive was not skipped"))?);
+        let read = LogFile::open(&path, true)?.unwrap();
+        assert!(read.visit::<true>(None, &mut |_| Ok(true)).is_err());
         Ok(())
     }
 }

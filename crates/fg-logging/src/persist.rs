@@ -283,7 +283,7 @@ fn restore_archived(dir: &Path, limit: usize, buffer: &mut Buffer) -> io::Result
     for (path, gzip) in files {
         if let Some(file) = LogFile::open(path, gzip)? {
             private_file(&file.file)?;
-            if !file.visit::<true>(&mut visit)? {
+            if !file.visit::<true>(None, &mut visit)? {
                 break;
             }
         }
