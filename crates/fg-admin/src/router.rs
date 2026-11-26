@@ -54,6 +54,7 @@ struct RouteMode {
     stream: Option<StreamPolicy>,
     translation: Translation,
     upload_limit: Option<u64>,
+    static_document: bool,
 }
 
 #[derive(Clone)]
@@ -311,7 +312,11 @@ impl ApiRouter {
             path: "/api/openapi.json".into(),
             summary: "Get the management API schema",
             access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
-            mode: RouteMode::default(),
+            mode: RouteMode {
+                // Generated from route definitions and types, with no instance data.
+                static_document: true,
+                ..RouteMode::default()
+            },
             models: RouteModels::default(),
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
@@ -416,7 +421,7 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
         }
     }
     response.extensions_mut().insert(RenderPolicy {
-        restricted,
+        restricted: restricted && !policy.mode.static_document,
         stream: policy.mode.stream.is_some(),
         translation: policy.mode.translation,
     });
