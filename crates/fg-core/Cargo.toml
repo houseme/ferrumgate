@@ -7,7 +7,10 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+arc-swap = "1"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
 
 [build-dependencies]
 serde.workspace = true
@@ -15,3 +18,4 @@ toml = "1"
 
 [dev-dependencies]
 tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "time"] }

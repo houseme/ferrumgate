@@ -496,10 +496,13 @@ name = "fg-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "futures-util",
  "serde",
  "tempfile",
  "tokio",
  "toml",
+ "tracing",
 ]
 
 [[package]]
