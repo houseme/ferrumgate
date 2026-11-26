@@ -7,6 +7,7 @@ members = [
     "crates/fg-gateway",
     "crates/fg-i18n",
     "crates/fg-logging",
+    "crates/fg-net",
     "crates/fg-testkit",
     "crates/xtask"
 ]
@@ -30,6 +31,7 @@ fg-core = { path = "crates/fg-core", version = "0.1.0" }
 fg-gateway = { path = "crates/fg-gateway", version = "0.1.0" }
 fg-i18n = { path = "crates/fg-i18n", version = "0.1.0" }
 fg-logging = { path = "crates/fg-logging", version = "0.1.0" }
+fg-net = { path = "crates/fg-net", version = "0.1.0" }
 fg-testkit = { path = "crates/fg-testkit", version = "0.1.0" }
 # External crates
 anyhow = "1"
