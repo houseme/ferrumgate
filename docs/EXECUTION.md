@@ -679,6 +679,20 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 123 项默认测试及 9 项本机 Pebble ACME 测试。三项新增测试覆盖目标被占用时继续向旧目录写入、回到旧目录及恢复落盘、并发切换前后的序号连续，以及只读取头部即可排除时间不相交的 gzip。归档元数据覆盖顺序异常与亚秒边界，损坏或缺少元数据时回到逐条读取。WP-09 的 Rust 库阶段已完成，设置、管理接口和访问日志的接入随各自工作包验证。
 
+### WP-11 管理 API 基础链路
+
+```bash
+./target/release/fgate api-docs ./admin-docs
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo tree --locked --offline -p fg-admin --depth 1
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 131 项默认测试和 9 项本机 Pebble ACME 测试。新增 8 项测试覆盖 808 个上游操作的权限推导、公开分类、回环 HTTP 鉴权和同源约束、请求体大小与读取时限、模块状态、集合提交及失败回滚、OpenAPI 与 `fgate api-docs`。回环鉴权使用测试身份，实际管理监听、会话认证和令牌接入随各自工作包实施。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
