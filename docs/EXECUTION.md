@@ -940,6 +940,19 @@ fgate serve --config ferrumgate.example.toml \
 
 验收边界包括物理认证器、旧 Passkey 格式迁移、真实身份提供方，以及依赖 WP-07 的界面语言与全局设置、WP-08 的持久化审计和 WP-14 的可信代理、安全入口及飞牛统一网关。当前管理监听使用回环地址。[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636) · [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)
 
+### WP-13 令牌存储与认证核心
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth --test tokens
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 185 项工作区测试和 9 项本机 Pebble ACME 测试。令牌核心用例验证了明文一次性返回、私有文件权限与历史排除、摘要认证、停用与过期、轮换及删除、写入失败时保持有效凭据、旧记录加载、未编译权限保留，以及使用记录的节流与重启恢复。运行期刷盘调度和 HTTP 鉴权由后续步骤接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

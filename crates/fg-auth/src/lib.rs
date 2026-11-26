@@ -8,6 +8,7 @@ mod readonly;
 mod reset;
 mod session;
 pub mod third_login;
+pub mod token;
 mod totp;
 
 pub use account::SecurityFacts;
