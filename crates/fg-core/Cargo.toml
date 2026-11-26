@@ -12,10 +12,15 @@ schema = ["dep:schemars"]
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
+data-encoding.workspace = true
+hmac.workspace = true
 futures-util.workspace = true
 ipnet.workspace = true
 jiff-tzdb.workspace = true
 schemars = { workspace = true, optional = true }
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
 serde.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true

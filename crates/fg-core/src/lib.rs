@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod access_path;
+pub mod apply_hold;
 pub mod check;
 pub mod events;
 pub mod fsperm;
