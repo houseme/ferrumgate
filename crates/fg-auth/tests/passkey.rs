@@ -136,16 +136,46 @@ fn passkey_registration_and_login_bind_challenges_and_persist_counters() -> Resu
     );
     drop(passkeys);
     drop(manager);
+    let legacy_password = "Password2024!";
+    let mut account: serde_json::Value =
+        serde_json::from_slice(&store.load_raw("account")?.context("account")?)?;
+    account["passwordHash"] = json!(bcrypt::hash(legacy_password, 4)?);
+    account["weakPassword"] = json!(true);
+    store.save("account", &account)?;
     let (manager, _) = AccountManager::open(store, None)?;
-    let passkeys = Passkeys::new(Arc::new(manager), &origin)?;
+    let manager = Arc::new(manager);
+    let passkeys = Passkeys::new(manager.clone(), &origin)?;
     assert!(passkeys.password_login_disabled());
     assert_eq!(passkeys.list()[0].id, record.id);
     let next = passkeys.begin_login(peer)?;
     let challenge = URL_SAFE_NO_PAD.encode(next.public_key.challenge.as_slice());
     let assertion = authenticator.do_authentication(origin, next)?;
     let (current, _) = passkeys.finish_login(peer, &challenge, &assertion)?;
-    passkeys.set_password_login_disabled(&current.token, PASSWORD, false)?;
-    passkeys.remove(&current.token, PASSWORD, &record.id)?;
+    assert_eq!(
+        manager
+            .identify(&current.token)
+            .context("Passkey identity")?
+            .password_issue(),
+        ""
+    );
+    passkeys.set_password_login_disabled(&current.token, legacy_password, false)?;
+    assert_eq!(
+        manager
+            .identify(&current.token)
+            .context("updated Passkey identity")?
+            .password_issue(),
+        "weak"
+    );
+    assert!(
+        passkeys
+            .remove(&current.token, legacy_password, &record.id)
+            .is_err()
+    );
+    manager.change_credentials(legacy_password, "operator", PASSWORD)?;
+    let updated = manager
+        .login("operator", PASSWORD)?
+        .context("updated administrator session")?;
+    passkeys.remove(&updated.token, PASSWORD, &record.id)?;
     assert!(passkeys.list().is_empty());
     assert!(matches!(
         passkeys.begin_login(peer),

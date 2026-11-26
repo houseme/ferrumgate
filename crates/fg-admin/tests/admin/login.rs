@@ -24,6 +24,168 @@ fn credentials(username: &str, password: &str) -> String {
 }
 
 #[tokio::test]
+async fn login_legacy_weak_password_preserves_recovery_and_token_boundaries() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    let weak = "Password2024!";
+    store.save(
+        "account",
+        &json!({
+            "username":"operator",
+            "passwordHash":bcrypt::hash(weak, 4)?,
+            "sessionSecret":"fixture-session-secret-for-tests-only",
+        }),
+    )?;
+    let (accounts, _) = AccountManager::open(store, None)?;
+    let mut router = ApiRouter::new(|headers| {
+        (headers.get("authorization")?.to_str().ok()? == "Bearer fixture-token").then(|| {
+            Principal::Token {
+                scopes: vec!["*".into()],
+            }
+        })
+    })
+    .with_accounts(Arc::new(accounts), "", false)?;
+    let ordinary = "/api/ddns/fixture";
+    let language = "/api/account/ui-language";
+    let restricted = [
+        (Method::PUT, "/api/system/settings"),
+        (Method::POST, "/api/tokens"),
+        (Method::PUT, "/api/webterminal/security"),
+        (Method::POST, "/api/system/restore"),
+        (Method::POST, "/api/history/gateway/revision/restore"),
+    ];
+    for (method, path) in restricted.iter().cloned().chain([
+        (Method::GET, ordinary),
+        (Method::POST, ordinary),
+        (Method::PUT, language),
+    ]) {
+        router = router.route(method, path, "Fixture operation", || async {
+            Json(json!({"ok":true}))
+        });
+    }
+    let server = Server::start(router.finish().router).await?;
+    let (status, headers, _) = server
+        .call("POST", "/api/login", &[JSON], credentials("operator", weak))
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let admin = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    let token = [("authorization", "Bearer fixture-token")];
+    let (_, _, session) = server
+        .call("GET", "/api/session", &admin, Body::empty())
+        .await?;
+    assert_eq!(session["passwordIssue"], "weak");
+    assert_eq!(session["defaultPassword"], false);
+    assert_eq!(
+        server.call("GET", ordinary, &admin, Body::empty()).await?.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("POST", ordinary, &admin, Body::empty())
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        server
+            .call("POST", ordinary, &token, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server.call("PUT", language, &admin, Body::empty()).await?.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call(
+                "POST",
+                "/api/account/password-check",
+                &[JSON, admin[0]],
+                r#"{"password":"123password"}"#
+            )
+            .await?
+            .2,
+        json!({"ok":false,"code":"common"})
+    );
+    for (method, path) in &restricted {
+        assert_eq!(
+            server
+                .call(method.as_str(), path, &admin, Body::empty())
+                .await?
+                .0,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+        assert_eq!(
+            server
+                .call(method.as_str(), path, &token, Body::empty())
+                .await?
+                .0,
+            StatusCode::FORBIDDEN,
+            "{path}"
+        );
+    }
+    let new_password = "Lk8$yN3-pv";
+    let change =
+        json!({"username":"operator","oldPassword":weak,"newPassword":new_password}).to_string();
+    assert_eq!(
+        server
+            .call("PUT", "/api/account", &[JSON, admin[0]], change)
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &admin, Body::empty())
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, headers, _) = server
+        .call(
+            "POST",
+            "/api/login",
+            &[JSON],
+            credentials("operator", new_password),
+        )
+        .await?;
+    assert_eq!(status, StatusCode::OK);
+    let admin = [("cookie", cookie_pair(cookie_header(&headers)?))];
+    assert_eq!(
+        server
+            .call("GET", "/api/session", &admin, Body::empty())
+            .await?
+            .2["passwordIssue"],
+        ""
+    );
+    assert_eq!(
+        server
+            .call("POST", ordinary, &admin, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("PUT", "/api/system/settings", &admin, Body::empty())
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        server
+            .call("PUT", "/api/system/settings", &token, Body::empty())
+            .await?
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn login_readonly_account_permissions_and_revocation_are_isolated() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let store = ConfigStore::open(dir.path())?;

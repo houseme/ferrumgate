@@ -272,6 +272,10 @@ impl Passkeys {
                 rejected("register a Passkey before disabling password login")
             );
             account.password_login_off = disabled;
+            if !disabled {
+                (account.using_default_password, account.weak_password) =
+                    account.verified_password_flags(password);
+            }
             Ok(())
         })
     }
@@ -419,7 +423,7 @@ fn registration_owner<'a>(snapshot: &Snapshot, token: &'a str) -> Result<&'a str
         .verify_admin(token, now)
         .ok_or_else(|| rejected("administrator session is invalid"))?;
     ensure!(
-        !snapshot.account.using_default_password && !snapshot.account.weak_password,
+        !snapshot.account.must_change_password(),
         rejected("administrator password must be changed")
     );
     Ok(session)

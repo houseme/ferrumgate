@@ -287,7 +287,13 @@ async fn lockout_notifies_once_and_remembers_successful_subnets_after_restart() 
     assert_eq!(next.kind, Kind::NotifyTest);
     let login_ips: Value =
         serde_json::from_slice(&store.load_raw("login-ips")?.context("persisted source")?)?;
-    assert_eq!(login_ips[0]["key"], "2001:db8:1::/64");
+    assert!(
+        login_ips
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "2001:db8:1::/64")
+    );
     Ok(())
 }
 
@@ -296,8 +302,11 @@ fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
     use ring::hmac;
 
     let (dir, store, mut account) = fixture()?;
+    let password = "Password2024!";
+    account["passwordHash"] = json!(bcrypt::hash(password, 4)?);
     account["totpSecret"] = json!("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
     store.save("account", &account)?;
+    let before = store.load_raw("account")?;
     let (manager, _) = AccountManager::open(store.clone(), None)?;
     let key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, b"12345678901234567890");
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
@@ -308,15 +317,16 @@ fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
     let code = format!("{:06}", value % 1_000_000);
     let addr = "192.0.2.5".parse()?;
     assert!(matches!(
-        manager.login_from(addr, "operator", PASSWORD),
+        manager.login_from(addr, "operator", password),
         Err(LoginError::TotpRequired)
     ));
+    assert_eq!(store.load_raw("account")?, before);
     let path = dir.path().join("account.json");
     let backup = dir.path().join("account-fixture-backup");
     fs::rename(&path, &backup)?;
     fs::create_dir(&path)?;
     assert!(matches!(
-        manager.login_with_totp_from(addr, "operator", PASSWORD, Some(&code)),
+        manager.login_with_totp_from(addr, "operator", password, Some(&code)),
         Err(LoginError::Internal(_))
     ));
     fs::remove_dir(&path)?;
@@ -328,7 +338,7 @@ fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
         let tasks = [addr, "198.51.100.9".parse().unwrap()].map(|addr| {
             scope.spawn(move || {
                 guard.wait();
-                manager.login_with_totp_from(addr, "operator", PASSWORD, Some(code))
+                manager.login_with_totp_from(addr, "operator", password, Some(code))
             })
         });
         tasks.map(|task| task.join().unwrap())
@@ -345,26 +355,75 @@ fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
         .context("accepted TOTP")?;
     drop(manager);
     let (manager, _) = AccountManager::open(store, None)?;
-    assert!(manager.identify(&session.token).is_some());
+    assert_eq!(
+        manager
+            .identify(&session.token)
+            .context("persisted identity")?
+            .password_issue(),
+        "weak"
+    );
     manager.configure_login_limits(LoginLimits {
         max_failures: 2,
         ..LoginLimits::default()
     })?;
     assert!(matches!(
-        manager.login_with_totp_from(addr, "operator", PASSWORD, Some(&code)),
+        manager.login_with_totp_from(addr, "operator", password, Some(&code)),
         Err(LoginError::InvalidCredentials)
     ));
     assert!(matches!(
-        manager.login_from(addr, "operator", PASSWORD),
+        manager.login_from(addr, "operator", password),
         Err(LoginError::TotpRequired)
     ));
     assert!(matches!(
-        manager.login_with_totp_from(addr, "operator", PASSWORD, Some("not-a-code")),
+        manager.login_with_totp_from(addr, "operator", password, Some("not-a-code")),
         Err(LoginError::InvalidCredentials)
     ));
     assert!(matches!(
-        manager.login_from(addr, "operator", PASSWORD),
+        manager.login_from(addr, "operator", password),
         Err(LoginError::Locked(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn legacy_password_flags_persist_and_validated_strong_logins_leave_the_account_unchanged()
+-> Result<()> {
+    for (password, issue) in [
+        ("gately.cn", "default"),
+        ("Password2024!", "weak"),
+        ("Lk8$yN3-pv", ""),
+    ] {
+        let (dir, store, mut account) = fixture()?;
+        account["passwordHash"] = json!(bcrypt::hash(password, 4)?);
+        store.save("account", &account)?;
+        let before = store.load_raw("account")?;
+        let (manager, _) = AccountManager::open(store.clone(), None)?;
+        assert!(manager.login("operator", "wrong")?.is_none());
+        assert_eq!(store.load_raw("account")?, before);
+        if issue == "weak" {
+            let path = dir.path().join("account.json");
+            let backup = dir.path().join("account-fixture-backup");
+            fs::rename(&path, &backup)?;
+            fs::create_dir(&path)?;
+            assert!(manager.login("operator", password).is_err());
+            fs::remove_dir(&path)?;
+            fs::rename(&backup, &path)?;
+        }
+        let session = manager
+            .login("operator", password)?
+            .context("verified administrator session")?;
+        if issue.is_empty() {
+            assert_eq!(store.load_raw("account")?, before);
+        }
+        drop(manager);
+        let (manager, _) = AccountManager::open(store, None)?;
+        assert_eq!(
+            manager
+                .identify(&session.token)
+                .context("persisted administrator identity")?
+                .password_issue(),
+            issue
+        );
+    }
     Ok(())
 }

@@ -188,7 +188,7 @@ fn require_admin(snapshot: &Snapshot, token: &str) -> Result<()> {
         CredentialChangeRejected("administrator session is invalid")
     );
     ensure!(
-        !snapshot.account.using_default_password && !snapshot.account.weak_password,
+        !snapshot.account.must_change_password(),
         CredentialChangeRejected("administrator password must be changed")
     );
     Ok(())

@@ -24,6 +24,7 @@ use crate::{
 };
 
 const ACCOUNT: &str = "account";
+const LEGACY_DEFAULT_PASSWORD: &str = "gately.cn";
 pub(super) const MAX_USERNAME_BYTES: usize = 256;
 pub(super) const MAX_REVOKED: usize = 1024;
 
@@ -128,7 +129,8 @@ impl AccountManager {
                     .or(generated.as_deref())
                     .expect("initial password");
                 ensure!(
-                    (8..=MAX_PASSWORD_BYTES).contains(&password.len()) && password != "gately.cn",
+                    (8..=MAX_PASSWORD_BYTES).contains(&password.len())
+                        && password != LEGACY_DEFAULT_PASSWORD,
                     "invalid initial administrator password"
                 );
                 let account = Account {
@@ -211,16 +213,13 @@ impl AccountManager {
         let session = if !accepted {
             None
         } else if account.totp_secret.is_empty() {
-            Some(
-                snapshot
-                    .issue(SystemTime::now())
-                    .map_err(LoginError::Internal)?,
-            )
+            self.issue_password_session(&snapshot, password, None)
+                .map_err(LoginError::Internal)?
         } else if snapshot.totp.is_some() {
             let code = code
                 .filter(|code| !code.trim().is_empty())
                 .ok_or(LoginError::TotpRequired)?;
-            self.issue_with_totp(account, code)
+            self.issue_password_session(&snapshot, password, Some(code))
                 .map_err(LoginError::Internal)?
         } else {
             None
@@ -242,10 +241,20 @@ impl AccountManager {
         Ok(session)
     }
 
-    fn issue_with_totp(&self, verified: &Account, code: &str) -> Result<Option<Session>> {
+    fn issue_password_session(
+        &self,
+        verified: &Snapshot,
+        password: &str,
+        code: Option<&str>,
+    ) -> Result<Option<Session>> {
+        let flags = verified.account.verified_password_flags(password);
+        if code.is_none() && flags == verified.account.password_flags() {
+            return verified.issue(SystemTime::now()).map(Some);
+        }
         let _writer = self.writer.lock().expect("account writer poisoned");
         let current = self.snapshot.load();
         let account = &current.account;
+        let verified = &verified.account;
         if account.username != verified.username
             || account.password_hash != verified.password_hash
             || account.totp_secret != verified.totp_secret
@@ -254,14 +263,24 @@ impl AccountManager {
             return Ok(None);
         }
         let now = SystemTime::now();
-        let timestamp = unix_seconds(now).context("system clock predates Unix epoch")?;
-        let Some(step) = current.unused_totp_step(code, timestamp) else {
-            return Ok(None);
+        let step = if let Some(code) = code {
+            let timestamp = unix_seconds(now).context("system clock predates Unix epoch")?;
+            let Some(step) = current.unused_totp_step(code, timestamp) else {
+                return Ok(None);
+            };
+            Some(step)
+        } else {
+            None
         };
         let session = current.issue(now)?;
-        let mut next = account.clone();
-        next.totp_last_step = Some(step);
-        self.save(next)?;
+        if step.is_some() || flags != account.password_flags() {
+            let mut next = account.clone();
+            (next.using_default_password, next.weak_password) = flags;
+            if let Some(step) = step {
+                next.totp_last_step = Some(step);
+            }
+            self.save(next)?;
+        }
         Ok(Some(session))
     }
 
@@ -350,13 +369,13 @@ impl AccountManager {
         let snapshot = self.snapshot.load();
         let now = unix_seconds(SystemTime::now())?;
         let verified = snapshot.verify(token, now)?;
-        let administrator = verified.role == Role::Admin;
+        let must_change_password =
+            verified.role == Role::Admin && snapshot.account.must_change_password();
         Some(Identity {
             username: verified.username.into(),
             role: verified.role,
-            initial_password: administrator && snapshot.account.using_default_password,
-            must_change_password: administrator
-                && (snapshot.account.using_default_password || snapshot.account.weak_password),
+            initial_password: must_change_password && snapshot.account.using_default_password,
+            must_change_password,
         })
     }
 
@@ -461,6 +480,27 @@ impl AccountManager {
 }
 
 impl Account {
+    pub(super) fn must_change_password(&self) -> bool {
+        !self.password_login_off && (self.using_default_password || self.weak_password)
+    }
+
+    fn password_flags(&self) -> (bool, bool) {
+        (self.using_default_password, self.weak_password)
+    }
+
+    pub(super) fn verified_password_flags(&self, password: &str) -> (bool, bool) {
+        if self.using_default_password {
+            self.password_flags()
+        } else if password == LEGACY_DEFAULT_PASSWORD {
+            (true, false)
+        } else {
+            (
+                false,
+                check_password_strength(&self.username, password).is_err(),
+            )
+        }
+    }
+
     pub(super) fn invalidate_sessions(&mut self) -> Result<()> {
         self.session_epoch = self
             .session_epoch
