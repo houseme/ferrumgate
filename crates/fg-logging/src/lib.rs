@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod filter;
 mod persist;
+mod query;
 mod queue;
 
 use std::{
@@ -13,7 +15,9 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use persist::Disk;
+pub use filter::Filter;
+use persist::{Disk, DiskView};
+pub use query::{Format, Page};
 use queue::{Queue, Worker};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -37,7 +41,7 @@ const MAX_SOURCES: usize = 1000;
 const MAX_JSON_LINE: usize = 16 << 10;
 const MAX_FILE_BYTES: u64 = 100 << 20;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Module {
     System,
     Web,
@@ -69,7 +73,7 @@ impl Module {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     Debug,
@@ -113,6 +117,16 @@ struct Buffer {
 }
 
 impl Buffer {
+    fn range(&self, after: u64, before: u64) -> impl DoubleEndedIterator<Item = &Arc<Entry>> {
+        let start = self.entries.partition_point(|entry| entry.seq <= after);
+        let end = if before == 0 {
+            self.entries.len()
+        } else {
+            self.entries.partition_point(|entry| entry.seq < before)
+        };
+        self.entries.range(start..end.max(start))
+    }
+
     fn add(&mut self, entry: Arc<Entry>, bytes: usize, limit: usize) {
         self.latest = entry.seq;
         if !entry.source.is_empty()
@@ -160,6 +174,7 @@ pub struct Logs {
     layer: LogLayer,
     echo: Worker<Vec<u8>>,
     disk: Option<Worker<Record>>,
+    disk_view: Option<Arc<DiskView>>,
 }
 
 impl Logs {
@@ -177,6 +192,7 @@ impl Logs {
             .directory
             .map(|dir| Disk::open(dir, options.file_bytes, options.lines, &mut buffers))
             .transpose()?;
+        let disk_view = disk.as_ref().map(|disk| disk.view.clone());
         let mut output = BufWriter::with_capacity(64 << 10, echo);
         let echo = Worker::<Vec<u8>>::spawn(
             "fg-log-echo",
@@ -188,7 +204,7 @@ impl Logs {
                     writeln!(output, "ferrumgate: dropped {lost} stderr log lines")?;
                 }
                 for line in batch {
-                    output.write_all(&line)?;
+                    output.write_all(line)?;
                 }
                 output.flush()
             },
@@ -227,7 +243,12 @@ impl Logs {
             lines: options.lines,
             disk: disk.as_ref().map(|worker| worker.queue.clone()),
         }));
-        Ok(Self { layer, echo, disk })
+        Ok(Self {
+            layer,
+            echo,
+            disk,
+            disk_view,
+        })
     }
 
     pub fn layer(&self) -> LogLayer {
@@ -243,10 +264,8 @@ impl Logs {
             .lock()
             .expect("log buffer poisoned");
         let mut entries: Vec<_> = buffer
-            .entries
-            .iter()
+            .range(after, before)
             .rev()
-            .filter(|entry| entry.seq > after && (before == 0 || entry.seq < before))
             .take(if limit == 0 { usize::MAX } else { limit })
             .cloned()
             .collect();
@@ -341,6 +360,11 @@ impl Capture {
                 | "kind"
                 | "domains"
                 | "status"
+                | "host"
+                | "ip"
+                | "listener"
+                | "deny"
+                | "admin"
                 | "http"
                 | "tls"
                 | "required_by"

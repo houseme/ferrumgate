@@ -14,12 +14,21 @@ pub(super) struct Queue<T> {
 
 struct Pending<T> {
     items: Vec<T>,
+    writing: Option<Arc<Vec<T>>>,
     bytes: usize,
     lost: u64,
     closed: bool,
 }
 
 impl<T> Queue<T> {
+    pub fn snapshot(&self, mut visit: impl FnMut(&T)) {
+        let state = self.state.lock().expect("log queue poisoned");
+        if let Some(writing) = &state.writing {
+            writing.iter().for_each(&mut visit);
+        }
+        state.items.iter().for_each(visit);
+    }
+
     pub fn push(&self, value: T, size: usize) {
         let mut state = self.state.lock().expect("log queue poisoned");
         if state.closed {
@@ -57,7 +66,7 @@ impl<T> Queue<T> {
         self.wake.notify_one();
     }
 
-    fn take(&self, delay: Duration) -> Option<(Vec<T>, u64)> {
+    fn take(&self, delay: Duration) -> Option<(Arc<Vec<T>>, u64)> {
         let state = self.state.lock().expect("log queue poisoned");
         let mut state = self
             .wake
@@ -76,10 +85,9 @@ impl<T> Queue<T> {
                 .0;
         }
         state.bytes = 0;
-        Some((
-            std::mem::take(&mut state.items),
-            std::mem::take(&mut state.lost),
-        ))
+        let batch = Arc::new(std::mem::take(&mut state.items));
+        state.writing = Some(batch.clone());
+        Some((batch, std::mem::take(&mut state.lost)))
     }
 }
 
@@ -88,17 +96,18 @@ pub(super) struct Worker<T> {
     done: mpsc::Receiver<io::Result<()>>,
 }
 
-impl<T: Send + 'static> Worker<T> {
+impl<T: Send + Sync + 'static> Worker<T> {
     pub fn spawn(
         name: &str,
         limit: usize,
         threshold: usize,
         delay: Duration,
-        mut process: impl FnMut(Vec<T>, u64) -> io::Result<()> + Send + 'static,
+        mut process: impl FnMut(&[T], u64) -> io::Result<()> + Send + 'static,
     ) -> io::Result<Self> {
         let queue = Arc::new(Queue {
             state: Mutex::new(Pending {
                 items: Vec::new(),
+                writing: None,
                 bytes: 0,
                 lost: 0,
                 closed: false,
@@ -114,14 +123,16 @@ impl<T: Send + 'static> Worker<T> {
             .spawn(move || {
                 let result = (|| {
                     while let Some((batch, lost)) = pending.take(delay) {
-                        process(batch, lost)?;
+                        process(&batch, lost)?;
+                        // This batch still owns the allocation until after unlocking.
+                        pending.state.lock().expect("log queue poisoned").writing = None;
                     }
                     Ok(())
                 })();
                 let abandoned = {
                     let mut state = pending.state.lock().expect("log queue poisoned");
                     state.closed = true;
-                    std::mem::take(&mut state.items)
+                    (std::mem::take(&mut state.items), state.writing.take())
                 };
                 drop(abandoned);
                 drop(process);
@@ -169,7 +180,7 @@ mod tests {
             4,
             Duration::from_secs(60),
             move |items, lost| {
-                send.send((items, lost)).unwrap();
+                send.send((items.to_vec(), lost)).unwrap();
                 Ok(())
             },
         )?;

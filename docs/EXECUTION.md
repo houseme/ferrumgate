@@ -636,6 +636,21 @@ git diff --check
 
 在 macOS arm64、Rust stable 1.100.0 上，110 项默认测试和 9 项本机 Pebble ACME 测试通过。新增用例覆盖内存保留与字段筛选、写盘合批和轮转、不完整行恢复、目录单实例持有、stderr 饱和隔离及日志文件权限。真实网关用例验证回环请求、SIGINT 刷新、重启续号和拒绝发布日志目录，主动健康检查日志顺序也单独复验通过。后续覆盖跨文件查询、导出与访问归档。Linux 和 Windows 留待实测。
 
+### WP-09 跨文件筛选与导出
+
+`fg-logging` 提供 `Logs::query` 和 `Logs::export`。正条数查询从内存、待写批次、当前文件和轮转文件中按序号补足。零条数参数只查内存。导出支持 JSON Lines 和 CSV，文件扫描与输出都在快照锁外完成。
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-logging
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+git diff --check
+```
+
+在 macOS arm64、Rust stable 1.100.0 上通过 115 项默认测试及 9 项本机 Pebble ACME 测试。新增 5 项测试覆盖关键词与 IP 条件组合、跨文件和损坏长行、待写记录在内存淘汰后可读、快照跨轮转及追加保持一致、CSV 公式防护与多行转义。访问日志压缩归档、清空、目录热切换和管理端授权继续按计划接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

@@ -1,21 +1,27 @@
 use std::{
     collections::BTreeSet,
     fs::{self, File, OpenOptions},
-    io::{self, BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{Context, Result, ensure};
 
-use super::{Buffer, Entry, MAX_FILE_BYTES, MAX_JSON_LINE, MAX_SOURCES, MODULES, Record};
+use super::{Buffer, MAX_JSON_LINE, MAX_SOURCES, MODULES, Record, query::scan_forward};
 
 pub(super) struct Disk {
-    dir: PathBuf,
+    pub view: Arc<DiskView>,
     limit: u64,
     streams: [Stream; MODULES.len()],
     _lock: File,
     encoded: Vec<u8>,
+}
+
+/// Coordinates file snapshots with rotation without involving publishers.
+pub(super) struct DiskView {
+    pub dir: PathBuf,
+    pub files: Mutex<()>,
 }
 
 #[derive(Default)]
@@ -44,7 +50,10 @@ impl Disk {
             .context("open runtime log lock")?;
         lock.try_lock().context("runtime log directory is in use")?;
         let mut disk = Self {
-            dir,
+            view: Arc::new(DiskView {
+                dir,
+                files: Mutex::new(()),
+            }),
             limit,
             _lock: lock,
             streams: std::array::from_fn(|_| Stream::default()),
@@ -54,15 +63,17 @@ impl Disk {
             let buffer = &mut buffers[module as usize];
             for suffix in ["log.1", "log"] {
                 restore(
-                    &disk.dir.join(format!("{}.{suffix}", module.stem())),
+                    &disk.view.dir.join(format!("{}.{suffix}", module.stem())),
                     lines,
                     buffer,
                 )
                 .with_context(|| format!("restore {} runtime log", module.stem()))?;
             }
-            if let Some(file) =
-                open_regular(&disk.dir.join(format!("{}.sources", module.stem())), false)?
-            {
+            if let Some(file) = open_regular(
+                &disk.view.dir.join(format!("{}.sources", module.stem())),
+                false,
+            )? {
+                private_file(&file)?;
                 let mut bytes = Vec::new();
                 file.take((MAX_SOURCES * 512 + 1) as u64)
                     .read_to_end(&mut bytes)?;
@@ -87,7 +98,11 @@ impl Disk {
         Ok(disk)
     }
 
-    pub fn write(&mut self, batch: Vec<Record>) -> io::Result<()> {
+    pub fn write(&mut self, batch: &[Record]) -> io::Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let _files = self.view.files.lock().expect("log file mutex poisoned");
         for Record(module, entry) in batch {
             self.encoded.clear();
             serde_json::to_writer(&mut self.encoded, entry.as_ref())?;
@@ -95,9 +110,11 @@ impl Disk {
             if self.encoded.len() > MAX_JSON_LINE || self.encoded.len() as u64 > self.limit {
                 continue;
             }
-            let stream = &mut self.streams[module as usize];
+            let stream = &mut self.streams[*module as usize];
             if stream.file.is_none() {
-                stream.file = Some(open_log(&self.dir.join(format!("{}.log", module.stem())))?);
+                stream.file = Some(open_log(
+                    &self.view.dir.join(format!("{}.log", module.stem())),
+                )?);
             }
             let record_len = self.encoded.len() as u64;
             let file = stream.file.as_mut().expect("log file opened");
@@ -109,8 +126,11 @@ impl Disk {
                 let mut previous = stream.file.take().expect("log file opened");
                 previous.writer.flush()?;
                 drop(previous);
-                let path = self.dir.join(format!("{}.log", module.stem()));
-                fs::rename(&path, self.dir.join(format!("{}.log.1", module.stem())))?;
+                let path = self.view.dir.join(format!("{}.log", module.stem()));
+                fs::rename(
+                    &path,
+                    self.view.dir.join(format!("{}.log.1", module.stem())),
+                )?;
                 stream.file = Some(open_log(&path)?);
             }
             let file = stream.file.as_mut().expect("log file opened");
@@ -137,13 +157,13 @@ impl Disk {
             if stream.changed_sources {
                 let mut temporary = tempfile::Builder::new()
                     .prefix(".log-sources.")
-                    .tempfile_in(&self.dir)
+                    .tempfile_in(&self.view.dir)
                     .map_err(|error| io::Error::from(error.kind()))?;
                 private_file(temporary.as_file())?;
                 serde_json::to_writer(temporary.as_file_mut(), &stream.sources)?;
                 temporary
                     .into_temp_path()
-                    .persist(self.dir.join(format!("{}.sources", module.stem())))
+                    .persist(self.view.dir.join(format!("{}.sources", module.stem())))
                     .map_err(|err| err.error)?;
                 stream.changed_sources = false;
             }
@@ -156,38 +176,15 @@ fn restore(path: &Path, lines: usize, buffer: &mut Buffer) -> io::Result<()> {
     let Some(file) = open_regular(path, false)? else {
         return Ok(());
     };
+    private_file(&file)?;
     let size = file.metadata()?.len();
-    let start = size.saturating_sub(MAX_FILE_BYTES);
-    let mut reader = BufReader::new(file);
-    if start != 0 {
-        reader.seek(SeekFrom::Start(start))?;
-        reader.skip_until(b'\n')?;
-    }
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        let read = reader
-            .by_ref()
-            .take((MAX_JSON_LINE + 1) as u64)
-            .read_until(b'\n', &mut line)?;
-        if read == 0 {
-            break;
-        }
-        if read > MAX_JSON_LINE {
-            if line.last() != Some(&b'\n') {
-                reader.skip_until(b'\n')?;
-            }
-            continue;
-        }
-        if let Ok(entry) = serde_json::from_slice::<Entry>(&line)
-            && entry.seq > buffer.latest
-            && entry.seq < u64::MAX
-            && entry.source.len() <= 256
-        {
+    scan_forward(file, size, |entry| {
+        if entry.seq > buffer.latest {
             let bytes = entry.bytes();
             buffer.add(Arc::new(entry), bytes, lines);
         }
-    }
+        Ok(true)
+    })?;
     Ok(())
 }
 
@@ -206,7 +203,7 @@ fn open_log(path: &Path) -> io::Result<OpenLog> {
     })
 }
 
-fn open_regular(path: &Path, append: bool) -> io::Result<Option<File>> {
+pub(super) fn open_regular(path: &Path, append: bool) -> io::Result<Option<File>> {
     match fs::symlink_metadata(path) {
         Ok(meta) if !meta.is_file() => {
             return Err(io::Error::new(
@@ -238,7 +235,9 @@ fn open_regular(path: &Path, append: bool) -> io::Result<Option<File>> {
             "expected a regular log file",
         ));
     }
-    private_file(&file)?;
+    if append {
+        private_file(&file)?;
+    }
     Ok(Some(file))
 }
 

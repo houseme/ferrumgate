@@ -548,6 +548,7 @@ name = "fg-logging"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ipnet",
  "libc",
  "serde",
  "serde_json",
