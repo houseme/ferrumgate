@@ -8,6 +8,7 @@ mod localize;
 mod login;
 mod logs;
 mod models;
+mod oauth_routes;
 mod passkey_routes;
 mod readonly_routes;
 mod redact;

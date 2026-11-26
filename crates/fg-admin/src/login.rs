@@ -49,6 +49,15 @@ impl SessionCookies {
         session: Session,
         username: String,
     ) -> Result<Response, ApiError> {
+        let (cookie, expires) = self.issue(session)?;
+        Ok((
+            [(header::SET_COOKIE, cookie)],
+            Json(LoginSuccess { username, expires }),
+        )
+            .into_response())
+    }
+
+    pub(super) fn issue(&self, session: Session) -> Result<(HeaderValue, String), ApiError> {
         let timestamp = session
             .expires_at
             .duration_since(UNIX_EPOCH)
@@ -68,11 +77,7 @@ impl SessionCookies {
             session.token, self.attributes
         ))
         .map_err(|_| ApiError::internal())?;
-        Ok((
-            [(header::SET_COOKIE, cookie)],
-            Json(LoginSuccess { username, expires }),
-        )
-            .into_response())
+        Ok((cookie, expires))
     }
 
     pub(super) fn clear(&self) -> Response {
@@ -97,11 +102,15 @@ pub(super) fn session_token(headers: &HeaderMap) -> Option<&str> {
             .then_some(token.trim())
             .filter(|token| !token.is_empty());
     }
+    cookie(headers, COOKIE_NAME)
+}
+
+pub(super) fn cookie<'a>(headers: &'a HeaderMap, cookie_name: &str) -> Option<&'a str> {
     let mut token = None;
     for field in headers.get_all(header::COOKIE) {
         for cookie in field.to_str().ok()?.split(';') {
             if let Some((name, value)) = cookie.trim().split_once('=')
-                && name == COOKIE_NAME
+                && name == cookie_name
                 && token.replace(value).is_some()
             {
                 return None;

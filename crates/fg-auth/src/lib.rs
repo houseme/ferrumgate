@@ -6,6 +6,7 @@ pub mod passkey;
 mod password;
 mod readonly;
 mod session;
+pub mod third_login;
 mod totp;
 
 pub use account::{AccountManager, CredentialChangeRejected};

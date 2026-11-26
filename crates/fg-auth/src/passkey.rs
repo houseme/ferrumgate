@@ -339,9 +339,15 @@ impl Passkeys {
         let result = self.verify_login(address, challenge, proof);
         match result {
             Ok(session) => {
-                attempt.complete(session.is_some());
+                let mut completion = attempt.complete(session.is_some());
+                if session.is_some() {
+                    (completion.save_known, completion.new_source) =
+                        self.accounts.limiter.remember_success(address);
+                }
+                self.accounts
+                    .report_login(address, session.is_some(), &completion);
                 let session = session.ok_or(LoginError::InvalidCredentials)?;
-                if self.accounts.limiter.remember_success(address) {
+                if completion.save_known {
                     self.accounts.save_login_sources();
                 }
                 Ok(session)

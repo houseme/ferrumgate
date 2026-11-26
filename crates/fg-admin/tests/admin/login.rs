@@ -24,6 +24,151 @@ fn credentials(username: &str, password: &str) -> String {
 }
 
 #[tokio::test]
+async fn login_oidc_uses_single_use_browser_state_pkce_and_signed_allowed_subject() -> Result<()> {
+    use data_encoding::BASE64URL_NOPAD;
+    use fg_auth::{passkey::Url, third_login::ThirdLogin};
+    use ring::{
+        digest,
+        rand::SystemRandom,
+        signature::{Ed25519KeyPair, KeyPair},
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let issuer = format!("http://{}", listener.local_addr()?);
+    let material = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())
+        .map_err(|_| anyhow::anyhow!("generate fixture signing key"))?;
+    let key = Arc::new(
+        Ed25519KeyPair::from_pkcs8(material.as_ref())
+            .map_err(|_| anyhow::anyhow!("parse fixture signing key"))?,
+    );
+    let details = issuer.clone();
+    let jwk = BASE64URL_NOPAD.encode(key.public_key().as_ref());
+    let flow = Arc::new(Mutex::new((String::new(), String::new())));
+    let expected = flow.clone();
+    let endpoint = issuer.clone();
+    let provider = Router::new()
+        .route("/.well-known/openid-configuration", axum::routing::get(move || async move {
+            Json(json!({"issuer":details,"authorization_endpoint":format!("{details}/authorize"),
+                "token_endpoint":format!("{details}/token"),"jwks_uri":format!("{details}/keys"),
+                "token_endpoint_auth_methods_supported":["client_secret_post"]}))
+        }))
+        .route("/keys", axum::routing::get(move || async move {
+            Json(json!({"keys":[{"kty":"OKP","crv":"Ed25519","kid":"fixture","alg":"EdDSA","use":"sig","x":jwk}]}))
+        }))
+        .route("/token", axum::routing::post(move |body: Bytes| async move {
+            let form: std::collections::HashMap<_, _> = url::form_urlencoded::parse(&body).collect();
+            let (challenge, nonce) = expected.lock().unwrap().clone();
+            let verifier = form.get("code_verifier").unwrap();
+            assert_eq!(BASE64URL_NOPAD.encode(digest::digest(&digest::SHA256, verifier.as_bytes()).as_ref()), challenge);
+            assert_eq!(form.get("redirect_uri").unwrap(), "https://admin.test/panel/api/login/oauth/callback");
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let sub = if form.get("code").unwrap() == "allowed" { "approved-subject" } else { "unlisted-subject" };
+            let claims = json!({"iss":endpoint,"aud":"fixture-client","sub":sub,"iat":now,"exp":now+60,"nonce":nonce});
+            let mut jwt = format!("{}.{}", BASE64URL_NOPAD.encode(br#"{"alg":"EdDSA","kid":"fixture"}"#), BASE64URL_NOPAD.encode(&serde_json::to_vec(&claims).unwrap()));
+            let signature = key.sign(jwt.as_bytes());
+            jwt.push('.');
+            jwt.push_str(&BASE64URL_NOPAD.encode(signature.as_ref()));
+            Json(json!({"id_token":jwt}))
+        }));
+    let provider_task = tokio::spawn(async move {
+        axum::serve(listener, provider).await.unwrap();
+    });
+    let dir = tempfile::tempdir()?;
+    let store = ConfigStore::open(dir.path())?;
+    store.save(
+        "account",
+        &json!({"username":"operator","passwordHash":bcrypt::hash("fixture-password",4)?,
+        "sessionSecret":"fixture-session-secret-for-tests-only"}),
+    )?;
+    let (accounts, _) = AccountManager::open(store, None)?;
+    let accounts = Arc::new(accounts);
+    let config = serde_json::from_value(json!({
+        "providers":[{"key":"fixture","name":"Fixture","type":"oidc","issuer":issuer,
+            "clientId":"fixture-client","clientSecret":"fixture-confidential-client"}],
+        "allowed":["fixture:approved-subject"],
+    }))?;
+    let service = Arc::new(
+        ThirdLogin::new(
+            accounts.clone(),
+            Url::parse("https://admin.test/panel/")?,
+            config,
+        )
+        .await?,
+    );
+    let server = Server::start(
+        ApiRouter::default()
+            .with_accounts(accounts, "/panel", true)?
+            .with_third_login(service)?
+            .finish()
+            .router,
+    )
+    .await?;
+    for (code, expected) in [
+        ("unlisted", StatusCode::UNAUTHORIZED),
+        ("allowed", StatusCode::SEE_OTHER),
+    ] {
+        let (status, headers, _) = server
+            .call_raw(
+                "GET",
+                "/api/login/oauth/start?p=fixture",
+                &[],
+                Body::empty(),
+            )
+            .await?;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        let browser = cookie_pair(cookie_header(&headers)?);
+        assert!(cookie_header(&headers)?.contains("SameSite=Lax; Secure"));
+        let target = Url::parse(headers["location"].to_str()?)?;
+        let query: std::collections::HashMap<_, _> = target.query_pairs().into_owned().collect();
+        assert_eq!(query["code_challenge_method"], "S256");
+        *flow.lock().unwrap() = (query["code_challenge"].clone(), query["nonce"].clone());
+        let callback = format!(
+            "/api/login/oauth/callback?state={}&code={code}",
+            query["state"]
+        );
+        assert_eq!(
+            server
+                .call_raw(
+                    "GET",
+                    &callback,
+                    &[("cookie", "gately_login_nonce=wrong")],
+                    Body::empty()
+                )
+                .await?
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, headers, _) = server
+            .call_raw("GET", &callback, &[("cookie", browser)], Body::empty())
+            .await?;
+        assert_eq!(status, expected);
+        if status == StatusCode::SEE_OTHER {
+            assert_eq!(headers["location"], "/panel/");
+            let auth = [("cookie", cookie_pair(cookie_header(&headers)?))];
+            assert_eq!(
+                server
+                    .call("GET", "/api/session", &auth, Body::empty())
+                    .await?
+                    .2["username"],
+                "operator"
+            );
+        } else {
+            assert!(headers.get("set-cookie").is_none());
+        }
+        assert_eq!(
+            server
+                .call_raw("GET", &callback, &[("cookie", browser)], Body::empty())
+                .await?
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    provider_task.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn login_legacy_weak_password_preserves_recovery_and_token_boundaries() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let store = ConfigStore::open(dir.path())?;

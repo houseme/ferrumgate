@@ -275,12 +275,37 @@ async fn lockout_notifies_once_and_remembers_successful_subnets_after_restart() 
         ));
     }
     assert!(manager.login_from(renewed, "operator", PASSWORD).is_ok());
+    manager.configure_login_limits(LoginLimits {
+        unknown_failures: None,
+        ..LoginLimits::default()
+    })?;
+    assert!(
+        manager
+            .login_from("203.0.113.9".parse()?, "operator", PASSWORD)
+            .is_ok()
+    );
     bus.publish(Event::new(Kind::NotifyTest, "fixture"));
+    for _ in 0..2 {
+        let failed = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await?
+            .context("failed event")?;
+        assert_eq!(failed.kind, Kind::AuthFailed);
+    }
     let flood = tokio::time::timeout(Duration::from_secs(1), events.recv())
         .await?
         .context("flood event")?;
     assert_eq!(flood.kind, Kind::AuthFlood);
     assert_eq!(flood.args, [("failures", "2".into())]);
+    for kind in [
+        Kind::LoginSuccessful,
+        Kind::LoginSuccessful,
+        Kind::LoginNewIp,
+    ] {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await?
+            .context("login event")?;
+        assert_eq!(event.kind, kind);
+    }
     let next = tokio::time::timeout(Duration::from_secs(1), events.recv())
         .await?
         .context("marker event")?;

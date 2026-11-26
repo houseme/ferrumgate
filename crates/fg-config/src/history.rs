@@ -21,6 +21,7 @@ use crate::{
 pub const DEFAULT_HISTORY_KEEP: usize = 30;
 const SKIP: &[&str] = &[
     "account",
+    "third-login",
     "tokens",
     "migrations",
     "update-check",

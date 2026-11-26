@@ -15,7 +15,7 @@ use fg_core::events::{Event, EventBus, Kind};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    lockout::{KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
+    lockout::{Completion, KNOWN_FILE, LoginError, LoginLimiter, LoginLimits},
     passkey::StoredPasskey,
     password::{self, MAX_PASSWORD_BYTES, check_password_strength},
     readonly::ReadonlyUser,
@@ -205,9 +205,11 @@ impl AccountManager {
         let verified = password::verify(password, hash).map_err(LoginError::Internal)?;
         if verified && readonly.is_some() {
             // A viewer login leaves the shared failure counters and known-source state intact.
-            return snapshot
+            let session = snapshot
                 .issue_readonly(SystemTime::now(), username)
-                .map_err(LoginError::Internal);
+                .map_err(LoginError::Internal)?;
+            self.report_login(address, true, &Completion::default());
+            return Ok(session);
         }
         let accepted = verified && account.username == username && !account.password_login_off;
         let session = if !accepted {
@@ -225,15 +227,7 @@ impl AccountManager {
             None
         };
         let completion = attempt.complete(session.is_some());
-        if let Some(failures) = completion.flood
-            && let Some(events) = &self.login_events
-        {
-            events.publish_with(|| {
-                let mut event = Event::new(Kind::AuthFlood, "auth");
-                event.args.push(("failures", failures.to_string()));
-                event
-            });
-        }
+        self.report_login(address, session.is_some(), &completion);
         let session = session.ok_or(LoginError::InvalidCredentials)?;
         if completion.save_known {
             self.save_login_sources();
@@ -362,6 +356,34 @@ impl AccountManager {
             if self.store.save(KNOWN_FILE, &sources).is_err() {
                 self.limiter.retry_known_save();
             }
+        }
+    }
+
+    pub(super) fn report_login(&self, address: IpAddr, accepted: bool, completion: &Completion) {
+        let Some(events) = &self.login_events else {
+            return;
+        };
+        for (publish, kind) in [
+            (accepted, Kind::LoginSuccessful),
+            (completion.new_source, Kind::LoginNewIp),
+            (completion.auth_failed, Kind::AuthFailed),
+        ] {
+            if publish {
+                events.publish_with(|| {
+                    let mut event = Event::new(kind, "auth");
+                    event
+                        .fields
+                        .push(("ip", address.to_canonical().to_string()));
+                    event
+                });
+            }
+        }
+        if let Some(failures) = completion.flood {
+            events.publish_with(|| {
+                let mut event = Event::new(Kind::AuthFlood, "auth");
+                event.args.push(("failures", failures.to_string()));
+                event
+            });
         }
     }
 

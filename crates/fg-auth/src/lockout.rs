@@ -80,10 +80,10 @@ impl LoginLimiter {
         Self(Mutex::new(state))
     }
 
-    pub fn remember_success(&self, address: IpAddr) -> bool {
+    pub fn remember_success(&self, address: IpAddr) -> (bool, bool) {
         let mut state = self.state();
-        state.remember(source_key(address), Instant::now());
-        state.known_dirty
+        let new_source = state.remember(source_key(address), Instant::now());
+        (state.known_dirty, new_source)
     }
 
     pub fn load(store: &ConfigStore) -> Result<Self> {
@@ -172,6 +172,8 @@ impl Drop for Attempt<'_> {
 pub(super) struct Completion {
     pub save_known: bool,
     pub flood: Option<u32>,
+    pub new_source: bool,
+    pub auth_failed: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -194,6 +196,7 @@ struct Source {
     failed: u32,
     locked_until: Instant,
     strike: Option<(Instant, u32)>,
+    last_failed_event: Option<Instant>,
 }
 
 impl Source {
@@ -290,6 +293,7 @@ impl State {
                 failed: 0,
                 locked_until: now,
                 strike: None,
+                last_failed_event: None,
             }),
             Entry::Vacant(_) => return Err(LoginError::Busy),
         };
@@ -345,11 +349,18 @@ impl State {
                 source.started = now;
                 source.failed = 0;
                 if self.track_known {
-                    self.remember(key, now);
+                    completion.new_source = self.remember(key, now);
                     completion.save_known = self.known_dirty;
                 }
             }
             Some(false) if now >= source.locked_until => {
+                if source
+                    .last_failed_event
+                    .is_none_or(|last| now.duration_since(last) >= SWEEP_INTERVAL)
+                {
+                    source.last_failed_event = Some(now);
+                    completion.auth_failed = true;
+                }
                 source.failed += 1;
                 if source.failed >= self.limits.max_failures {
                     source.lock(now, self.limits.lock_duration);
@@ -360,13 +371,14 @@ impl State {
         completion
     }
 
-    fn remember(&mut self, key: IpAddr, now: Instant) {
+    fn remember(&mut self, key: IpAddr, now: Instant) -> bool {
         let utc = OffsetDateTime::now_utc();
         if let Some(entry) = self.known.get_mut(&key) {
             entry.last = utc;
             self.known_dirty |= now.duration_since(self.last_known_save) >= KNOWN_SAVE_INTERVAL;
-            return;
+            return false;
         }
+        let new_source = !self.known.is_empty();
         if self.known.len() >= MAX_KNOWN
             && let Some(oldest) = self
                 .known
@@ -389,6 +401,7 @@ impl State {
             },
         );
         self.known_dirty = true;
+        new_source
     }
 
     fn sweep(&mut self, now: Instant) {
