@@ -16,6 +16,7 @@ getrandom = "0.4"
 http-body = "1"
 http-body-util = "0.1"
 percent-encoding = "2"
+schemars = "1"
 serde.workspace = true
 serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tempfile.workspace = true

@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
 use crate::{
-    AdminAssets, ApiError, Localizer, Translation,
+    AdminAssets, ApiError, Localizer, RouteModels, Translation,
     http::{Presentation, RenderPolicy, boundary},
     response::MAX_TRANSFORMS,
     scope::{Access, module_of, required},
@@ -46,6 +46,7 @@ struct Operation {
     summary: &'static str,
     access: Arc<Access<'static>>,
     mode: RouteMode,
+    models: RouteModels,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -124,7 +125,32 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        self.register(method, path.into(), summary, RouteMode::default(), handler)
+        self.modeled_route(method, path, summary, RouteModels::default(), handler)
+    }
+
+    pub fn modeled_route<H, T>(
+        self,
+        method: Method,
+        path: impl Into<String>,
+        summary: &'static str,
+        models: RouteModels,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        self.register(
+            method,
+            path.into(),
+            summary,
+            RouteMode {
+                stream: models.stream,
+                ..RouteMode::default()
+            },
+            models,
+            handler,
+        )
     }
 
     pub fn translated_route<H, T>(
@@ -153,6 +179,7 @@ impl ApiRouter {
                 translation,
                 ..RouteMode::default()
             },
+            RouteModels::default(),
             handler,
         )
     }
@@ -177,6 +204,7 @@ impl ApiRouter {
                 stream: Some(policy),
                 ..RouteMode::default()
             },
+            RouteModels::default(),
             handler,
         )
     }
@@ -206,6 +234,7 @@ impl ApiRouter {
                 upload_limit: Some(limit),
                 ..RouteMode::default()
             },
+            RouteModels::default(),
             handler,
         )
     }
@@ -216,6 +245,7 @@ impl ApiRouter {
         path: String,
         summary: &'static str,
         mode: RouteMode,
+        models: RouteModels,
         handler: H,
     ) -> Self
     where
@@ -239,6 +269,7 @@ impl ApiRouter {
             path,
             summary,
             mode,
+            models,
         };
         assert_ne!(
             *operation.access,
@@ -281,6 +312,7 @@ impl ApiRouter {
             summary: "Get the management API schema",
             access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
             mode: RouteMode::default(),
+            models: RouteModels::default(),
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
@@ -449,12 +481,13 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
             Access::All(scopes) => domains.extend(scopes.iter().map(|scope| scope.domain.as_ref())),
             Access::Any | Access::SessionOnly | Access::Public => {}
         }
-        let parameters: Vec<_> = route
+        let mut parameters: Vec<_> = route
             .path
             .split('/')
             .filter_map(|piece| piece.strip_prefix('{')?.strip_suffix('}'))
             .map(|name| json!({"name":name,"in":"path","required":true,"schema":{"type":"string"}}))
             .collect();
+        parameters.extend(route.models.parameters.iter().cloned());
         let token = !matches!(*route.access, Access::SessionOnly | Access::Public);
         let security = if token {
             json!([{"bearerAuth":[]}, {"sessionCookie":[]}])
@@ -468,6 +501,12 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
         });
         if let Some(limit) = route.mode.upload_limit {
             definition["x-upload-max-bytes"] = json!(limit);
+        }
+        if let Some(request) = &route.models.request {
+            definition["requestBody"] = request.clone();
+        }
+        if let Some(response) = &route.models.response {
+            definition["responses"]["200"]["content"] = response.clone();
         }
         paths.entry(route.path.clone()).or_insert_with(|| json!({}))
             [route.method.as_str().to_ascii_lowercase()] = definition;
