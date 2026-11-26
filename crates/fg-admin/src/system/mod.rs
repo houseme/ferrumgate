@@ -10,7 +10,7 @@ pub mod selfcheck;
 mod status;
 pub mod storage;
 
-use std::{path::PathBuf, sync::Arc, time::SystemTime};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::SystemTime};
 
 use crate::ApiRouter;
 use fg_core::{registry::CATALOG, settings::Settings, sysstat::Procfs};
@@ -29,6 +29,16 @@ pub struct SystemRoutes {
     pub probe_head: probe::HeadLookup,
     /// Configuration storage for onboarding state.
     pub onboarding_store: Arc<fg_config::ConfigStore>,
+    /// The batch-apply hold shared with the modules.
+    pub hold: Arc<fg_core::apply_hold::ApplyHold>,
+    /// The management listener this process started with.
+    pub admin_listen: SocketAddr,
+    /// L4 hop registrations for access-path tracing.
+    pub hops: Arc<fg_core::access_path::HopRegistry>,
+    /// Signing key for Web-service path headers.
+    pub signing_key: Arc<Vec<u8>>,
+    /// Accounts behind the confirmation session checks.
+    pub accounts: Arc<fg_auth::AccountManager>,
 }
 
 /// The immutable snapshot behind the status and info responses.
@@ -58,6 +68,21 @@ impl SystemRoutes {
         let router = storage::mount(router);
         let router = onboarding::mount(router, onboarding_store.clone());
         let router = metrics::mount(router, self.started_at);
+        let router = crate::changeset::mount(
+            router,
+            Arc::new(crate::changeset::ChangesetState {
+                hold: self.hold,
+                store: onboarding_store.clone(),
+                confirm: crate::confirm::ConfirmState {
+                    store: onboarding_store.clone(),
+                    accounts: self.accounts,
+                },
+                admin_listen: self.admin_listen,
+                settings: source.settings.clone(),
+                hops: self.hops,
+                signing_key: self.signing_key,
+            }),
+        );
         public_ip.mount(info::mount(status::mount(router, &source), &source))
     }
 }

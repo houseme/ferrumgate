@@ -1,0 +1,11 @@
+#![forbid(unsafe_code)]
+
+//! Networking primitives shared by the admin crate and future modules:
+//! client-address resolution behind trusted proxies and the registry of
+//! vouched (trusted) sources.
+
+pub mod client_addr;
+pub mod trust_src;
+
+pub use client_addr::{ClientAddr, ProxyTrust};
+pub use trust_src::{TrustedSource, is_trusted};

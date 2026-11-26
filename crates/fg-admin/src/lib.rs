@@ -2,6 +2,7 @@
 
 mod assets;
 mod audit;
+mod changeset;
 mod collection;
 pub mod confirm;
 pub mod demo;

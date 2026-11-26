@@ -1079,6 +1079,7 @@ dependencies = [
  "fg-i18n",
  "fg-logging",
  "futures-util",
+ "getrandom 0.4.3",
  "h2",
  "hickory-proto",
  "http-body-util",
@@ -1271,6 +1272,14 @@ dependencies = [
  "time",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "fg-net"
+version = "0.1.0"
+dependencies = [
+ "ipnet",
+ "serde",
 ]
 
 [[package]]

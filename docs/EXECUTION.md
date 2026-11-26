@@ -1205,6 +1205,21 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 311 项工作区测试和 9 项本机 Pebble ACME 测试。状态文件字段名与上游一致且零值省略（waitRestart/rollback/hold 不出现），begin 合并进行中的登记保留第一次保存前内容并重设截止；recover 覆盖三种回滚结论——rollback 标记、截止已过、启动满 3 次——均恢复归档内容并删除状态，未到期时以 45 秒宽限为下限继续等待并计一次启动；部分恢复失败时启动拒绝继续且状态保留供重试；wait_restart 在下一次启动开始计时；discard 清除状态后确认返回 none；手动回滚要求存在待确认状态并记录错误。管理接口挂载三个仅限会话的端点，WebSocket 确认在新建连接上任何消息生效、整个交换限时 10 秒。端到端用例构造已过期的待确认状态并启动真实 fgate serve：配置在监听就绪前恢复为保存前内容、状态文件消失、实例以 SIGINT 干净退出。保存登记的中间件与 X-Gately-Confirm 请求头链随 WP-05 的批量修改一起接入运行实例；手动演练步骤：改坏端口转发目标 → 界面倒计时 → 新连接确认或 POST /api/system/confirm/rollback → 观察重启后配置恢复。
 
+### WP-05 批量修改与访问路径识别
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-core --lib apply_hold
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-core --lib access_path
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test system
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 325 项工作区测试和 9 项本机 Pebble ACME 测试。ApplyHold 用例覆盖暂缓队列语义：begin 返回上一批遗留项并可并入本批；defer_action 同模块同键只保留最后一个动作且保持原位；release 按登记顺序执行且不持有队列锁、动作可重入；drop_all 丢弃并结束暂缓；apply 之后暂缓保持到确认或放弃。访问路径用例覆盖 HMAC-SHA256 签名路径头与常量时间比较、8 跳上限、无登记时回退本机端点跳、missing 标记已删规则。九种风险各一正一反：编辑忽略名称/分组/备注等纯显示字段且仅对带键规则生效；删除/停用命中路径上的规则；模块关闭在路径穿越该模块时报告；站点迁移对比已存监听；管理监听变更、仅内网与强制 HTTPS 依赖访客来源；改用的监听地址做本机绑定测试并附系统原因。六个仅限会话的端点经 SystemRoutes 挂载：changeset begin/check/apply/discard 与 access-path 视图、access-path/check。模块的 defer_action 接入与 L4/Web 服务的跳登记随 portforward、protoroute、webservice 工作包落地；演示模式下批量修改同样受守卫限制。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。

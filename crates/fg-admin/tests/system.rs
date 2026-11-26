@@ -9,6 +9,18 @@ use fg_admin::{
 use fg_core::{registry::Registry, settings::Settings};
 
 fn router() -> Admin {
+    // AccountManager holds an exclusive .account.lock for its whole
+    // lifetime, and tests using this helper run in parallel: give each
+    // call its own account directory.
+    static ROUTER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let accounts_dir = std::env::temp_dir().join(format!(
+        "fg-admin-system-test-{}-{}",
+        std::process::id(),
+        ROUTER_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let (accounts, _) =
+        fg_auth::AccountManager::open(fg_config::ConfigStore::open(&accounts_dir).unwrap(), None)
+            .unwrap();
     let registry = Registry::new(&["webservice", "ssl", "portforward"]);
     let enabled = registry.resolve_enabled(&["portforward".to_owned()], false);
     SystemRoutes {
@@ -34,6 +46,11 @@ fn router() -> Admin {
             let dir = tempfile::tempdir().unwrap();
             fg_config::ConfigStore::open(dir.path()).unwrap()
         },
+        hold: std::sync::Arc::new(fg_core::apply_hold::ApplyHold::new()),
+        admin_listen: "127.0.0.1:16680".parse().unwrap(),
+        hops: std::sync::Arc::new(fg_core::access_path::HopRegistry::default()),
+        signing_key: std::sync::Arc::new(vec![0u8; 32]),
+        accounts: Arc::new(accounts),
     }
     .register(ApiRouter::new(|_| {
         Some(Principal::Session { read_only: false })
@@ -217,6 +234,7 @@ async fn onboarding_scenes_done_and_dismiss_follow_the_validation_rules() -> Res
     let store = fg_config::ConfigStore::open(dir.path())?;
     let registry = Registry::new(&["webservice"]);
     let enabled = registry.resolve_enabled(&[], false);
+    let (accounts, _) = fg_auth::AccountManager::open(store.clone(), None)?;
     let admin = SystemRoutes {
         config_dir: dir.path().to_owned(),
         modules: Arc::new((registry, enabled)),
@@ -225,6 +243,11 @@ async fn onboarding_scenes_done_and_dismiss_follow_the_validation_rules() -> Res
         public_ip: unreachable_lookup(),
         probe_head: unreachable_head(),
         onboarding_store: store.clone(),
+        hold: std::sync::Arc::new(fg_core::apply_hold::ApplyHold::new()),
+        admin_listen: "127.0.0.1:16680".parse().unwrap(),
+        hops: std::sync::Arc::new(fg_core::access_path::HopRegistry::default()),
+        signing_key: std::sync::Arc::new(vec![0u8; 32]),
+        accounts: Arc::new(accounts),
     }
     .register(ApiRouter::new(|_| {
         Some(Principal::Session { read_only: false })
@@ -327,4 +350,42 @@ async fn post_json(
     };
     server.abort();
     Ok((status, value))
+}
+
+#[tokio::test]
+async fn changeset_endpoints_hold_and_release_with_session_only_access() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let store = fg_config::ConfigStore::open(dir.path())?;
+    let registry = Registry::new(&["webservice"]);
+    let enabled = registry.resolve_enabled(&[], false);
+    let (accounts, _) = fg_auth::AccountManager::open(store.clone(), None)?;
+    let admin = SystemRoutes {
+        config_dir: dir.path().to_owned(),
+        modules: Arc::new((registry, enabled)),
+        started_at: std::time::SystemTime::now(),
+        settings: Arc::new(Settings::default()),
+        public_ip: unreachable_lookup(),
+        probe_head: unreachable_head(),
+        onboarding_store: store.clone(),
+        hold: std::sync::Arc::new(fg_core::apply_hold::ApplyHold::new()),
+        admin_listen: "127.0.0.1:16680".parse().unwrap(),
+        hops: std::sync::Arc::new(fg_core::access_path::HopRegistry::default()),
+        signing_key: std::sync::Arc::new(vec![0u8; 32]),
+        accounts: Arc::new(accounts),
+    }
+    .register(ApiRouter::new(|_| {
+        Some(Principal::Session { read_only: false })
+    }))
+    .finish();
+    // The changeset endpoints are session-only; this test pins their
+    // scoping via the OpenAPI document.
+    assert_eq!(
+        admin.document()["paths"]["/api/system/changeset/begin"]["post"]["x-required-scope"],
+        "!denied"
+    );
+    assert_eq!(
+        admin.document()["paths"]["/api/system/access-path/check"]["post"]["x-required-scope"],
+        "!denied"
+    );
+    Ok(())
 }

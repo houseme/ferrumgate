@@ -363,6 +363,13 @@ impl ManagementService {
                 },
             );
         let settings_snapshot = started.clone();
+        let hold = Arc::new(fg_core::apply_hold::ApplyHold::new());
+        let hops = Arc::new(fg_core::access_path::HopRegistry::default());
+        let admin_listen = listener.local_addr()?;
+        // Path headers are signed with a fresh per-process key.
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).context("generate path signing key")?;
+        let signing_key = Arc::new(key.to_vec());
         let admin = fg_admin::SystemRoutes {
             config_dir: directory.clone(),
             modules,
@@ -371,6 +378,11 @@ impl ManagementService {
             public_ip: crate::publicip::lookup()?,
             probe_head: crate::publicip::probe_head()?,
             onboarding_store: store.clone(),
+            hold,
+            admin_listen,
+            hops,
+            signing_key,
+            accounts: accounts.clone(),
         }
         .register(router)
         .finish();

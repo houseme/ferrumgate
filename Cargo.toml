@@ -106,6 +106,7 @@ fg-core.workspace = true
 fg-gateway.workspace = true
 fg-i18n.workspace = true
 fg-logging.workspace = true
+getrandom.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
