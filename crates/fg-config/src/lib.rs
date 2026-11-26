@@ -10,6 +10,12 @@ use std::{
 use anyhow::{Context, Result, anyhow, ensure};
 use fg_core::fsperm;
 use serde::{Serialize, de::DeserializeOwned};
+use tempfile::TempPath;
+
+mod history;
+
+use history::History;
+pub use history::{DEFAULT_HISTORY_KEEP, Version, VersionId};
 
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 
@@ -27,7 +33,7 @@ pub struct Saved {
 /// A synchronous store shared by the modules using one configuration directory.
 pub struct ConfigStore {
     dir: PathBuf,
-    lock: Mutex<()>,
+    lock: Mutex<History>,
 }
 
 impl ConfigStore {
@@ -40,7 +46,7 @@ impl ConfigStore {
         fsperm::protect(&dir);
         Ok(Arc::new(Self {
             dir,
-            lock: Mutex::new(()),
+            lock: Mutex::new(History::default()),
         }))
     }
 
@@ -71,24 +77,9 @@ impl ConfigStore {
     pub fn load_raw(&self, name: &str) -> Result<Option<Vec<u8>>> {
         let path = self.path(name)?;
         let _lock = self.lock.lock().expect("config store lock poisoned");
-        let Some(file) =
-            open_config(&path).with_context(|| format!("open configuration {name}"))?
-        else {
-            return Ok(None);
-        };
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("stat configuration {name}"))?;
-        ensure!(
-            metadata.len() <= MAX_BYTES as u64,
-            "configuration {name} exceeds 64 MiB"
-        );
-        let mut bytes = Vec::new();
-        file.take(MAX_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read configuration {name}"))?;
-        check_size(name, bytes.len())?;
-        Ok(Some(bytes))
+        open_config(&path)
+            .and_then(|file| file.map(|file| read_limited(file, MAX_BYTES)).transpose())
+            .with_context(|| format!("read configuration {name} (limit 64 MiB)"))
     }
 
     pub fn save<T: Serialize>(&self, name: &str, value: &T) -> Result<Saved> {
@@ -102,30 +93,63 @@ impl ConfigStore {
     pub fn write_raw(&self, name: &str, bytes: &[u8]) -> Result<Saved> {
         let path = self.path(name)?;
         check_size(name, bytes.len())?;
-        let _lock = self.lock.lock().expect("config store lock poisoned");
-        if let Some(file) =
-            open_config(&path).with_context(|| format!("open configuration {name}"))?
+        let mut history = self.lock.lock().expect("config store lock poisoned");
+        self.write_locked(name, &path, bytes, &mut history)
+    }
+
+    fn write_locked(
+        &self,
+        name: &str,
+        path: &Path,
+        bytes: &[u8],
+        history: &mut History,
+    ) -> Result<Saved> {
+        let mut previous =
+            open_config(path).with_context(|| format!("open configuration {name}"))?;
+        if let Some(file) = &mut previous
+            && file.metadata()?.len() == bytes.len() as u64
             && same_contents(file, bytes)
                 .with_context(|| format!("compare configuration {name}"))?
         {
             return Ok(Saved { changed: false });
         }
-        replace(&self.dir, &path, name, bytes)
-            .with_context(|| format!("write configuration {name}"))?;
+        let temp = stage(&self.dir, name, |file| file.write_all(bytes))
+            .with_context(|| format!("stage configuration {name}"))?;
+        let snapshot = self.snapshot(name, history, previous)?;
+        if let Err(error) = temp.persist(path) {
+            history::discard_snapshot(snapshot.as_deref());
+            return Err(error.error).with_context(|| format!("replace configuration {name}"));
+        }
         sync_directory(&self.dir)
             .with_context(|| format!("sync directory after replacing configuration {name}"))?;
+        history
+            .prune(snapshot.as_deref())
+            .with_context(|| format!("configuration {name} replaced; prune history"))?;
         Ok(Saved { changed: true })
     }
 
     pub fn remove(&self, name: &str) -> Result<()> {
         let path = self.path(name)?;
-        let _lock = self.lock.lock().expect("config store lock poisoned");
-        match fs::remove_file(path) {
-            Ok(()) => sync_directory(&self.dir)
-                .with_context(|| format!("sync directory after removing configuration {name}")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| format!("remove configuration {name}")),
+        let mut history = self.lock.lock().expect("config store lock poisoned");
+        let snapshot = if history.records(name) {
+            let previous =
+                open_config(&path).with_context(|| format!("open configuration {name}"))?;
+            self.snapshot(name, &mut history, previous)?
+        } else {
+            None
+        };
+        if let Err(error) = fs::remove_file(path) {
+            history::discard_snapshot(snapshot.as_deref());
+            if error.kind() == io::ErrorKind::NotFound {
+                return Ok(());
+            }
+            return Err(error).with_context(|| format!("remove configuration {name}"));
         }
+        sync_directory(&self.dir)
+            .with_context(|| format!("sync directory after removing configuration {name}"))?;
+        history
+            .prune(snapshot.as_deref())
+            .with_context(|| format!("configuration {name} removed; prune history"))
     }
 
     pub fn tighten(&self) -> usize {
@@ -185,7 +209,7 @@ fn open_config(path: &Path) -> io::Result<Option<File>> {
     }
 }
 
-fn same_contents(file: File, mut expected: &[u8]) -> io::Result<bool> {
+fn same_contents(file: &mut File, mut expected: &[u8]) -> io::Result<bool> {
     let mut file = BufReader::new(file);
     loop {
         let chunk = file.fill_buf()?;
@@ -201,7 +225,29 @@ fn same_contents(file: File, mut expected: &[u8]) -> io::Result<bool> {
     }
 }
 
-fn replace(dir: &Path, path: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+fn read_limited(file: File, max: usize) -> io::Result<Vec<u8>> {
+    if file.metadata()?.len() > max as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds size limit",
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    if bytes.len() > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "file exceeds size limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn stage(
+    dir: &Path,
+    name: &str,
+    write: impl FnOnce(&mut File) -> io::Result<()>,
+) -> io::Result<TempPath> {
     let mut temp = tempfile::Builder::new()
         .prefix(&format!(".{name}."))
         .suffix(".tmp")
@@ -215,11 +261,9 @@ fn replace(dir: &Path, path: &Path, name: &str, bytes: &[u8]) -> io::Result<()> 
         temp.as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))?;
     }
-    temp.as_file_mut().write_all(bytes)?;
+    write(temp.as_file_mut())?;
     temp.as_file().sync_all()?;
-    temp.into_temp_path()
-        .persist(path)
-        .map_err(|error| error.error)
+    Ok(temp.into_temp_path())
 }
 
 fn sync_directory(dir: &Path) -> io::Result<()> {
@@ -259,7 +303,10 @@ mod tests {
         let blocked = dir.path().join("webservice.json");
         fs::create_dir(&blocked)?;
         fs::write(blocked.join("existing"), "keep")?;
-        assert!(replace(dir.path(), &blocked, "webservice", b"candidate").is_err());
+        let candidate = stage(dir.path(), "webservice", |file| {
+            file.write_all(b"candidate")
+        })?;
+        drop(candidate.persist(&blocked).unwrap_err());
         assert_eq!(fs::read(blocked.join("existing"))?, b"keep");
         assert_eq!(fs::read_dir(dir.path())?.count(), 1);
         Ok(())
