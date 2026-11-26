@@ -1,0 +1,24 @@
+[package]
+name = "fg-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+arc-swap = "1"
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+fg-config = { path = "../fg-config" }
+fg-core = { path = "../fg-core" }
+getrandom = "0.4"
+http-body-util = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { workspace = true, features = ["macros", "net", "test-util"] }

@@ -15,6 +15,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Export management API documentation without starting a listener.
+    ApiDocs { directory: PathBuf },
     /// Validate and compile the configuration without opening listeners.
     Check {
         #[arg(long)]
@@ -35,6 +37,9 @@ enum Command {
 #[tokio::main]
 async fn main() -> Result<()> {
     match Cli::parse().command {
+        Command::ApiDocs { directory } => {
+            fg_admin::ApiRouter::default().finish().export(&directory)
+        }
         Command::Check { config } => {
             fg_gateway::check_config(&config).await?;
             println!("configuration is valid");

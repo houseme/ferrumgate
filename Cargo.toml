@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
+members = ["crates/fg-admin", "crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-logging", "crates/fg-testkit"]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
 
@@ -26,6 +26,7 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap = { version = "4", features = ["derive"] }
+fg-admin = { path = "crates/fg-admin" }
 fg-core = { path = "crates/fg-core" }
 fg-gateway = { path = "crates/fg-gateway" }
 fg-logging = { path = "crates/fg-logging" }
