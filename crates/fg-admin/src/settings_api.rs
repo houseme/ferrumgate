@@ -95,6 +95,10 @@ impl SettingsState {
         self.current.borrow().clone()
     }
 
+    pub fn directory(&self) -> &Path {
+        self.store.dir()
+    }
+
     fn view(&self, current: &Settings, accounts: &AccountManager) -> SettingsView {
         let mut settings = current.clone();
         for provider in &mut settings.third_login.providers {
@@ -151,7 +155,7 @@ impl SettingsState {
         {
             return ApiError::new(
                 StatusCode::BAD_REQUEST,
-                "logDir must be writable and differ from the configuration directory",
+                "logDir must be writable and separate from static roots and the configuration directory",
             )
             .into_response();
         }
@@ -282,6 +286,7 @@ struct ModuleOption {
 }
 
 fn check_log_directory(directory: &Path, config: &Path) -> Result<()> {
+    fg_core::fsperm::check_log_directory(directory)?;
     let mut builder = DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]
@@ -290,6 +295,10 @@ fn check_log_directory(directory: &Path, config: &Path) -> Result<()> {
         builder.mode(0o700);
     }
     builder.create(directory)?;
+    ensure!(
+        std::fs::symlink_metadata(directory)?.is_dir(),
+        "expected a regular log directory"
+    );
     let directory = directory.canonicalize()?;
     ensure!(
         directory != config && directory.parent().is_some(),

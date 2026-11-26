@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use arc_swap::ArcSwap;
 use time::OffsetDateTime;
 
 use super::{
@@ -17,10 +18,8 @@ use super::{
 
 pub(super) struct Disk {
     pub view: Arc<DiskView>,
-    limit: u64,
     streams: [Stream; MODULES.len()],
     encoded: Vec<u8>,
-    archive: Option<ArchiveOptions>,
     maintenance_pending: bool,
 }
 
@@ -28,8 +27,14 @@ pub(super) struct Disk {
 pub(super) struct DiskView {
     pub dir: PathBuf,
     pub files: Mutex<[Clear; MODULES.len()]>,
-    pub archive_web: bool,
+    pub limits: ArcSwap<DiskLimits>,
     _lock: File,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) struct DiskLimits {
+    pub file_bytes: u64,
+    pub archive: Option<ArchiveOptions>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -39,6 +44,27 @@ pub(super) struct Clear {
 }
 
 impl DiskView {
+    pub fn configure(&self, file_bytes: u64, archive: Option<ArchiveOptions>) -> Result<()> {
+        let archive = archive
+            .map(|options| options.prepare(&self.dir))
+            .transpose()?;
+        let next = DiskLimits {
+            file_bytes,
+            archive,
+        };
+        let _files = self.files.lock().expect("log file mutex poisoned");
+        let old = self.limits.load();
+        if **old != next {
+            if archive != old.archive
+                && let Some(options) = archive
+            {
+                archive::prune(&self.dir, options, OffsetDateTime::now_utc())?;
+            }
+            self.limits.store(Arc::new(next));
+        }
+        Ok(())
+    }
+
     pub fn clear_files(&self, module: Module) -> io::Result<()> {
         for suffix in ["log", "log.1", "sources"] {
             archive::remove(&self.dir.join(format!("{}.{suffix}", module.stem())))?;
@@ -82,6 +108,7 @@ impl Disk {
         let dir = dir
             .canonicalize()
             .context("resolve runtime log directory")?;
+        fg_core::fsperm::protect_log_directory(&dir)?;
         let lock = open_regular(&dir.join(".ferrumgate-log.lock"), true)?
             .context("open runtime log lock")?;
         lock.try_lock().context("runtime log directory is in use")?;
@@ -94,13 +121,14 @@ impl Disk {
             view: Arc::new(DiskView {
                 dir,
                 files: Mutex::new([Clear::default(); MODULES.len()]),
-                archive_web: archive.is_some(),
+                limits: ArcSwap::from_pointee(DiskLimits {
+                    file_bytes: limit,
+                    archive,
+                }),
                 _lock: lock,
             }),
-            limit,
             streams: std::array::from_fn(|_| Stream::default()),
             encoded: Vec::with_capacity(1024),
-            archive,
             maintenance_pending: archive.is_some(),
         };
         for module in MODULES {
@@ -152,6 +180,7 @@ impl Disk {
             return Ok(());
         }
         let files = self.view.files.lock().expect("log file mutex poisoned");
+        let limits = self.view.limits.load();
         for (stream, clear) in self.streams.iter_mut().zip(files.iter()) {
             if stream.generation != clear.generation {
                 *stream = Stream {
@@ -164,8 +193,8 @@ impl Disk {
             if entry.seq <= files[*module as usize].through {
                 continue;
             }
-            let archive = self.archive.filter(|_| *module == Module::Web);
-            let limit = archive.map_or(self.limit, ArchiveOptions::file_limit);
+            let archive = limits.archive.filter(|_| *module == Module::Web);
+            let limit = archive.map_or(limits.file_bytes, ArchiveOptions::file_limit);
 
             self.encoded.clear();
             serde_json::to_writer(&mut self.encoded, entry.as_ref())?;
@@ -248,9 +277,9 @@ impl Disk {
     }
     pub fn maintain_archives(&mut self) -> io::Result<()> {
         if std::mem::take(&mut self.maintenance_pending)
-            && let Some(options) = self.archive
+            && self.view.limits.load().archive.is_some()
         {
-            let result = archive::maintain(&self.view, options);
+            let result = archive::maintain(&self.view);
             self.maintenance_pending = result.is_err();
             result
         } else {

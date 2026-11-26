@@ -11,7 +11,10 @@ use std::{
     fmt::{self, Write as _},
     io::{self, BufWriter, Write},
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -152,11 +155,26 @@ impl Buffer {
     }
 }
 
+#[derive(Clone, PartialEq, Eq)]
 pub struct Options {
     pub directory: Option<PathBuf>,
     pub lines: usize,
     pub file_bytes: u64,
     pub web_archive: Option<ArchiveOptions>,
+}
+
+impl Options {
+    fn validate(&self) -> Result<()> {
+        ensure!(
+            (1..=MAX_LINES).contains(&self.lines),
+            "log line limit must be in 1..={MAX_LINES}"
+        );
+        ensure!(
+            (1..=MAX_FILE_BYTES).contains(&self.file_bytes),
+            "invalid log file size limit"
+        );
+        Ok(())
+    }
 }
 
 impl Default for Options {
@@ -174,7 +192,7 @@ struct Record(Module, Arc<Entry>);
 
 struct Shared {
     buffers: [Mutex<Buffer>; MODULES.len()],
-    lines: usize,
+    lines: AtomicUsize,
     disk: ArcSwapOption<DiskTarget>,
     destinations: Mutex<()>,
 }
@@ -196,14 +214,7 @@ pub struct Logs {
 
 impl Logs {
     pub fn start(options: Options, echo: impl Write + Send + 'static) -> Result<Self> {
-        ensure!(
-            (1..=MAX_LINES).contains(&options.lines),
-            "log line limit must be in 1..={MAX_LINES}"
-        );
-        ensure!(
-            (1..=MAX_FILE_BYTES).contains(&options.file_bytes),
-            "invalid log file size limit"
-        );
+        options.validate()?;
         let mut buffers = std::array::from_fn(|_| Buffer::default());
         ensure!(
             options.web_archive.is_none() || options.directory.is_some(),
@@ -243,7 +254,7 @@ impl Logs {
             .unzip();
         let layer = LogLayer(Arc::new(Shared {
             buffers: buffers.map(Mutex::new),
-            lines: options.lines,
+            lines: AtomicUsize::new(options.lines),
             disk: ArcSwapOption::new(target),
             destinations: Mutex::new(()),
         }));
@@ -270,18 +281,55 @@ impl Logs {
     }
 
     /// Replaces the persistence destination while preserving the active tracing layer.
-    /// The caller must keep the new path outside any roots already published by the application.
     pub fn set_directory(&mut self, directory: Option<PathBuf>) -> Result<()> {
+        self.configure(Options {
+            directory,
+            lines: self.layer.0.lines.load(Ordering::Relaxed),
+            file_bytes: self.file_bytes,
+            web_archive: self.web_archive,
+        })
+    }
+
+    /// Updates logging while keeping the existing publishers and readers attached.
+    pub fn configure(&mut self, options: Options) -> Result<()> {
+        options.validate()?;
+        self.configure_disk(options.directory, options.file_bytes, options.web_archive)?;
+        self.file_bytes = options.file_bytes;
+        self.web_archive = options.web_archive;
+        if self.layer.0.lines.swap(options.lines, Ordering::Relaxed) != options.lines {
+            for buffer in &self.layer.0.buffers {
+                let mut buffer = buffer.lock().expect("log buffer poisoned");
+                while buffer.entries.len() > options.lines {
+                    buffer.bytes -= buffer
+                        .entries
+                        .pop_front()
+                        .expect("log ring has an entry")
+                        .bytes();
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn configure_disk(
+        &mut self,
+        directory: Option<PathBuf>,
+        file_bytes: u64,
+        archive: Option<ArchiveOptions>,
+    ) -> Result<()> {
         if let Some(path) = &directory {
             ensure!(path.is_absolute(), "log directory must be absolute");
-            if self
+            if let Some(disk) = self
                 .layer
                 .0
                 .disk
                 .load()
                 .as_ref()
-                .is_some_and(|disk| path.canonicalize().is_ok_and(|path| path == disk.view.dir))
+                .filter(|disk| path.canonicalize().is_ok_and(|path| path == disk.view.dir))
             {
+                if file_bytes != self.file_bytes || archive != self.web_archive {
+                    disk.view.configure(file_bytes, archive)?;
+                }
                 return Ok(());
             }
         } else if self.disk.is_none() {
@@ -299,7 +347,7 @@ impl Logs {
         let mut restored = std::array::from_fn(|_| Buffer::default());
         let (next, target) = directory
             .map(|dir| {
-                let sink = Disk::open(dir, self.file_bytes, 1, self.web_archive, &mut restored)?;
+                let sink = Disk::open(dir, file_bytes, 1, archive, &mut restored)?;
                 let cutoff = restored.each_ref().map(|buffer| buffer.latest);
                 Ok::<_, anyhow::Error>(start_disk(sink, self.echo.queue.clone(), cutoff)?)
             })
@@ -534,7 +582,7 @@ impl<S: Subscriber> Layer<S> for LogLayer {
             fields: visitor.fields,
         });
         let bytes = entry.bytes();
-        buffer.add(entry.clone(), bytes, self.0.lines);
+        buffer.add(entry.clone(), bytes, self.0.lines.load(Ordering::Relaxed));
         if let Some(disk) = &*self.0.disk.load() {
             disk.queue.push(Record(module, entry), bytes);
         }

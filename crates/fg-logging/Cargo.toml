@@ -11,6 +11,7 @@ schema = ["dep:schemars"]
 [dependencies]
 anyhow.workspace = true
 arc-swap = "1"
+fg-core = { path = "../fg-core" }
 flate2 = "1"
 ipnet = "2"
 schemars = { version = "1", optional = true }

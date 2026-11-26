@@ -1,12 +1,20 @@
 use std::{
     fs, io,
     path::{Component, Path, PathBuf},
-    sync::RwLock,
+    sync::{Arc, RwLock, Weak},
 };
 
 use anyhow::{Result, ensure};
 
-static PROTECTED: RwLock<Vec<PathBuf>> = RwLock::new(Vec::new());
+struct Directories {
+    protected: Vec<PathBuf>,
+    published: Vec<Weak<Path>>,
+}
+
+static DIRECTORIES: RwLock<Directories> = RwLock::new(Directories {
+    protected: Vec::new(),
+    published: Vec::new(),
+});
 
 /// Create the directory and set its permissions, including when it already exists.
 pub fn mkdir_all(dir: &Path, mode: u32) -> io::Result<()> {
@@ -70,11 +78,53 @@ pub fn protect(dir: &Path) {
         && let Ok(absolute) = std::path::absolute(dir)
     {
         let dir = normalize(&absolute);
-        let mut protected = PROTECTED.write().expect("protected path registry poisoned");
+        let mut registry = DIRECTORIES.write().expect("directory registry poisoned");
+        let protected = &mut registry.protected;
         if !protected.contains(&dir) {
             protected.push(dir);
         }
     }
+}
+
+/// Registers an already canonicalized static root for the lifetime of its route generation.
+pub fn publish_static_root(root: &Path) -> Result<Arc<Path>> {
+    let mut registry = DIRECTORIES.write().expect("directory registry poisoned");
+    ensure!(
+        !registry.protected.iter().any(|path| overlap(path, root)),
+        "path overlaps a protected configuration directory"
+    );
+    registry.published.retain(|path| path.strong_count() != 0);
+    let root = Arc::<Path>::from(root);
+    registry.published.push(Arc::downgrade(&root));
+    Ok(root)
+}
+
+pub fn check_log_directory(path: &Path) -> Result<()> {
+    let registry = DIRECTORIES.read().expect("directory registry poisoned");
+    check_unpublished(&registry, path)
+}
+
+/// Prevents a log directory and a live static root from being activated over the same files.
+pub fn protect_log_directory(path: &Path) -> Result<()> {
+    let mut registry = DIRECTORIES.write().expect("directory registry poisoned");
+    check_unpublished(&registry, path)?;
+    let path = normalize(path);
+    if !registry.protected.contains(&path) {
+        registry.protected.push(path);
+    }
+    Ok(())
+}
+
+fn check_unpublished(registry: &Directories, path: &Path) -> Result<()> {
+    ensure!(
+        !registry
+            .published
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|root| overlap(&root, path)),
+        "log directory overlaps a published static root"
+    );
+    Ok(())
 }
 
 pub fn protected(path: &Path) -> Option<PathBuf> {
@@ -114,9 +164,10 @@ pub fn overlap(a: &Path, b: &Path) -> bool {
 
 fn find(path: &Path, matches: impl Fn(&Path, &Path) -> bool) -> Option<PathBuf> {
     let path = std::path::absolute(path).ok()?;
-    let dirs = PROTECTED
+    let dirs = DIRECTORIES
         .read()
-        .expect("protected path registry poisoned")
+        .expect("directory registry poisoned")
+        .protected
         .clone();
     dirs.into_iter().find(|dir| matches(dir, &path))
 }
@@ -206,9 +257,10 @@ mod tests {
         assert!(check_whole_dir(base.path()).is_err());
         assert!(check_whole_dir(&sibling).is_ok());
         assert_eq!(
-            PROTECTED
+            DIRECTORIES
                 .read()
                 .unwrap()
+                .protected
                 .iter()
                 .filter(|entry| **entry == dir)
                 .count(),

@@ -262,7 +262,7 @@ impl LogHandle {
             {
                 files.push(file);
             }
-            if module == Module::Web && view.archive_web {
+            if module == Module::Web && view.limits.load().archive.is_some() {
                 let archives = archive::list(&view.dir)?;
                 for item in &archives[archives.len().saturating_sub(MAX_ARCHIVES)..] {
                     let (path, gzip) = item.preferred();

@@ -1237,6 +1237,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "fg-core",
  "flate2",
  "ipnet",
  "libc",

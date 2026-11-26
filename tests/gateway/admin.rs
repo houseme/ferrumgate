@@ -487,6 +487,150 @@ async fn get_admin_settings(
     Ok((status, body))
 }
 
+#[tokio::test]
+async fn management_switches_log_directories_and_keeps_memory_when_persistence_is_disabled()
+-> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let assets = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let store = fg_config::ConfigStore::open(&directory.path().join("management"))?;
+    store.save("ferrumgate", &json!({"listen":":0", "logLevel":"debug"}))?;
+    let initial = "Fixture-initial$23";
+    let password = "Lk8$yN3-pv";
+    let (manager, _) = fg_auth::AccountManager::open(store.clone(), Some(initial))?;
+    manager.change_credentials(initial, "operator", password)?;
+    let session = manager
+        .login("operator", password)?
+        .context("fixture session")?;
+    let cookie = format!("gately_token={}", session.token);
+    drop(manager);
+    let backend = Origin::spawn(|_| async { Ok(()) }).await?;
+    let routes = route("broken.test", backend.addr, "/")
+        + &format!(
+            "\n[[routes]]\nhost = 'assets.test'\n[routes.response]\ntype = 'static'\nroot = '{}'\n",
+            assets.path().display(),
+        );
+    std::fs::write(&config_path, config(&routes, "", ""))?;
+    std::fs::write(assets.path().join("index.html"), "static fixture")?;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .arg("--admin-dir")
+        .arg(store.dir())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut lines = BufReader::new(child.stderr.take().context("management logs")?).lines();
+    let gateway = wait_listener(&mut lines, "gateway ready").await?;
+    let admin = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(admin).await?).await?;
+    let mut proxy = http_client(connect(gateway).await?).await?;
+    assert_eq!(
+        get(&mut proxy, "assets.test", "/").await?.1,
+        "static fixture"
+    );
+    assert_eq!(get(&mut proxy, "broken.test", "/").await?.0, 502);
+
+    let put = |body: Value| {
+        let mut req = request(
+            Method::PUT,
+            "/api/system/settings",
+            "localhost",
+            full(body.to_string()),
+        );
+        req.headers_mut()
+            .insert(header::COOKIE, cookie.parse().unwrap());
+        req.headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        req
+    };
+    let unsafe_dir = assets.path().join("private-logs");
+    let rejected = send(
+        &mut client,
+        put(json!({"listen":":0", "logLevel":"debug", "logDir":unsafe_dir})),
+    )
+    .await?;
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    assert!(!unsafe_dir.exists());
+    assert_eq!(
+        get_admin_settings(&mut client, &cookie).await?.1["logDir"],
+        ""
+    );
+
+    let new_dir = directory.path().join("other-logs");
+    std::fs::create_dir(&new_dir)?;
+    let competing = std::fs::File::create(new_dir.join(".ferrumgate-log.lock"))?;
+    competing.try_lock()?;
+    let mut competing = Some(competing);
+    for disable in [false, true, false] {
+        let result = send(
+            &mut client,
+            put(json!({
+                "listen":":0", "logLevel":"debug", "logLines":2, "logFileMB":1,
+                "logDir":new_dir, "disableLogPersist":disable, "accessLogDays":1, "accessLogMB":4,
+            })),
+        )
+        .await?;
+        assert_eq!(result.status(), StatusCode::OK);
+        result.into_body().collect().await?;
+        if let Some(lock) = competing.take() {
+            wait_log_message(&mut lines, "runtime logging options could not be applied").await?;
+            assert!(!new_dir.join("webservice.log").exists());
+            drop(lock);
+        }
+        wait_log_message(&mut lines, "runtime logging options applied").await?;
+        if disable {
+            let path = new_dir.join("webservice.log");
+            let before = std::fs::read(&path)?;
+            for _ in 0..4 {
+                assert_eq!(get(&mut proxy, "broken.test", "/").await?.0, 502);
+            }
+            let mut req = request(Method::GET, "/api/webservice/logs", "localhost", full(""));
+            req.headers_mut().insert(header::COOKIE, cookie.parse()?);
+            let response = send(&mut client, req).await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            let live: Vec<fg_logging::Entry> =
+                serde_json::from_slice(&response.into_body().collect().await?.to_bytes())?;
+            assert_eq!(live.len(), 2);
+            assert!(
+                live.iter()
+                    .all(|entry| entry.message == "upstream request failed")
+            );
+            assert_eq!(std::fs::read(path)?, before);
+        } else {
+            assert_eq!(get(&mut proxy, "broken.test", "/").await?.0, 502);
+        }
+    }
+    drop(proxy);
+    drop(client);
+    stop_management(&mut child).await?;
+    let read = |path| -> Result<Vec<fg_logging::Entry>> {
+        let rows = std::fs::read_to_string(path)?;
+        rows.lines()
+            .map(|line| Ok(serde_json::from_str(line)?))
+            .collect()
+    };
+    let original = read(store.dir().join("logs/webservice.log"))?;
+    let switched = read(new_dir.join("webservice.log"))?;
+    assert_eq!(original.len(), 1);
+    assert_eq!(switched.len(), 2);
+    assert!(original[0].seq < switched[0].seq && switched[1].seq > switched[0].seq + 1);
+    Ok(())
+}
+
+async fn wait_log_message(lines: &mut Lines<BufReader<ChildStderr>>, message: &str) -> Result<()> {
+    timeout(DEADLINE, async {
+        while let Some(line) = lines.next_line().await? {
+            if line.contains(message) {
+                return Ok(());
+            }
+        }
+        anyhow::bail!("management log did not contain {message}")
+    })
+    .await?
+}
+
 async fn wait_listener(
     lines: &mut Lines<BufReader<ChildStderr>>,
     marker: &str,

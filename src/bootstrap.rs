@@ -1,6 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddr},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -22,11 +22,12 @@ use fg_core::{
     },
 };
 use fg_gateway::ManagementReady;
-use fg_logging::LogHandle;
 use tokio::{
     net::TcpListener,
     sync::{oneshot, watch},
 };
+
+use crate::logging::RuntimeLogs;
 
 #[derive(Args)]
 pub struct AdminOptions {
@@ -44,12 +45,13 @@ pub struct AdminOptions {
     admin_prefix: String,
 }
 
-pub async fn serve(
-    config: PathBuf,
-    mut options: AdminOptions,
-    logs: LogHandle,
-    set_log_level: impl Fn(&str) -> Result<()>,
-) -> Result<()> {
+impl AdminOptions {
+    pub(crate) fn enabled(&self) -> bool {
+        self.admin_dir.is_some()
+    }
+}
+
+pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: &RuntimeLogs) -> Result<()> {
     let Some(directory) = options.admin_dir.take() else {
         return fg_gateway::serve(config).await;
     };
@@ -97,7 +99,10 @@ pub async fn serve(
     .await??;
     let started = settings.snapshot();
     accounts.configure_login_limits(login_limits(&started))?;
-    set_log_level(&started.log_level)?;
+    logs.set_level(&started.log_level)?;
+    logs.configure(logs.options(&started, settings.directory()))
+        .await
+        .context("configure runtime logging")?;
     let address = match options.admin_listen {
         Some(address) => address,
         None => match started.listen.strip_prefix(':') {
@@ -140,11 +145,10 @@ pub async fn serve(
                 options,
                 accounts,
                 tokens: tokens.clone(),
-                logs,
                 settings,
                 third_login,
             }
-            .run(ready, &set_log_level)
+            .run(ready, logs)
             .await
         };
         tokio::pin!(gateway, management);
@@ -175,28 +179,23 @@ struct ManagementService {
     options: AdminOptions,
     accounts: Arc<AccountManager>,
     tokens: Arc<TokenManager>,
-    logs: LogHandle,
     settings: Arc<SettingsState>,
     third_login: Option<Arc<ThirdLogin>>,
 }
 
 impl ManagementService {
-    async fn run(
-        self,
-        ready: ManagementReady,
-        set_log_level: &impl Fn(&str) -> Result<()>,
-    ) -> Result<()> {
+    async fn run(self, ready: ManagementReady, logs: &RuntimeLogs) -> Result<()> {
         let Self {
             listener,
             options,
             accounts,
             tokens,
-            logs,
             settings,
             third_login,
         } = self;
         let started = settings.snapshot();
         let updates = settings.subscribe();
+        let directory = settings.directory().to_owned();
         let router = ApiRouter::default()
             .with_modules(ready.registry, ready.enabled)
             .with_token_authentication(tokens.clone());
@@ -218,7 +217,7 @@ impl ManagementService {
             router
         };
         let admin = router
-            .with_logs(logs)
+            .with_logs(logs.handle())
             .with_security_status(accounts.clone(), exposure)
             .with_token_management(tokens.clone())
             .with_settings(settings, accounts.clone())
@@ -226,7 +225,7 @@ impl ManagementService {
         tracing::info!(listen = %listener.local_addr()?, "management ready");
         let mut drain = ready.drain;
         let maintenance = poll_auth_maintenance(accounts.clone(), tokens, drain.clone());
-        let runtime = apply_settings_updates(updates, started, &accounts, set_log_level);
+        let runtime = apply_settings_updates(updates, started, &accounts, logs, &directory);
         let server = axum::serve(
             listener,
             admin
@@ -272,16 +271,49 @@ async fn apply_settings_updates(
     mut updates: watch::Receiver<Arc<Settings>>,
     mut previous: Arc<Settings>,
     accounts: &AccountManager,
-    set_log_level: &impl Fn(&str) -> Result<()>,
+    logs: &RuntimeLogs,
+    directory: &Path,
 ) {
-    while updates.changed().await.is_ok() {
+    let mut applied = logs.options(&previous, directory);
+    let mut retry: Option<Duration> = None;
+    loop {
+        tokio::select! {
+            biased;
+            changed = updates.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                retry = None;
+            }
+            _ = tokio::time::sleep(retry.unwrap_or_default()), if retry.is_some() => {},
+        }
         let current = updates.borrow_and_update().clone();
         let limits = login_limits(&current);
         if limits != login_limits(&previous) && accounts.configure_login_limits(limits).is_err() {
             tracing::error!(target: "fg_core::settings", "login limits could not be applied");
         }
-        if current.log_level != previous.log_level && set_log_level(&current.log_level).is_err() {
+        if current.log_level != previous.log_level && logs.set_level(&current.log_level).is_err() {
             tracing::error!(target: "fg_core::settings", "log level could not be applied");
+        }
+        let options = logs.options(&current, directory);
+        if options == applied {
+            retry = None;
+        } else {
+            match logs.configure(options.clone()).await {
+                Ok(()) => {
+                    applied = options;
+                    retry = None;
+                    tracing::info!(target: "fg_core::settings", "runtime logging options applied");
+                }
+                Err(_) => {
+                    if retry.is_none() {
+                        tracing::error!(target: "fg_core::settings", "runtime logging options could not be applied");
+                    }
+                    retry = Some(retry.map_or(Duration::from_secs(2), |delay| {
+                        (delay * 2).min(Duration::from_secs(60))
+                    }));
+                }
+            }
         }
         previous = current;
     }

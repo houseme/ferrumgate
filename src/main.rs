@@ -1,18 +1,15 @@
 #![forbid(unsafe_code)]
 
 mod bootstrap;
+mod logging;
 
 use std::{
     io::{self, Write},
     path::PathBuf,
-    time::Duration,
 };
 
 use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
-use tracing_subscriber::{
-    filter::LevelFilter, layer::SubscriberExt, reload, util::SubscriberInitExt,
-};
 
 #[derive(Parser)]
 #[command(name = "fgate", version, about = "FerrumGate reverse proxy")]
@@ -91,41 +88,9 @@ async fn main() -> Result<()> {
             log_dir,
             admin,
         } => {
-            let logs = fg_logging::Logs::start(
-                fg_logging::Options {
-                    directory: log_dir.clone(),
-                    ..Default::default()
-                },
-                std::io::stderr(),
-            )?;
-            if let Some(dir) = log_dir {
-                fg_core::fsperm::protect(&dir.canonicalize()?);
-            }
-            let fallback = std::env::var("FERRUMGATE_LOG_LEVEL")
-                .ok()
-                .and_then(|level| level.parse().ok())
-                .unwrap_or(tracing::Level::INFO);
-            let (filter, reload) =
-                reload::Layer::new(LevelFilter::from_level(log_level.unwrap_or(fallback)));
-            tracing_subscriber::registry()
-                .with(filter)
-                .with(logs.layer())
-                .with(
-                    tracing_subscriber::fmt::layer()
-                        .with_writer(logs.echo())
-                        .with_ansi(false),
-                )
-                .try_init()?;
-            let result = bootstrap::serve(config, admin, logs.handle(), |level| {
-                let level = log_level.or_else(|| level.parse().ok()).unwrap_or(fallback);
-                let level = LevelFilter::from_level(level);
-                if reload.with_current(|current| *current != level)? {
-                    reload.reload(level)?;
-                }
-                Ok(())
-            })
-            .await;
-            let _ = logs.shutdown(Duration::from_secs(3));
+            let logs = logging::RuntimeLogs::start(log_level, log_dir, admin.enabled())?;
+            let result = bootstrap::serve(config, admin, &logs).await;
+            logs.shutdown().await;
             result
         }
     }

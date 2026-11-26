@@ -1,7 +1,11 @@
-use std::{fs, io, path::Path, time::Duration};
+use std::{
+    fs, io,
+    path::Path,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::Result;
-use fg_logging::{Entry, Filter, Logs, Module, Options};
+use fg_logging::{ArchiveOptions, Entry, Filter, Logs, Module, Options};
 use tracing_subscriber::layer::SubscriberExt;
 
 fn open(dir: &Path) -> Result<Logs> {
@@ -117,5 +121,56 @@ fn producers_keep_one_ordered_sequence_across_a_live_switch() -> Result<()> {
         .map(|entry| entry.seq)
         .collect();
     assert_eq!(stored, (1..=514).collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
+fn retention_changes_in_place_trim_the_ring_rotate_and_prune() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut logs = Logs::start(
+        Options {
+            directory: Some(root.path().into()),
+            web_archive: Some(ArchiveOptions::default()),
+            ..Options::default()
+        },
+        io::sink(),
+    )?;
+    let expired = root.path().join("webservice.20261120T010203Z.log.gz");
+    let over_budget = root.path().join("webservice.20261125T010203Z.log.gz");
+    fs::File::create(&expired)?
+        .set_modified(SystemTime::now() - Duration::from_secs(2 * 86_400))?;
+    fs::File::create(&over_budget)?.set_len(5 << 20)?;
+    let subscriber = tracing_subscriber::registry().with(logs.layer());
+    let message = "r".repeat(180);
+    tracing::subscriber::with_default(subscriber, || -> Result<()> {
+        for _ in 0..3 {
+            tracing::info!(target: "fgate", "{message}");
+        }
+        logs.configure(Options {
+            directory: Some(root.path().into()),
+            lines: 2,
+            file_bytes: 400,
+            web_archive: Some(ArchiveOptions {
+                keep_days: 1,
+                keep_bytes: 4 << 20,
+            }),
+        })?;
+        assert_eq!(
+            logs.recent(Module::System, 0, 0, 0)
+                .iter()
+                .map(|entry| entry.seq)
+                .collect::<Vec<_>>(),
+            [2, 3]
+        );
+        assert!(!expired.exists());
+        assert!(!over_budget.exists());
+        tracing::info!(target: "fgate", "{message}");
+        assert_eq!(logs.recent(Module::System, 0, 0, 0).last().unwrap().seq, 4);
+        Ok(())
+    })?;
+    logs.shutdown(Duration::from_secs(3))?;
+    assert!(root.path().join("gately.log.1").is_file());
+    assert!(fs::metadata(root.path().join("gately.log"))?.len() <= 400);
+    assert_eq!(disk_entries(root.path())?.last().unwrap().seq, 4);
     Ok(())
 }

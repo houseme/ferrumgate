@@ -25,7 +25,7 @@ pub(super) const MAX_ARCHIVES: usize = 128;
 const STAMP: &[BorrowedFormatItem<'_>] =
     format_description!("[year][month][day]T[hour][minute][second]Z");
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ArchiveOptions {
     pub keep_days: u32,
     pub keep_bytes: u64,
@@ -184,7 +184,7 @@ fn missing(path: &Path) -> io::Result<bool> {
     }
 }
 
-pub(super) fn maintain(view: &DiskView, options: ArchiveOptions) -> io::Result<()> {
+pub(super) fn maintain(view: &DiskView) -> io::Result<()> {
     let (generation, archives) = {
         let files = view.files.lock().expect("log file mutex poisoned");
         (files[Module::Web as usize].generation, list(&view.dir)?)
@@ -206,7 +206,9 @@ pub(super) fn maintain(view: &DiskView, options: ArchiveOptions) -> io::Result<(
         }
     }
     let files = view.files.lock().expect("log file mutex poisoned");
-    if files[Module::Web as usize].generation == generation {
+    if files[Module::Web as usize].generation == generation
+        && let Some(options) = view.limits.load().archive
+    {
         prune(&view.dir, options, OffsetDateTime::now_utc())?;
     }
     failed.map_or(Ok(()), Err)

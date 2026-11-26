@@ -45,6 +45,7 @@ pub(crate) struct RawStatic {
 
 pub(crate) struct StaticFiles {
     root: Arc<Dir>,
+    _published: Arc<Path>,
     clean_urls: bool,
     not_found: Option<PathBuf>,
 }
@@ -81,18 +82,21 @@ impl StaticFiles {
                 "static root includes a configured TLS file"
             );
         }
-        let root = tokio::task::spawn_blocking(move || {
+        let (root, published) = tokio::task::spawn_blocking(move || {
             ensure!(
                 !fg_core::fsperm::overlap(&canonical_config, &root),
                 "static root must be separate from the configuration directory"
             );
-            fg_core::fsperm::check_whole_dir(&root)?;
-            Dir::open_ambient_dir(root, ambient_authority()).context("open static root")
+            let published = fg_core::fsperm::publish_static_root(&root)?;
+            let root =
+                Dir::open_ambient_dir(root, ambient_authority()).context("open static root")?;
+            Ok::<_, anyhow::Error>((root, published))
         })
         .await
         .context("open static root task")??;
         Ok(Self {
             root: Arc::new(root),
+            _published: published,
             clean_urls: raw.clean_urls,
             not_found: raw.not_found,
         })
