@@ -475,6 +475,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fg-core",
+ "fg-testkit",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "fg-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "tempfile",
+]
+
+[[package]]
 name = "fg-gateway"
 version = "0.1.0"
 dependencies = [
@@ -482,6 +503,7 @@ dependencies = [
  "arc-swap",
  "base64 0.23.1",
  "cap-std",
+ "fg-core",
  "futures-util",
  "hickory-resolver",
  "http-body-util",
@@ -507,6 +529,13 @@ dependencies = [
  "tracing",
  "webpki-roots",
  "x509-parser",
+]
+
+[[package]]
+name = "fg-testkit"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

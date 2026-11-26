@@ -72,10 +72,6 @@ impl StaticFiles {
         let canonical_config = tokio::fs::canonicalize(config_dir)
             .await
             .context("resolve config directory")?;
-        ensure!(
-            !canonical_config.starts_with(&root) && !root.starts_with(&canonical_config),
-            "static root must be separate from the configuration directory"
-        );
         for path in protected {
             let asset = tokio::fs::canonicalize(config_dir.join(path))
                 .await
@@ -85,11 +81,16 @@ impl StaticFiles {
                 "static root includes a configured TLS file"
             );
         }
-        let root =
-            tokio::task::spawn_blocking(move || Dir::open_ambient_dir(root, ambient_authority()))
-                .await
-                .context("open static root task")?
-                .context("open static root")?;
+        let root = tokio::task::spawn_blocking(move || {
+            ensure!(
+                !fg_core::fsperm::overlap(&canonical_config, &root),
+                "static root must be separate from the configuration directory"
+            );
+            fg_core::fsperm::check_whole_dir(&root)?;
+            Dir::open_ambient_dir(root, ambient_authority()).context("open static root")
+        })
+        .await
+        .context("open static root task")??;
         Ok(Self {
             root: Arc::new(root),
             clean_urls: raw.clean_urls,

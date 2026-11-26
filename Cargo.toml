@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/fg-gateway"]
+members = ["crates/fg-config", "crates/fg-core", "crates/fg-gateway", "crates/fg-testkit"]
 default-members = [".", "crates/fg-gateway"]
 resolver = "3"
 
@@ -10,6 +10,9 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
 tokio = "1"
 tracing = "0.1"
 
@@ -40,9 +43,9 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 rcgen = "0.14"
-serde_json = "1"
+serde_json.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-tempfile = "3"
+tempfile.workspace = true
 time = "0.3"
 tokio = { workspace = true, features = ["io-util", "net", "process", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

@@ -566,6 +566,21 @@ oha -z 30s -c 64 -H 'Host: app.test' http://127.0.0.1:8080/
 
 ## 9. 当前交付记录
 
+### WP-00 配置目录存储
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-core -p fg-config -p fg-testkit
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+git diff --check
+```
+
+2026-11-26 在 macOS arm64、Rust stable 1.100.0 上，上述检查通过。工作区默认套件通过 72 项，其中 9 项新增用例覆盖原始字节和 JSON 往返、相同内容保持 mtime、权限、非法名称、受保护目录、错误脱敏以及替换失败后的临时文件清理。9 项需本机 Pebble 的 ACME 测试单独运行并全部通过。Linux、Windows 和真实断电恢复留待对应环境验证。
+
+### 数据面交付记录
+
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
 - 依赖已用注册表索引核对，当前 15 个直接 crate 均采用最新稳定版，传递依赖按兼容约束求解。重点版本为 Tokio 1.54.1、Hyper 1.13.0、rustls 0.23.46、Clap 4.6.10 和 TOML 1.2.3。rustls 0.24 当前发布的是开发预览，HTTP/TLS 适配器使用 0.23 系列。精确版本见 [Cargo.lock](../Cargo.lock)。
 - Workspace 由 `ferrumgate` 和 `fg-gateway` 组成。C1 在 macOS arm64 上通过 workspace Clippy、5 项 Rust 单测、release 构建和 12 项 Rust 端到端测试。新增场景覆盖两跳握手校验、WebSocket over TLS、子协议、路由关闭后保留既有会话，以及连接名额、寿命和停机。

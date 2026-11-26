@@ -9,6 +9,7 @@ publish = false
 anyhow.workspace = true
 arc-swap = "1"
 cap-std = "4"
+fg-core = { path = "../fg-core" }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 base64 = "0.23"
 hickory-resolver = { version = "0.26.4", default-features = false, features = ["tokio"] }
@@ -24,9 +25,9 @@ pem = "4"
 percent-encoding = "2"
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tempfile = "3"
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tokio-util = { version = "0.7", features = ["io"] }

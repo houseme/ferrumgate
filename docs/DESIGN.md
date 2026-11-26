@@ -146,3 +146,11 @@ TCP 与 UDP 分别允许配置至多 64 个监听器。列表及范围保留书�
 - 默认样例运行在回环地址。对外部署可启用手动 TLS 或交由前置终止代理，并配置资源限制。管理面落地后单独验收隔离。平台验收分别记录 Linux、macOS 和其他目标系统的构建及运行结果。
 
 依赖实现参考 [Hyper HTTP/1 服务端](https://docs.rs/hyper/latest/hyper/server/conn/http1/struct.Builder.html) 与 [hyper-util 连接池](https://docs.rs/hyper-util/latest/hyper_util/client/legacy/struct.Builder.html)。版本以提交的 `Cargo.lock` 为准。
+
+## 10. 配置目录存储（WP-00）
+
+`fg-config::ConfigStore` 为每个模块保存一个明文 `<name>.json` 文件。同一存储句柄串行访问磁盘，读取缺失文件返回 `Loaded::Missing`。配置名最长 64 字节，首字符是小写字母或数字，其余字符可加下划线和短横线。配置文件读写上限为 64 MiB，解析错误只报告配置名与行列位置。`save` 使用两空格缩进并补一个换行，`write_raw` 保留传入的字节。
+
+写入先逐字节检查现有内容，再通过同目录临时文件写入、同步、原子替换。Unix 上创建配置目录和临时文件后显式设为 0700、0600，替换和删除后同步父目录。如果父目录同步失败，调用方收到错误，此时替换或删除可能已可见。权限收紧跳过符号链接。读取可解析指向常规文件的符号链接，写入替换链接本身。
+
+`fg-core::fsperm` 在进程内登记打开的配置目录。路径判定考虑路径组件、符号链接和 Unix 文件对象。静态站点在打开发布根时拒绝与配置目录重叠，文件读取继续使用受限目录句柄。配置目录启动参数和权限收紧调用由 WP-03 接入，历史版本由 WP-02 接入。现有部署使用 `fgate check/serve --config <TOML>`。
