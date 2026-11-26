@@ -30,6 +30,8 @@ use tokio::{
 
 #[path = "admin/compat.rs"]
 mod compat;
+#[path = "admin/transport.rs"]
+mod transport;
 
 struct Server {
     listen: std::net::SocketAddr,
@@ -79,8 +81,7 @@ impl Server {
             let mut request = Request::builder()
                 .method(method)
                 .uri(path)
-                .header("host", "admin.test")
-                .header("connection", "close");
+                .header("host", "admin.test");
             for (key, value) in headers {
                 request = request.header(*key, *value);
             }

@@ -3,10 +3,10 @@ use std::{collections::BTreeSet, io::Write, path::Path, sync::Arc};
 use anyhow::Result;
 use axum::{
     Router,
-    body::Bytes,
+    body::{Bytes, HttpBody},
     extract::{Request, State},
     handler::Handler,
-    http::{HeaderMap, Method, StatusCode, Uri, header},
+    http::{HeaderMap, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{MethodFilter, on},
@@ -20,6 +20,7 @@ use crate::{
     http::{Presentation, RenderPolicy, boundary},
     response::MAX_TRANSFORMS,
     scope::{Access, module_of, required},
+    upload,
 };
 
 pub enum Principal {
@@ -44,16 +45,21 @@ struct Operation {
     path: String,
     summary: &'static str,
     access: Arc<Access<'static>>,
+    mode: RouteMode,
+}
+
+#[derive(Clone, Copy, Default)]
+struct RouteMode {
     stream: Option<StreamPolicy>,
     translation: Translation,
+    upload_limit: Option<u64>,
 }
 
 #[derive(Clone)]
 struct Policy {
     auth: Auth,
     access: Arc<Access<'static>>,
-    stream: Option<StreamPolicy>,
-    translation: Translation,
+    mode: RouteMode,
 }
 
 pub struct ApiRouter {
@@ -111,14 +117,7 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        self.register(
-            method,
-            path.into(),
-            summary,
-            None,
-            Translation::None,
-            handler,
-        )
+        self.register(method, path.into(), summary, RouteMode::default(), handler)
     }
 
     pub fn translated_route<H, T>(
@@ -139,7 +138,16 @@ impl ApiRouter {
                 "translation fields must be non-root JSON pointers"
             );
         }
-        self.register(method, path.into(), summary, None, translation, handler)
+        self.register(
+            method,
+            path.into(),
+            summary,
+            RouteMode {
+                translation,
+                ..RouteMode::default()
+            },
+            handler,
+        )
     }
 
     pub fn stream_route<H, T>(
@@ -158,8 +166,39 @@ impl ApiRouter {
             method,
             path.into(),
             summary,
-            Some(policy),
-            Translation::None,
+            RouteMode {
+                stream: Some(policy),
+                ..RouteMode::default()
+            },
+            handler,
+        )
+    }
+
+    /// Adds a streaming upload with a caller-defined maximum size and the shared read-rate policy.
+    pub fn upload_route<H, T>(
+        self,
+        method: Method,
+        path: impl Into<String>,
+        summary: &'static str,
+        limit: u64,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        assert!(
+            matches!(method, Method::POST | Method::PUT) && limit > 0,
+            "uploads require POST or PUT and a positive limit"
+        );
+        self.register(
+            method,
+            path.into(),
+            summary,
+            RouteMode {
+                upload_limit: Some(limit),
+                ..RouteMode::default()
+            },
             handler,
         )
     }
@@ -169,8 +208,7 @@ impl ApiRouter {
         method: Method,
         path: String,
         summary: &'static str,
-        stream: Option<StreamPolicy>,
-        translation: Translation,
+        mode: RouteMode,
         handler: H,
     ) -> Self
     where
@@ -193,8 +231,7 @@ impl ApiRouter {
             method,
             path,
             summary,
-            stream,
-            translation,
+            mode,
         };
         assert_ne!(
             *operation.access,
@@ -215,8 +252,7 @@ impl ApiRouter {
         let policy = Policy {
             auth: self.auth.clone(),
             access: operation.access.clone(),
-            stream: operation.stream,
-            translation: operation.translation,
+            mode: operation.mode,
         };
         self.router = std::mem::take(&mut self.router).route(
             &operation.path,
@@ -237,8 +273,7 @@ impl ApiRouter {
             path: "/api/openapi.json".into(),
             summary: "Get the management API schema",
             access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
-            stream: None,
-            translation: Translation::None,
+            mode: RouteMode::default(),
         };
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
@@ -248,24 +283,27 @@ impl ApiRouter {
         let modules = self.modules;
         let router = self
             .router
-            .fallback(move |uri: Uri| async move {
+            .fallback(move |request: Request| async move {
+                let path = request.uri().path();
                 if let Some((registry, enabled)) = modules.as_deref()
-                    && let Some(id) = module_of(uri.path())
+                    && let Some(id) = module_of(path)
                 {
                     match registry.status(enabled, id) {
                         Some(Status::Disabled) => {
-                            return ApiError::new(StatusCode::FORBIDDEN, "module is disabled");
+                            return ApiError::new(StatusCode::FORBIDDEN, "module is disabled")
+                                .into_response();
                         }
                         Some(Status::Absent) => {
                             return ApiError::new(
                                 StatusCode::NOT_FOUND,
                                 "module is not included in this build",
-                            );
+                            )
+                            .into_response();
                         }
                         _ => {}
                     }
                 }
-                ApiError::new(StatusCode::NOT_FOUND, "API route not found")
+                ApiError::new(StatusCode::NOT_FOUND, "API route not found").into_response()
             })
             .method_not_allowed_fallback(|| async {
                 ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
@@ -280,8 +318,20 @@ impl ApiRouter {
 }
 
 async fn authorize(State(policy): State<Policy>, mut request: Request, next: Next) -> Response {
+    let version = request.version();
+    let reject_upload = policy.mode.upload_limit.is_some() && !request.body().is_end_stream();
+    let reject = |error: ApiError| {
+        let mut response = error.into_response();
+        if reject_upload {
+            upload::close_incomplete(&mut response, version);
+        }
+        response
+    };
     let Some(principal) = (policy.auth)(request.headers()) else {
-        return ApiError::new(StatusCode::UNAUTHORIZED, "authentication required").into_response();
+        return reject(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "authentication required",
+        ));
     };
     let (allowed, restricted) = match principal {
         Principal::Session { read_only: false } => (true, false),
@@ -294,15 +344,35 @@ async fn authorize(State(policy): State<Policy>, mut request: Request, next: Nex
             !policy.access.allows_unredacted(&scopes),
         ),
     };
-    if !allowed || (restricted && policy.stream == Some(StreamPolicy::WritersOnly)) {
-        return ApiError::new(StatusCode::FORBIDDEN, "insufficient permission").into_response();
+    if !allowed || (restricted && policy.mode.stream == Some(StreamPolicy::WritersOnly)) {
+        return reject(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "insufficient permission",
+        ));
     }
+    let upload = match policy
+        .mode
+        .upload_limit
+        .map(|limit| upload::protect(&mut request, limit))
+        .transpose()
+    {
+        Ok(upload) => upload,
+        Err(error) => return reject(error),
+    };
     request.extensions_mut().insert(ReadOnly(restricted));
     let mut response = next.run(request).await;
+    if let Some(upload) = upload {
+        if let Some(error) = upload.error() {
+            response = error.into_response();
+        }
+        if !upload.complete() {
+            upload::close_incomplete(&mut response, version);
+        }
+    }
     response.extensions_mut().insert(RenderPolicy {
         restricted,
-        stream: policy.stream.is_some(),
-        translation: policy.translation,
+        stream: policy.mode.stream.is_some(),
+        translation: policy.mode.translation,
     });
     response
 }
@@ -377,12 +447,16 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
         } else {
             json!([{"sessionCookie":[]}])
         };
-        paths.entry(route.path.clone()).or_insert_with(|| json!({}))
-            [route.method.as_str().to_ascii_lowercase()] = json!({
+        let mut definition = json!({
             "summary":route.summary, "tags":[tag], "parameters":parameters,
             "responses":{"200":{"description":"Success"},"401":{"description":"Authentication required"},"403":{"description":"Insufficient permission"}},
-            "security":security,"x-required-scope":route.access.to_string(),"x-token-allowed":token,"x-stream":route.stream.is_some()
+            "security":security,"x-required-scope":route.access.to_string(),"x-token-allowed":token,"x-stream":route.mode.stream.is_some()
         });
+        if let Some(limit) = route.mode.upload_limit {
+            definition["x-upload-max-bytes"] = json!(limit);
+        }
+        paths.entry(route.path.clone()).or_insert_with(|| json!({}))
+            [route.method.as_str().to_ascii_lowercase()] = definition;
     }
     json!({"openapi":"3.0.3", "info":{"title":"FerrumGate Management API","version":env!("CARGO_PKG_VERSION")},
         "tags":tags.into_iter().map(|name| json!({"name":name})).collect::<Vec<_>>(),"paths":paths,

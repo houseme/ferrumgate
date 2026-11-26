@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use axum::{
     Json,
+    body::HttpBody,
     extract::{FromRequest, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header},
     middleware::Next,
@@ -14,6 +15,7 @@ use tokio::sync::Semaphore;
 use crate::{
     Localizer, Translation,
     response::{accepts_gzip, transform},
+    upload::close_incomplete,
 };
 
 const MAX_JSON: usize = 4 << 20;
@@ -153,8 +155,17 @@ pub(crate) async fn boundary(
     let mut response = if same_origin(&request) {
         next.run(request).await
     } else {
-        ApiError::new(StatusCode::FORBIDDEN, "cross-origin request denied").into_response()
+        let mut response =
+            ApiError::new(StatusCode::FORBIDDEN, "cross-origin request denied").into_response();
+        if !request.body().is_end_stream() {
+            close_incomplete(&mut response, request.version());
+        }
+        response
     };
+    let close = response
+        .headers()
+        .get(header::CONNECTION)
+        .is_some_and(|value| value == "close");
     let render = response
         .extensions_mut()
         .remove::<RenderPolicy>()
@@ -178,6 +189,9 @@ pub(crate) async fn boundary(
         .await;
     }
     let headers = response.headers_mut();
+    if close {
+        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
@@ -188,6 +202,7 @@ pub(crate) async fn boundary(
         header::REFERRER_POLICY,
         HeaderValue::from_static("same-origin"),
     );
+
     headers.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),

@@ -8,6 +8,7 @@ mod redact;
 mod response;
 mod router;
 pub mod scope;
+mod upload;
 
 pub use collection::{Collection, CollectionPaths, ItemChange, SECRET_MASK, keep_secret};
 pub use http::{ApiError, ApiJson};

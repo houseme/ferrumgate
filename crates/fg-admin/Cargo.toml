@@ -13,6 +13,7 @@ fg-config = { path = "../fg-config" }
 fg-core = { path = "../fg-core" }
 flate2 = "1"
 getrandom = "0.4"
+http-body = "1"
 http-body-util = "0.1"
 percent-encoding = "2"
 serde.workspace = true
