@@ -169,10 +169,34 @@ pub fn module_of(path: &str) -> Option<&str> {
     (!module.is_empty()).then_some(module)
 }
 
+pub(crate) fn bootstrap_route(method: &Method, path: &str) -> bool {
+    matches!(
+        (method, path),
+        (
+            &Method::POST,
+            "/api/login"
+                | "/api/logout"
+                | "/api/login/passkey/begin"
+                | "/api/login/passkey/finish"
+                | "/api/login/demo"
+                | "/api/login/fnos"
+        ) | (
+            &Method::GET | &Method::HEAD,
+            "/api/login/providers"
+                | "/api/login/oauth/start"
+                | "/api/login/oauth/callback"
+                | "/api/demo"
+        )
+    )
+}
+
 pub fn required<'a>(method: &Method, path: &'a str) -> Access<'a> {
     let Some(module) = module_of(path) else {
         return Access::SessionOnly;
     };
+    if bootstrap_route(method, path) {
+        return Access::Public;
+    }
     if FORBIDDEN.iter().any(|prefix| {
         path == *prefix
             || path

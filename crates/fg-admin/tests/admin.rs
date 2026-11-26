@@ -34,6 +34,8 @@ mod compat;
 mod logs;
 #[path = "admin/models.rs"]
 mod models;
+#[path = "admin/public_routes.rs"]
+mod public_routes;
 #[path = "admin/transport.rs"]
 mod transport;
 

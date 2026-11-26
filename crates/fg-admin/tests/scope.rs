@@ -49,3 +49,47 @@ fn public_credential_routes_cannot_use_the_normal_registration_path() {
         || async {},
     );
 }
+
+#[test]
+#[should_panic(expected = "route is not a public API endpoint")]
+fn public_registration_cannot_mount_a_protected_api() {
+    let _ = fg_admin::ApiRouter::default().public_route(
+        Method::GET,
+        "/api/account/users",
+        "Protected fixture",
+        || async {},
+    );
+}
+
+#[test]
+#[should_panic(expected = "public module route requires a known module prefix")]
+fn public_registration_requires_a_fixed_module_prefix() {
+    let _ = fg_admin::ApiRouter::default().public_route(
+        Method::GET,
+        "/api/{module}/public/status",
+        "Module fixture",
+        || async {},
+    );
+}
+
+#[test]
+fn bootstrap_scope_applies_only_to_declared_methods_and_paths() {
+    assert_eq!(required(&Method::POST, "/api/login"), Access::Public);
+    assert_eq!(
+        required(&Method::HEAD, "/api/login/providers"),
+        Access::Public
+    );
+    assert_eq!(
+        required(&Method::GET, "/api/login/oauth/callback"),
+        Access::Public
+    );
+    assert_eq!(required(&Method::GET, "/api/login"), Access::SessionOnly);
+    assert_eq!(
+        required(&Method::POST, "/api/login/oauth/callback"),
+        Access::SessionOnly
+    );
+    assert_eq!(
+        required(&Method::POST, "/api/login/other"),
+        Access::SessionOnly
+    );
+}

@@ -774,6 +774,19 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 143 项默认测试和 9 项本机 Pebble ACME 测试。集合回环用例验证展示字段回传、嵌套配置的严格校验、删除计数字段、接口文档导出，以及只读身份读取的 OpenAPI 与静态定义一致。只读身份仍无法通过密钥接口读取实际值。
 
+### WP-11 公开路由
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 147 项默认测试和 9 项本机 Pebble ACME 测试。新增用例覆盖公开路由与同路径受保护方法的鉴权隔离、模块凭据、同源校验、JSON 请求上限、禁用和未编译模块的状态，以及 OpenAPI 和 Markdown 的收录规则。808 个上游权限条目继续逐项通过。实际登录处理器和模块凭据由相应工作包接入。
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。

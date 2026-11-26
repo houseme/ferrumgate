@@ -11,7 +11,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{MethodFilter, on},
 };
-use fg_core::registry::{Enabled, Registry, Status};
+use fg_core::registry::{CATALOG, Enabled, Registry, Status};
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
@@ -19,7 +19,7 @@ use crate::{
     AdminAssets, ApiError, Localizer, RouteModels, Translation,
     http::{Presentation, RenderPolicy, boundary},
     response::MAX_TRANSFORMS,
-    scope::{Access, module_of, required},
+    scope::{Access, bootstrap_route, module_of, required},
     upload,
 };
 
@@ -47,6 +47,33 @@ struct Operation {
     access: Arc<Access<'static>>,
     mode: RouteMode,
     models: RouteModels,
+}
+
+impl Operation {
+    fn new(
+        method: Method,
+        path: String,
+        summary: &'static str,
+        mode: RouteMode,
+        models: RouteModels,
+    ) -> Self {
+        assert!(
+            module_of(&path).is_some(),
+            "admin route requires an /api/ path"
+        );
+        Self {
+            access: Arc::new(required(&method, &path).into_owned()),
+            method,
+            path,
+            summary,
+            mode,
+            models,
+        }
+    }
+
+    fn documented(&self) -> bool {
+        !bootstrap_route(&self.method, &self.path)
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -154,6 +181,41 @@ impl ApiRouter {
         )
     }
 
+    /// Installs a login entry point or a module's public endpoint.
+    /// The handler owns any endpoint-specific credential checks.
+    pub fn public_route<H, T>(
+        mut self,
+        method: Method,
+        path: impl Into<String>,
+        summary: &'static str,
+        handler: H,
+    ) -> Self
+    where
+        H: Handler<T, ()>,
+        T: 'static,
+    {
+        let operation = Operation::new(
+            method,
+            path.into(),
+            summary,
+            RouteMode::default(),
+            RouteModels::default(),
+        );
+        assert_eq!(
+            *operation.access,
+            Access::Public,
+            "route is not a public API endpoint"
+        );
+        let module = module_of(&operation.path).expect("API path");
+        assert!(
+            bootstrap_route(&operation.method, &operation.path)
+                || CATALOG.iter().any(|entry| entry.id == module),
+            "public module route requires a known module prefix"
+        );
+        self.mount(operation, handler);
+        self
+    }
+
     pub fn translated_route<H, T>(
         self,
         method: Method,
@@ -253,25 +315,11 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
-        assert!(
-            module_of(&path).is_some(),
-            "admin route requires an /api/ path"
-        );
         assert_ne!(
             path, "/api/openapi.json",
             "OpenAPI is installed by the builder"
         );
-        if matches!(self.status(&path), Some(Status::Disabled | Status::Absent)) {
-            return self;
-        }
-        let operation = Operation {
-            access: Arc::new(required(&method, &path).into_owned()),
-            method,
-            path,
-            summary,
-            mode,
-            models,
-        };
+        let operation = Operation::new(method, path, summary, mode, models);
         assert_ne!(
             *operation.access,
             Access::Public,
@@ -286,18 +334,26 @@ impl ApiRouter {
         H: Handler<T, ()>,
         T: 'static,
     {
+        if matches!(
+            self.status(&operation.path),
+            Some(Status::Disabled | Status::Absent)
+        ) {
+            return;
+        }
         let method =
             MethodFilter::try_from(operation.method.clone()).expect("supported API method");
-        let policy = Policy {
-            auth: self.auth.clone(),
-            access: operation.access.clone(),
-            mode: operation.mode,
+        let route = on::<_, _, ()>(method, handler);
+        let route = if *operation.access == Access::Public {
+            route
+        } else {
+            let policy = Policy {
+                auth: self.auth.clone(),
+                access: operation.access.clone(),
+                mode: operation.mode,
+            };
+            route.route_layer(middleware::from_fn_with_state(policy, authorize))
         };
-        self.router = std::mem::take(&mut self.router).route(
-            &operation.path,
-            on::<_, _, ()>(method, handler)
-                .route_layer(middleware::from_fn_with_state(policy, authorize)),
-        );
+        self.router = std::mem::take(&mut self.router).route(&operation.path, route);
         self.operations.push(operation);
     }
 
@@ -307,18 +363,17 @@ impl ApiRouter {
     }
 
     pub fn finish(mut self) -> Admin {
-        let openapi = Operation {
-            method: Method::GET,
-            path: "/api/openapi.json".into(),
-            summary: "Get the management API schema",
-            access: Arc::new(required(&Method::GET, "/api/openapi.json").into_owned()),
-            mode: RouteMode {
+        let openapi = Operation::new(
+            Method::GET,
+            "/api/openapi.json".into(),
+            "Get the management API schema",
+            RouteMode {
                 // Generated from route definitions and types, with no instance data.
                 static_document: true,
                 ..RouteMode::default()
             },
-            models: RouteModels::default(),
-        };
+            RouteModels::default(),
+        );
         let document = document(self.operations.iter().chain(std::iter::once(&openapi)));
         let spec = Bytes::from(serde_json::to_vec(&document).expect("OpenAPI document serializes"));
         self.mount(openapi, move || async move {
@@ -449,7 +504,7 @@ impl Admin {
             markdown,
             "# FerrumGate Management API\n\n| Method | Path | Summary | Token scope |\n|---|---|---|---|"
         )?;
-        for route in &self.operations {
+        for route in self.operations.iter().filter(|route| route.documented()) {
             let access = route.access.to_string();
             let access = if access.is_empty() {
                 "any valid token"
@@ -472,7 +527,7 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
     let mut paths = serde_json::Map::new();
     let mut tags = BTreeSet::new();
     let mut domains = BTreeSet::new();
-    for route in operations {
+    for route in operations.filter(|route| route.documented()) {
         let tag = if route.path == "/api/openapi.json" {
             "system"
         } else {
@@ -493,15 +548,22 @@ fn document<'a>(operations: impl Iterator<Item = &'a Operation>) -> Value {
             .map(|name| json!({"name":name,"in":"path","required":true,"schema":{"type":"string"}}))
             .collect();
         parameters.extend(route.models.parameters.iter().cloned());
-        let token = !matches!(*route.access, Access::SessionOnly | Access::Public);
-        let security = if token {
-            json!([{"bearerAuth":[]}, {"sessionCookie":[]}])
-        } else {
-            json!([{"sessionCookie":[]}])
+        let (security, token, unauthorized) = match *route.access {
+            Access::Public => (json!([]), false, "Invalid module credential"),
+            Access::SessionOnly => (
+                json!([{"sessionCookie":[]}]),
+                false,
+                "Authentication required",
+            ),
+            _ => (
+                json!([{"bearerAuth":[]}, {"sessionCookie":[]}]),
+                true,
+                "Authentication required",
+            ),
         };
         let mut definition = json!({
             "summary":route.summary, "tags":[tag], "parameters":parameters,
-            "responses":{"200":{"description":"Success"},"401":{"description":"Authentication required"},"403":{"description":"Insufficient permission"}},
+            "responses":{"200":{"description":"Success"},"401":{"description":unauthorized},"403":{"description":"Insufficient permission"}},
             "security":security,"x-required-scope":route.access.to_string(),"x-token-allowed":token,"x-stream":route.mode.stream.is_some()
         });
         if let Some(limit) = route.mode.upload_limit {
