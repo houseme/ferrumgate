@@ -174,6 +174,19 @@ async fn management_bootstrap_login_change_logout_and_online_reset() -> Result<(
             .to_bytes(),
     )?;
     assert_eq!(body["score"], 90);
+    let mut list = request(Method::GET, "/api/tokens", "localhost", full(""));
+    list.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    let listed: Value = serde_json::from_slice(
+        &send(&mut client, list)
+            .await?
+            .into_body()
+            .collect()
+            .await?
+            .to_bytes(),
+    )?;
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["legacy"], true);
+    assert!(listed[0].get("hash").is_none());
     let mut logout = request(Method::POST, "/api/logout", "localhost", full(""));
     logout.headers_mut().insert(header::COOKIE, cookie.parse()?);
     assert_eq!(send(&mut client, logout).await?.status(), StatusCode::OK);

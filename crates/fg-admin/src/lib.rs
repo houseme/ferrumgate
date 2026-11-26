@@ -16,6 +16,7 @@ mod response;
 mod router;
 pub mod scope;
 mod security_score;
+mod token_routes;
 mod upload;
 
 pub use assets::{AdminAssets, Asset};

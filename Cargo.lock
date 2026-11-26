@@ -1150,6 +1150,7 @@ dependencies = [
  "openidconnect",
  "reqwest",
  "ring",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "subtle",

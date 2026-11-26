@@ -9,7 +9,7 @@ publish = false
 anyhow.workspace = true
 arc-swap = "1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
-fg-auth = { path = "../fg-auth" }
+fg-auth = { path = "../fg-auth", features = ["schema"] }
 fg-config = { path = "../fg-config" }
 fg-core = { path = "../fg-core" }
 fg-logging = { path = "../fg-logging", features = ["schema"] }

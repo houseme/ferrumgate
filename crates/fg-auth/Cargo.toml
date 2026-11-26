@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+schema = ["dep:schemars"]
+
 [dependencies]
 anyhow.workspace = true
 arc-swap = "1"
@@ -17,6 +20,7 @@ getrandom = "0.4"
 openidconnect = { version = "4.1", default-features = false }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 ring = "0.17"
+schemars = { version = "1", optional = true }
 serde.workspace = true
 serde_json = { workspace = true, features = ["raw_value"] }
 subtle = "2"

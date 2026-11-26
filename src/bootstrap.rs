@@ -59,7 +59,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
         tracing::info!(target: "fg_core::auth", kind = event.kind.info().name, "administrator authentication event");
         std::future::ready(())
     })?;
-    let (accounts, third_login) = tokio::task::spawn_blocking(move || {
+    let (accounts, tokens, third_login) = tokio::task::spawn_blocking(move || {
         let store = ConfigStore::open(&directory)?;
         let third_login = match store.load::<ThirdLoginConfig>("third-login")? {
             Loaded::Found(config) => Some(config),
@@ -81,7 +81,7 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
         if tokens.migrate_legacy_settings("ferrumgate", time::OffsetDateTime::now_utc())? {
             tracing::info!(target: "fg_core::auth", "legacy API token migrated");
         }
-        Ok::<_, anyhow::Error>((Arc::new(manager), third_login))
+        Ok::<_, anyhow::Error>((Arc::new(manager), Arc::new(tokens), third_login))
     })
     .await??;
     let third_login = if let Some(config) = third_login {
@@ -106,7 +106,16 @@ pub async fn serve(config: PathBuf, mut options: AdminOptions, logs: LogHandle) 
         let Ok(ready) = waiting.await else {
             return Ok(());
         };
-        serve_management(listener, options, accounts, logs, ready, third_login).await
+        serve_management(
+            listener,
+            options,
+            accounts,
+            tokens,
+            logs,
+            ready,
+            third_login,
+        )
+        .await
     };
     tokio::pin!(gateway, management);
     tokio::select! {
@@ -128,6 +137,7 @@ async fn serve_management(
     listener: TcpListener,
     options: AdminOptions,
     accounts: Arc<AccountManager>,
+    tokens: Arc<TokenManager>,
     logs: LogHandle,
     ready: ManagementReady,
     third_login: Option<Arc<ThirdLogin>>,
@@ -153,6 +163,7 @@ async fn serve_management(
     let admin = router
         .with_logs(logs)
         .with_security_status(accounts.clone(), exposure)
+        .with_token_management(tokens)
         .finish();
     tracing::info!(listen = %listener.local_addr()?, "management ready");
     let mut drain = ready.drain;

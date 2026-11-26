@@ -154,13 +154,7 @@ impl Sessions {
         &self,
         operation: impl FnOnce() -> T + Send + 'static,
     ) -> Result<T, ApiError> {
-        let permit = self.workers.clone().try_acquire_owned().map_err(|_| BUSY)?;
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            operation()
-        })
-        .await
-        .map_err(|_| ApiError::internal())
+        crate::http::run_blocking(&self.workers, BUSY, operation).await
     }
 
     async fn login(

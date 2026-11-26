@@ -152,6 +152,12 @@ impl ApiRouter {
         self
     }
 
+    pub fn with_token_management(self, tokens: Arc<fg_auth::token::TokenManager>) -> Self {
+        let domains = crate::token_routes::domains(self.modules.as_deref(), &tokens);
+        tokens.set_domains(domains.iter().map(|domain| domain.id.to_owned()));
+        crate::token_routes::mount(self, tokens, domains)
+    }
+
     /// Installs account routes before other routes. Set `secure` for an externally HTTPS listener.
     /// The listener must supply `ConnectInfo<SocketAddr>`. Other authenticators supply API tokens.
     pub fn with_accounts(

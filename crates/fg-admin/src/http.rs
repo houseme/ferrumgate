@@ -52,6 +52,20 @@ impl IntoResponse for ApiError {
 
 pub struct ApiJson<T>(pub T);
 
+pub(crate) async fn run_blocking<T: Send + 'static>(
+    workers: &Arc<Semaphore>,
+    busy: ApiError,
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, ApiError> {
+    let permit = workers.clone().try_acquire_owned().map_err(|_| busy)?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        operation()
+    })
+    .await
+    .map_err(|_| ApiError::internal())
+}
+
 impl<S: Send + Sync, T: DeserializeOwned> FromRequest<S> for ApiJson<T> {
     type Rejection = ApiError;
 
