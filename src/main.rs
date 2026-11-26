@@ -1,8 +1,14 @@
 #![forbid(unsafe_code)]
 
-use std::{path::PathBuf, time::Duration};
+mod bootstrap;
 
-use anyhow::Result;
+use std::{
+    io::{self, Write},
+    path::PathBuf,
+    time::Duration,
+};
+
+use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{filter::LevelFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -31,6 +37,20 @@ enum Command {
         /// Persist runtime logs to an absolute directory.
         #[arg(long)]
         log_dir: Option<PathBuf>,
+        #[command(flatten)]
+        admin: bootstrap::AdminOptions,
+    },
+    /// Reset the administrator password using the private configuration directory.
+    ResetPassword {
+        #[arg(long)]
+        admin_dir: PathBuf,
+        #[arg(long)]
+        disable_totp: bool,
+    },
+    /// Disable administrator TOTP using the private configuration directory.
+    ResetTotp {
+        #[arg(long)]
+        admin_dir: PathBuf,
     },
 }
 
@@ -45,10 +65,28 @@ async fn main() -> Result<()> {
             println!("configuration is valid");
             Ok(())
         }
+        Command::ResetPassword {
+            admin_dir,
+            disable_totp,
+        } => {
+            confirm_reset()?;
+            let password = rpassword::prompt_password("New administrator password: ")?;
+            let again = rpassword::prompt_password("Repeat administrator password: ")?;
+            ensure!(password == again, "passwords do not match");
+            submit_reset(
+                admin_dir,
+                fg_auth::ResetRequest::password(&password, disable_totp)?,
+            )
+        }
+        Command::ResetTotp { admin_dir } => {
+            confirm_reset()?;
+            submit_reset(admin_dir, fg_auth::ResetRequest::totp()?)
+        }
         Command::Serve {
             config,
             log_level,
             log_dir,
+            admin,
         } => {
             let logs = fg_logging::Logs::start(
                 fg_logging::Options {
@@ -69,9 +107,28 @@ async fn main() -> Result<()> {
                         .with_ansi(false),
                 )
                 .try_init()?;
-            let result = fg_gateway::serve(config).await;
+            let result = bootstrap::serve(config, admin, logs.handle()).await;
             let _ = logs.shutdown(Duration::from_secs(3));
             result
         }
     }
+}
+
+fn confirm_reset() -> Result<()> {
+    eprint!("Type yes to reset the administrator credentials: ");
+    io::stderr().flush()?;
+    let mut response = String::new();
+    io::stdin().read_line(&mut response)?;
+    ensure!(response.trim() == "yes", "reset cancelled");
+    Ok(())
+}
+
+fn submit_reset(directory: PathBuf, request: fg_auth::ResetRequest) -> Result<()> {
+    match fg_auth::submit_reset(fg_config::ConfigStore::open(&directory)?, request)? {
+        fg_auth::ResetStatus::Applied => println!("Administrator reset applied"),
+        fg_auth::ResetStatus::Pending => {
+            println!("Administrator reset queued for the running service")
+        }
+    }
+    Ok(())
 }

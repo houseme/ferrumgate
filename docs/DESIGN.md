@@ -324,3 +324,11 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 ### 第三方登录
 
 管理配置目录可选 `third-login.json`，包含提供方配置、`allowed` 稳定身份允许列表和 `skipTotp`。GitHub 使用数字用户 ID，QQ 使用应用对应的 OpenID，Google 和 OIDC 使用签名 ID Token 的 `sub`。Google 及通用 OIDC 校验配置的签发方、客户端受众、有效期、签名和 nonce。回调使用一次性 `state`、浏览器 Cookie 绑定和 PKCE S256，失败沿用密码登录的来源限流。HTTP 客户端禁止自动重定向，限制请求时间和响应大小。
+
+### 重置、安全评分与启动
+
+`reset-password` 和 `reset-totp` 需要操作者输入 `yes`。重置队列受跨进程锁保护，旧请求合并后原子保存。服务持有账号锁时由服务处理，离线时由命令直接应用。账号提交记录请求 ID，重复处理不会再次吊销。重置密码重新启用密码登录，重置会轮换会话密钥。
+
+`fgate serve --admin-listen 127.0.0.1:8080 --admin-dir <目录>` 在数据面就绪后启用回环管理监听，共用进程关闭信号。首次启动可读取 `FERRUMGATE_INITIAL_PASSWORD`，否则在标准错误输出一次随机初始密码。外部代理通过 `--admin-origin` 和 `--admin-prefix` 配置，HTTPS Cookie 与 Passkey RP 取自该配置。
+
+`GET /api/system/security` 返回七项扣分和总分。安全入口由 WP-14 接入，评分使用监听装配提供的已知暴露状态。登录和重置事件通过现有事件总线发布，持久化审计由 WP-08 接入。

@@ -25,12 +25,16 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 clap = { version = "4", features = ["derive"] }
 fg-admin = { path = "crates/fg-admin" }
+fg-auth = { path = "crates/fg-auth" }
+fg-config = { path = "crates/fg-config" }
 fg-core = { path = "crates/fg-core" }
 fg-gateway = { path = "crates/fg-gateway" }
 fg-logging = { path = "crates/fg-logging" }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+rpassword = "7"
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 

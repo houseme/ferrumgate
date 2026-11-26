@@ -2,8 +2,17 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
-use fg_core::{events::EventBus, module::Module, registry::Registry};
-use tokio::{net::TcpListener, sync::watch, task::JoinSet, time::timeout};
+use fg_core::{
+    events::EventBus,
+    module::Module,
+    registry::{Enabled, Registry},
+};
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, watch},
+    task::JoinSet,
+    time::timeout,
+};
 
 use crate::{
     acme::Managed,
@@ -41,6 +50,26 @@ impl Generation {
 
 /// Run the configured data plane until a process shutdown signal arrives.
 pub async fn serve(path: PathBuf) -> Result<()> {
+    serve_gateway(path, None).await
+}
+
+pub struct ManagementReady {
+    pub registry: Registry,
+    pub enabled: Enabled,
+    pub drain: watch::Receiver<bool>,
+}
+
+pub async fn serve_with_ready(
+    path: PathBuf,
+    ready: oneshot::Sender<ManagementReady>,
+) -> Result<()> {
+    serve_gateway(path, Some(ready)).await
+}
+
+async fn serve_gateway(
+    path: PathBuf,
+    ready: Option<oneshot::Sender<ManagementReady>>,
+) -> Result<()> {
     let managed = Arc::new(Managed::default());
     let config = config::load(&path, managed.clone()).await?;
     let enabled = REGISTRY.resolve_enabled(&config.disabled_modules, false);
@@ -137,6 +166,7 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     );
 
     let (drain, drain_rx) = watch::channel(false);
+    let management_drain = drain_rx.clone();
     let mut modules = JoinSet::new();
     if let Some(certificates) = certificates {
         start(certificates, drain_rx.clone(), &mut modules);
@@ -153,6 +183,13 @@ pub async fn serve(path: PathBuf) -> Result<()> {
     }
     if let Some(l4) = l4 {
         start(l4, drain_rx, &mut modules);
+    }
+    if let Some(ready) = ready {
+        let _ = ready.send(ManagementReady {
+            registry: REGISTRY,
+            enabled,
+            drain: management_drain,
+        });
     }
 
     let reload = async {

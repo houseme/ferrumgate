@@ -3,6 +3,9 @@
 #[cfg(unix)]
 #[path = "gateway/acme.rs"]
 mod acme;
+#[cfg(unix)]
+#[path = "gateway/admin.rs"]
+mod admin;
 #[path = "gateway/backends.rs"]
 mod backends;
 #[path = "gateway/common.rs"]

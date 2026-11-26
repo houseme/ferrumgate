@@ -895,6 +895,51 @@ git diff --check
 
 macOS arm64、Rust stable 1.100.0 上通过 176 项工作区测试和 9 项本机 Pebble ACME 测试。用例验证旧默认密码和弱密码识别、重启后改密状态、有效强密码登录无需写账号文件、TOTP 完成后提交以及提交失败时拒发会话。HTTP 回环验证改密豁免、普通令牌操作和安全配置拒绝、改密后旧会话失效。界面语言豁免使用测试路由验证，持久化由 WP-07 接入。
 
+### WP-12 剩余链路与启动验收
+
+第 10 步接入第三方登录，第 11 步接入账号恢复，第 12 步接入七项安全评分，第 13 步接入可选的管理监听。首次启动、登录、改密、登出及在线重置已通过真实进程和回环 HTTP 验证。macOS arm64、Rust stable 1.100.0 上通过 180 项工作区测试和 9 项 Pebble ACME 测试。Clippy、格式检查和差异检查通过。
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-auth --test reset
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-admin --test admin login_oidc
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway management_bootstrap
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+启用回环管理监听的示例：
+
+```bash
+fgate serve --config ferrumgate.example.toml \
+  --admin-listen 127.0.0.1:8080 --admin-dir "$PWD/management"
+```
+
+如管理服务由受信代理对外提供，配置 `--admin-origin`，必要时同时配置 `--admin-prefix`。第三方登录使用管理目录内权限受限的 `third-login.json`，允许列表按提供方与稳定身份指定，例如 `github:<数字 ID>`、`qq:<OpenID>` 或 `oidc:<sub>`。登录回调注册为外部管理地址下的 `/api/login/oauth/callback`。回调测试使用本地假 OIDC 提供方和真实签名，实际 GitHub、Google、QQ 及生产 OIDC 环境待验收。
+
+```json
+{
+  "providers": [
+    {
+      "key": "oidc",
+      "name": "Organization login",
+      "type": "oidc",
+      "issuer": "https://identity.example.test",
+      "clientId": "<client id>",
+      "clientSecret": "<client secret>"
+    }
+  ],
+  "allowed": ["oidc:<subject>"],
+  "skipTotp": false
+}
+```
+
+`fgate reset-password --admin-dir <目录>` 交互式读取新密码，可用 `--disable-totp` 同时清除二次验证。`fgate reset-totp --admin-dir <目录>` 仅清除二次验证。两条命令需要输入 `yes`。运行中请求由管理服务轮询应用，离线时命令直接更新账号。
+
+验收边界包括物理认证器、旧 Passkey 格式迁移、真实身份提供方，以及依赖 WP-07 的界面语言与全局设置、WP-08 的持久化审计和 WP-14 的可信代理、安全入口及飞牛统一网关。当前管理监听使用回环地址。[RFC 7636](https://www.rfc-editor.org/rfc/rfc7636) · [OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)
+
 ### 数据面交付记录
 
 - 2026-11-25 在 macOS arm64、Rust stable 1.100.0 上通过格式检查、Clippy、4 项 Rust 单元测试、release 构建和 8 项 Rust 端到端用例。后者覆盖实际转发、路径与查询、逐跳头、连接复用、16 个并发客户端共 400 次成功请求、1 MiB 上传和分段下载、504、错误重载保留旧配置、排空、TLS SNI、上游证书校验与轮换。第 3 节的 curl TLS 验证也通过。
