@@ -11,10 +11,11 @@ use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
     header::{
-        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue,
-        PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE, VIA,
+        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, HeaderMap, HeaderName,
+        HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING,
+        UPGRADE, VIA,
     },
-    http::uri::{Authority, Scheme},
+    http::uri::{Authority, PathAndQuery, Scheme},
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
@@ -27,6 +28,13 @@ use crate::{
     config::{self, RouteAction, Routes, Settings, milliseconds},
     static_files::LocalBody,
     tls::ConnectionIdentity,
+    web::{
+        identity,
+        proxy::{
+            cors, headers,
+            rewrite::{self, Outcome},
+        },
+    },
     websocket::{Handshake, Tunnel},
 };
 
@@ -112,9 +120,11 @@ impl Proxy {
             return reply(StatusCode::NOT_IMPLEMENTED);
         }
         let uri = request.uri();
-        let Some(target) = uri
+        // Owned so a site rewrite can replace the forwarded path (WP-23).
+        let Some(mut target) = uri
             .path_and_query()
             .filter(|target| target.path().starts_with('/'))
+            .cloned()
         else {
             return reply(StatusCode::BAD_REQUEST);
         };
@@ -178,7 +188,7 @@ impl Proxy {
                         .serve(
                             request.method(),
                             &host,
-                            target,
+                            &target,
                             route.prefix.as_str(),
                             request.headers(),
                         )
@@ -189,6 +199,56 @@ impl Proxy {
                     };
                 }
             };
+            // WP-23 per-site options. Every step below is a no-op on the
+            // TOML path (`SiteProxyOptions::default`), so legacy routes
+            // behave byte-for-byte as before.
+            let options = &route.options;
+            // Forged identity headers go first, before anything reads them.
+            identity::strip(request.headers_mut(), &options.identity);
+            // Rewrites and redirects; the host parameter is the original
+            // `Host` as text (empty when it is not valid UTF-8).
+            let original_host_str = original_host.to_str().unwrap_or("");
+            match rewrite::apply_all(&options.rewrites, target.as_str(), original_host_str) {
+                Outcome::None => {}
+                Outcome::Rewritten(rewritten) => {
+                    // `to` is validated to start with `/`, so the parse
+                    // only fails on pathological config; keep the old path.
+                    if let Ok(parsed) = rewritten.parse::<PathAndQuery>() {
+                        target = parsed;
+                    }
+                }
+                Outcome::Redirect { target, code } => {
+                    if let (Ok(status), Ok(location)) = (
+                        StatusCode::from_u16(code),
+                        HeaderValue::from_str(&target),
+                    ) {
+                        let mut response = reply(status);
+                        response.headers_mut().insert(LOCATION, location);
+                        return response;
+                    }
+                    // An unusable target/code falls through to plain proxying.
+                }
+            }
+            // A CORS preflight is answered here and never proxied; a
+            // preflight without `Origin` is treated as a plain OPTIONS.
+            if let Some(cors) = &options.cors {
+                let requested = request
+                    .headers()
+                    .get("access-control-request-method")
+                    .and_then(|value| value.to_str().ok());
+                if cors::is_preflight(request.method().as_str(), requested)
+                    && let Some(origin) = request
+                        .headers()
+                        .get("origin")
+                        .and_then(|value| value.to_str().ok())
+                {
+                    let mut response = reply(StatusCode::OK);
+                    for (name, value) in cors.preflight_headers(origin) {
+                        response.headers_mut().insert(name, value);
+                    }
+                    return response;
+                }
+            }
             let Some(backend) = route.backends.select(route.health.is_some()) else {
                 return reply(StatusCode::SERVICE_UNAVAILABLE);
             };
@@ -230,20 +290,33 @@ impl Proxy {
         for name in forwarding_headers {
             headers.remove(name);
         }
-        headers.insert(HOST, backend.host.clone());
-        headers.insert("x-forwarded-host", original_host);
+        // `use_target_host` keeps the legacy backend address as `Host`;
+        // otherwise the visitor's original authority is passed through.
+        // `original_host` is cloned because X-Forwarded-Host still needs it.
         headers.insert(
-            "x-forwarded-proto",
-            HeaderValue::from_static(if tls_identity.is_some() {
-                "https"
+            HOST,
+            if route.options.use_target_host {
+                backend.host.clone()
             } else {
-                "http"
-            }),
+                original_host.clone()
+            },
         );
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_str(&peer.ip().to_string()).expect("IP address is a header value"),
-        );
+        if route.options.forwarded_headers {
+            headers.insert("x-forwarded-host", original_host);
+            headers.insert(
+                "x-forwarded-proto",
+                HeaderValue::from_static(if tls_identity.is_some() {
+                    "https"
+                } else {
+                    "http"
+                }),
+            );
+            headers.insert(
+                "x-forwarded-for",
+                HeaderValue::from_str(&peer.ip().to_string())
+                    .expect("IP address is a header value"),
+            );
+        }
         headers.append(
             VIA,
             HeaderValue::from_static(if downstream_h2 {
@@ -252,6 +325,9 @@ impl Proxy {
                 "1.1 ferrumgate"
             }),
         );
+        // Site-requested header edits run after the forwarded set is in
+        // place, so they have the final say about what the backend sees.
+        headers::apply(headers, &route.options.request_headers);
         let upstream_h2_required = handshake.is_none() && (route.upstream_h2c || grpc);
         if downstream_h2 && upstream_h2_required {
             headers.insert(TE, HeaderValue::from_static("trailers"));
@@ -269,6 +345,17 @@ impl Proxy {
         } else {
             Version::HTTP_11
         };
+        // A matching `Origin` earns CORS headers on every successful
+        // response (regular and 101 alike); captured before the body moves.
+        let cors_origin = route.options.cors.as_ref().and_then(|cors| {
+            let origin = request.headers().get("origin")?;
+            let origin = origin.to_str().ok()?;
+            if cors.origin_allowed(origin) {
+                Some(origin.to_owned())
+            } else {
+                None
+            }
+        });
         let request = request
             .map(|body| Either::Left(DataBody::new(body, downstream_h2 && upstream_h2_required)));
         let pending = if handshake.is_some() {
@@ -278,7 +365,11 @@ impl Proxy {
         } else {
             self.client.request(request)
         };
-        let result = timeout(self.response_header_timeout, pending).await;
+        let deadline = route
+            .options
+            .response_header_timeout
+            .unwrap_or(self.response_header_timeout);
+        let result = timeout(deadline, pending).await;
 
         match &result {
             Ok(Ok(_)) => route.backends.connected(backend, route.health.is_some()),
@@ -297,11 +388,28 @@ impl Proxy {
                 if tunnel.set(upgraded).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
                 }
+                if let Some(origin) = cors_origin.as_deref()
+                    && let Some(cors) = route.options.cors.as_ref()
+                {
+                    let fields = response.headers_mut();
+                    for (name, value) in cors.response_headers(origin) {
+                        fields.insert(name, value);
+                    }
+                }
                 response.map(|_| Either::Right(Either::Left(Full::default())))
             }
             Ok(Ok(mut response)) if !response.status().is_informational() => {
                 if strip_hop_headers(response.headers_mut()).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
+                }
+                headers::apply(response.headers_mut(), &route.options.response_headers);
+                if let Some(origin) = cors_origin.as_deref()
+                    && let Some(cors) = route.options.cors.as_ref()
+                {
+                    let fields = response.headers_mut();
+                    for (name, value) in cors.response_headers(origin) {
+                        fields.insert(name, value);
+                    }
                 }
                 let trailers = downstream_h2 && response.version() == Version::HTTP_2;
                 *response.version_mut() = downstream_version;
@@ -502,3 +610,11 @@ mod tests {
         assert!(strip_hop_headers(&mut headers).is_err());
     }
 }
+
+// WP-23 per-site options are compiled by `web::bridge` (pub(crate)) and
+// consumed here, so the end-to-end forwarding tests live in the shared
+// workspace harness file `tests/gateway/wp23_options.rs` and are compiled
+// into this crate's unit-test binary via `#[path]`.
+#[cfg(test)]
+#[path = "../../../tests/gateway/wp23_options.rs"]
+mod wp23_options;

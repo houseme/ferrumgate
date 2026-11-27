@@ -10,13 +10,23 @@ use std::time::SystemTime;
 use super::{ActiveCheck, Backend, Policy, UpstreamStatus};
 use super::{FAILURE_THRESHOLD, MAX_BACKENDS, PAUSE};
 use super::select;
-use super::target::Target;
+use super::target::{Target, TargetError, parse_target};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolError {
     NoBackends,
     TooManyBackends,
     Duplicate(String),
+    /// `site.targets[index]` failed to parse; `index` is the 0-based line.
+    BadTarget {
+        index: usize,
+        source: TargetError,
+    },
+    /// Unknown `lb_policy` value (the raw text).
+    BadPolicy(String),
+    /// Active-check compilation failed; the message passes the underlying
+    /// `health::CheckError` text through unchanged.
+    BadCheck(String),
 }
 
 impl std::fmt::Display for PoolError {
@@ -25,6 +35,13 @@ impl std::fmt::Display for PoolError {
             Self::NoBackends => write!(f, "至少需要一个后端"),
             Self::TooManyBackends => write!(f, "后端最多 {MAX_BACKENDS} 个"),
             Self::Duplicate(origin) => write!(f, "后端重复：{origin}"),
+            Self::BadTarget { index, source } => {
+                write!(f, "第 {} 行后端地址无效：{source}", index + 1)
+            }
+            Self::BadPolicy(text) => {
+                write!(f, "lb_policy 必须是 round_robin/random/ip_hash/least_conn：{text}")
+            }
+            Self::BadCheck(text) => write!(f, "{text}"),
         }
     }
 }
@@ -81,6 +98,37 @@ impl Pool {
             check,
             cursor: AtomicU64::new(0),
         })
+    }
+
+    /// Site compile entry for the WP-23 pipeline: parses `site.targets`
+    /// line by line ([`parse_target`]), `site.lb_policy` and the active
+    /// check ([`ActiveCheck::compile`] with `send_proxy_protocol` as
+    /// `force_tcp`), then defers to [`Pool::compile`]. For compatibility
+    /// with existing configs a bare `host:port` line — no whitespace
+    /// parameters, no `://` — is prefixed with `http://` first. The bridge
+    /// still compiles the legacy pool; this public API is what the
+    /// migration increments build on.
+    pub fn from_site(site: &crate::web::model::Site) -> Result<Self, PoolError> {
+        let mut targets = Vec::with_capacity(site.targets.len());
+        for (index, line) in site.targets.iter().enumerate() {
+            let line = line.trim();
+            let line = if line.is_empty()
+                || line.contains("://")
+                || line.contains(char::is_whitespace)
+            {
+                line.to_owned()
+            } else {
+                format!("http://{line}")
+            };
+            let target =
+                parse_target(&line).map_err(|source| PoolError::BadTarget { index, source })?;
+            targets.push(target);
+        }
+        let policy = Policy::parse(&site.lb_policy)
+            .ok_or_else(|| PoolError::BadPolicy(site.lb_policy.clone()))?;
+        let check = ActiveCheck::compile(site, site.send_proxy_protocol)
+            .map_err(|error| PoolError::BadCheck(error.to_string()))?;
+        Self::compile(targets, policy, check)
     }
 
     pub fn len(&self) -> usize {
@@ -255,6 +303,7 @@ mod tests {
 
     use super::super::{CheckMode, FAILURE_THRESHOLD, PAUSE};
     use super::*;
+    use crate::web::model::Site;
 
     fn target(line: &str) -> Target {
         super::super::parse_target(line).expect("valid target line")
@@ -544,5 +593,105 @@ mod tests {
         let rows = pool.status(later);
         assert!(rows[0].available);
         assert_eq!(rows[0].paused_for_secs, None);
+    }
+
+    fn site(targets: &[&str], policy: &str) -> Site {
+        Site {
+            targets: targets.iter().map(|line| line.to_string()).collect(),
+            lb_policy: policy.to_owned(),
+            ..Site::default()
+        }
+    }
+
+    /// A proxy site with a check; `interval` is the knob to push out of
+    /// range in the rejection test.
+    fn health_site(mode: &str, interval: u32) -> Site {
+        Site {
+            targets: vec!["http://127.0.0.1:9001".to_string()],
+            health_mode: mode.to_owned(),
+            health_interval_secs: interval,
+            health_timeout_secs: 3,
+            health_fails: 3,
+            health_passes: 2,
+            ..Site::default()
+        }
+    }
+
+    #[test]
+    fn from_site_parses_weights_backups_and_policy() {
+        let pool = Pool::from_site(&site(
+            &["http://10.0.0.2:8080 weight=3 backup", "127.0.0.1:9001"],
+            "ip_hash",
+        ))
+        .expect("site compiles");
+        assert_eq!(pool.len(), 2);
+        assert_eq!(pool.policy, Policy::IpHash);
+        let weighted = pool.get(0);
+        assert_eq!(weighted.target.weight, 3);
+        assert!(weighted.target.backup);
+        let plain = pool.get(1);
+        assert_eq!(plain.target.weight, 1);
+        assert!(!plain.target.backup);
+    }
+
+    #[test]
+    fn from_site_bare_target_defaults_to_http() {
+        let pool = Pool::from_site(&site(&["127.0.0.1:9001"], "")).expect("site compiles");
+        let backend = pool.get(0);
+        let uri = &backend.target.uri;
+        assert_eq!(uri.scheme_str(), Some("http"));
+        assert_eq!(uri.host(), Some("127.0.0.1"));
+        assert_eq!(uri.port_u16(), Some(9001));
+        assert_eq!(backend.origin(), "http://127.0.0.1:9001");
+    }
+
+    #[test]
+    fn from_site_rejects_bad_lines_and_policy() {
+        // The bad line is reported with its index and the parse reason.
+        let error = Pool::from_site(&site(&["http://127.0.0.1:9001", "http://x foo=bar"], ""))
+            .err()
+            .expect("bad line rejected");
+        assert_eq!(
+            error,
+            PoolError::BadTarget {
+                index: 1,
+                source: TargetError::UnknownParam("foo=bar".to_string()),
+            }
+        );
+        let text = error.to_string();
+        assert!(text.contains("第 2 行"), "unexpected message: {text}");
+        assert!(text.contains("未知参数"), "unexpected message: {text}");
+
+        // An unknown lb_policy carries the raw value.
+        let error = Pool::from_site(&site(&["http://127.0.0.1:9001"], "weighted"))
+            .err()
+            .expect("unknown policy rejected");
+        assert_eq!(error, PoolError::BadPolicy("weighted".to_string()));
+    }
+
+    #[test]
+    fn from_site_compiles_health_check() {
+        // PROXY protocol to the backend demotes the HTTP check to TCP.
+        let mut proxied = health_site("http", 10);
+        proxied.send_proxy_protocol = true;
+        let pool = Pool::from_site(&proxied).expect("site compiles");
+        let check = pool.check.as_ref().expect("check present");
+        assert_eq!(check.mode, CheckMode::Tcp);
+        assert_eq!(check.path, "");
+
+        // An empty mode compiles no check at all.
+        let pool = Pool::from_site(&health_site("", 10)).expect("site compiles");
+        assert!(pool.check.is_none());
+    }
+
+    #[test]
+    fn from_site_rejects_out_of_range_health() {
+        let error = Pool::from_site(&health_site("http", 0))
+            .err()
+            .expect("out-of-range interval rejected");
+        assert!(
+            matches!(&error, PoolError::BadCheck(text) if text.contains("health.interval_secs")),
+            "unexpected error: {error}"
+        );
     }
 }

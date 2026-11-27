@@ -12,6 +12,8 @@ use std::{collections::HashMap, path::Path};
 
 use serde_json::{Map, Value, json};
 
+use std::time::Duration;
+
 use crate::{
     backend::{BackendPool, RawBackend},
     config::{ProxyRoute, Route, RouteAction, Routes},
@@ -19,7 +21,15 @@ use crate::{
     health::{HealthCheck, RawHealthCheck},
     site::{RawResponse, SiteResponse},
     static_files::RawStatic,
-    web::model::{Listener, Site},
+    web::{
+        identity,
+        model::{Listener, Site},
+        proxy::{
+            cors::Cors,
+            headers::{self, HeaderEdit},
+            rewrite::{Rewrite, RewriteError},
+        },
+    },
 };
 
 /// A site compiled for the legacy serving pipeline: either a reverse
@@ -77,6 +87,85 @@ pub async fn compile_site_handler(site: &Site) -> Result<CompiledSiteHandler, Ve
         other => Err(vec![format!(
             "site {label}: unknown site_type {other:?} (expected proxy, redirect, static or text)"
         )]),
+    }
+}
+
+/// Compiles the WP-23 per-site options (identity headers, rewrites,
+/// header edits, CORS, response header deadline) from the model. Every
+/// problem lands in `errors` with the site label; when that list ends up
+/// non-empty the caller aborts the site.
+fn compile_wp23_options(
+    site: &Site,
+    label: &str,
+    errors: &mut Vec<String>,
+) -> crate::config::SiteProxyOptions {
+    let identity = match identity::compile(&site.identity_headers) {
+        Ok(headers) => headers,
+        Err(error) => {
+            errors.push(format!("site {label}: identityHeaders: {error}"));
+            Vec::new()
+        }
+    };
+    let rewrites = site
+        .rewrites
+        .iter()
+        .enumerate()
+        .filter_map(|(index, rule)| {
+            let redirect = rule
+                .redirect
+                .then_some(if rule.code == 0 { 302 } else { rule.code });
+            match Rewrite::compile(&rule.pattern, &rule.to, redirect) {
+                Ok(rewrite) => Some(rewrite),
+                Err(RewriteError::BadRegex(_)) => {
+                    errors.push(format!(
+                        "site {label}: rewrites[{index}].pattern is not a valid regex"
+                    ));
+                    None
+                }
+                Err(RewriteError::BadTarget(_)) => {
+                    errors.push(format!(
+                        "site {label}: rewrites[{index}].to must start with '/' for internal rewrites"
+                    ));
+                    None
+                }
+                Err(RewriteError::BadCode(code)) => {
+                    errors.push(format!(
+                        "site {label}: rewrites[{index}].code must be 301/302/307/308 (got {code})"
+                    ));
+                    None
+                }
+            }
+        })
+        .collect();
+    let mut header_edits = |lines: &[String], field: &str| -> Vec<HeaderEdit> {
+        match headers::parse_edits(lines) {
+            Ok(edits) => edits,
+            Err(error) => {
+                errors.push(format!("site {label}: {field}: {error}"));
+                Vec::new()
+            }
+        }
+    };
+    let request_headers = header_edits(&site.request_headers, "requestHeaders");
+    let response_headers = header_edits(&site.response_headers, "responseHeaders");
+    let cors = (!site.cors.allow_origins.is_empty()).then(|| Cors {
+        allow_origins: site.cors.allow_origins.clone(),
+        allow_methods: site.cors.allow_methods.clone(),
+        allow_headers: site.cors.allow_headers.clone(),
+        allow_credentials: site.cors.allow_credentials,
+        max_age_secs: site.cors.max_age_secs,
+    });
+    let response_header_timeout = (site.timeouts_response_secs != 0)
+        .then(|| Duration::from_secs(u64::from(site.timeouts_response_secs)));
+    crate::config::SiteProxyOptions {
+        use_target_host: site.use_target_host,
+        forwarded_headers: site.forwarded_headers,
+        response_header_timeout,
+        identity,
+        rewrites,
+        request_headers,
+        response_headers,
+        cors,
     }
 }
 
@@ -208,6 +297,10 @@ fn compile_proxy_site(site: &Site, label: &str) -> Result<CompiledSiteHandler, V
     if !errors.is_empty() {
         return Err(errors);
     }
+    let options = compile_wp23_options(site, label, &mut errors);
+    if !errors.is_empty() {
+        return Err(errors);
+    }
     Ok(CompiledSiteHandler::Proxy(ProxyRoute {
         // Checked non-empty above, so the pool compiled.
         backends: pool.expect("backend pool compiled"),
@@ -216,6 +309,7 @@ fn compile_proxy_site(site: &Site, label: &str) -> Result<CompiledSiteHandler, V
         websocket: false,
         upstream_h2c: site.upstream_h2c,
         health,
+        options: Box::new(options),
     }))
 }
 

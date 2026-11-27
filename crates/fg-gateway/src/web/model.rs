@@ -76,6 +76,39 @@ pub struct Site {
     /// Load policy: "" | round_robin | random | ip_hash | least_conn.
     pub lb_policy: String,
     pub upstream_h2c: bool,
+    /// WP-23 transport options (proxy sites).
+    pub use_target_host: bool,
+    /// Forward X-Forwarded-* / X-Real-IP to the backend (default true).
+    #[serde(default = "Site::default_true")]
+    pub forwarded_headers: bool,
+    pub insecure_skip_verify: bool,
+    pub disable_keep_alives: bool,
+    /// Send PROXY protocol v2 to the backend.
+    pub send_proxy_protocol: bool,
+    /// Use the visitor's hostname as SNI (and verify against it) toward
+    /// HTTPS backends.
+    pub upstream_sni_from_host: bool,
+    pub pass_auth_cookies: bool,
+    /// Backend timeouts; 0 = the default (connect/TLS 10s, header
+    /// unlimited).
+    pub timeouts_connect_secs: u32,
+    pub timeouts_tls_secs: u32,
+    /// 0 = unlimited.
+    pub timeouts_response_secs: u32,
+    /// Visitor idle timeouts; 0 = the default 60s.
+    pub client_idle_read_secs: u32,
+    pub client_idle_write_secs: u32,
+    /// WP-23 traffic features.
+    pub rewrites: Vec<RewriteSite>,
+    /// `Key: Value` lines; an empty value deletes.
+    pub request_headers: Vec<String>,
+    pub response_headers: Vec<String>,
+    /// Empty allow list = CORS disabled.
+    pub cors: CorsSite,
+    /// At most 16 entries.
+    pub identity_headers: Vec<IdentitySite>,
+    /// Per-user routes (require authentication, WP-24).
+    pub user_routes: Vec<UserRouteSite>,
     /// Redirect fields (site_type = redirect).
     pub redirect_to: String,
     pub redirect_code: u16,
@@ -95,6 +128,51 @@ pub struct Site {
     pub access_allow: Vec<String>,
     pub access_deny: Vec<String>,
     pub remark: String,
+}
+
+impl Site {
+    /// Serde field default: forwarding headers stay on unless disabled.
+    fn default_true() -> bool {
+        true
+    }
+}
+
+/// One rewrite rule: internal rewrite (`redirect = false`, `to` starts
+/// with `/`) or redirect (`code` 0 = 302).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct RewriteSite {
+    pub pattern: String,
+    pub to: String,
+    pub redirect: bool,
+    pub code: u16,
+}
+
+/// CORS configuration; empty `allow_origins` disables it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct CorsSite {
+    pub allow_origins: Vec<String>,
+    pub allow_methods: Vec<String>,
+    pub allow_headers: Vec<String>,
+    pub allow_credentials: bool,
+    pub max_age_secs: u32,
+}
+
+/// One identity header: `header` + `field` (user/email/name/groups).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct IdentitySite {
+    pub header: String,
+    pub field: String,
+}
+
+/// One per-user route: `users` (names or `provider:id`) to `targets`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct UserRouteSite {
+    pub users: Vec<String>,
+    pub targets: Vec<String>,
 }
 
 #[cfg(test)]
@@ -344,15 +422,8 @@ mod tests {
                         domains: vec!["api.example.com".into()],
                         site_type: "proxy".into(),
                         targets: vec!["127.0.0.1:8080".into()],
-                        lb_policy: String::new(),
                         upstream_h2c: true,
-                        redirect_to: String::new(),
-                        redirect_code: 0,
-                        root: String::new(),
-                        text_body: String::new(),
-                        text_content_type: String::new(),
                         health_mode: "tcp".into(),
-                        health_path: String::new(),
                         health_interval_secs: 5,
                         health_timeout_secs: 2,
                         health_fails: 2,
@@ -360,6 +431,7 @@ mod tests {
                         access_allow: vec!["10.0.0.0/8".into()],
                         access_deny: vec!["203.0.113.0/24".into()],
                         remark: "primary api".into(),
+                        ..Site::default()
                     }],
                     default: true,
                     remark: "edge".into(),

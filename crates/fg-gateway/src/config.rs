@@ -23,6 +23,10 @@ use crate::{
     tcp_forward::{RawForward, TcpForward},
     tls::{self, CertificateFiles, Tls},
     udp_forward::{RawUdpForward, UdpForward},
+    web::{
+        identity::IdentityHeader,
+        proxy::{cors::Cors, headers::HeaderEdit, rewrite::Rewrite},
+    },
 };
 
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -132,6 +136,42 @@ pub(crate) struct ProxyRoute {
     pub websocket: bool,
     pub upstream_h2c: bool,
     pub health: Option<HealthCheck>,
+    /// WP-23 per-site options. The TOML path uses the legacy behavior:
+    /// always send the target host, always forward, nothing else.
+    pub options: Box<SiteProxyOptions>,
+}
+
+/// The WP-23 per-site reverse-proxy options, compiled once per site.
+pub(crate) struct SiteProxyOptions {
+    /// Send the target address as `Host` (legacy behavior) instead of
+    /// keeping the client's `Host`.
+    pub use_target_host: bool,
+    /// Write X-Forwarded-* / X-Real-IP to the backend.
+    pub forwarded_headers: bool,
+    /// Per-site response header deadline; None falls back to the
+    /// settings-level timeout.
+    pub response_header_timeout: Option<Duration>,
+    /// Stripped from every request on this site (forgery guard).
+    pub identity: Vec<IdentityHeader>,
+    pub rewrites: Vec<Rewrite>,
+    pub request_headers: Vec<HeaderEdit>,
+    pub response_headers: Vec<HeaderEdit>,
+    pub cors: Option<Cors>,
+}
+
+impl Default for SiteProxyOptions {
+    fn default() -> Self {
+        Self {
+            use_target_host: true,
+            forwarded_headers: true,
+            response_header_timeout: None,
+            identity: Vec::new(),
+            rewrites: Vec::new(),
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            cors: None,
+        }
+    }
 }
 
 impl Routes {
@@ -432,6 +472,9 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
                 websocket: route.websocket,
                 upstream_h2c: route.upstream_h2c,
                 health,
+                // Legacy behavior: Host is the target authority and the
+                // forwarding headers are always written.
+                options: Box::default(),
             })
         };
         let list = by_host.entry(host).or_default();

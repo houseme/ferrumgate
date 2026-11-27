@@ -152,7 +152,20 @@ pub fn parse(lines: &[String]) -> Result<Vec<IdentityHeader>, IdentityError> {
             .ok_or_else(|| IdentityError::BadField(field.trim().to_string()))?;
         parsed.push(IdentityHeader { header, field });
     }
+    validate(&parsed)?;
     Ok(parsed)
+}
+
+/// Compiles the site model's `header` + `field` pairs (the webservice
+/// JSON shape) into the validated runtime list.
+pub fn compile(
+    site_headers: &[crate::web::model::IdentitySite],
+) -> Result<Vec<IdentityHeader>, IdentityError> {
+    let lines: Vec<String> = site_headers
+        .iter()
+        .map(|entry| format!("{}: {}", entry.header.trim(), entry.field.trim()))
+        .collect();
+    parse(&lines)
 }
 
 fn remove_all(headers: &mut HeaderMap, name: &str) {
