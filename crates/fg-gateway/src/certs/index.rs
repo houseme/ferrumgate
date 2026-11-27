@@ -11,10 +11,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// A loaded certificate as the index stores it (parsed chain + facts).
-/// Defined with the provider in a later batch; the index is generic over
-/// it here through the concrete alias once available.
-pub type LoadedCert = crate::certs::info::CertInfo;
+/// A loaded certificate as the index stores it: the provider's parsed
+/// chain + key + facts (the index reads only the facts).
+pub type LoadedCert = crate::certs::provider::LoadedCert;
 
 #[derive(Default)]
 pub struct CertIndex {
@@ -91,7 +90,7 @@ impl CertIndex {
     /// IP SANs compete for `ip_default` by latest expiry.
     fn add(&mut self, cert: &Arc<LoadedCert>) {
         let mut has_ips = false;
-        for san in &cert.dns_names {
+        for san in &cert.info.dns_names {
             let name = normalize_name(san);
             if name.is_empty() || name.as_ref() == "*" {
                 continue;
@@ -105,7 +104,7 @@ impl CertIndex {
             has_ips |= parse_ip_literal(&name).is_some();
             keep_latest(&mut self.exact, &name, cert);
         }
-        for ip in &cert.ip_addresses {
+        for ip in &cert.info.ip_addresses {
             has_ips = true;
             keep_latest(&mut self.exact, &canonical_ip(*ip).to_string(), cert);
         }
@@ -191,12 +190,11 @@ mod tests {
     }
 
     fn cert(names: &[&str], ips: &[IpAddr], not_after: Option<SystemTime>) -> Arc<LoadedCert> {
-        Arc::new(LoadedCert {
-            dns_names: names.iter().map(|name| (*name).to_string()).collect(),
-            ip_addresses: ips.to_vec(),
+        Arc::new(LoadedCert::fixture(
+            names.iter().map(|name| (*name).to_string()).collect(),
+            ips.to_vec(),
             not_after,
-            ..LoadedCert::default()
-        })
+        ))
     }
 
     #[test]
