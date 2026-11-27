@@ -164,6 +164,114 @@ pub fn config(routes: &str, settings: &str, globals: &str) -> String {
     )
 }
 
+pub const PORTFORWARD_FILE: &str = "portforward.json";
+
+/// Renders the portforward.json document written next to the gateway TOML:
+/// settings override the upstream defaults; rules carry the forwarding
+/// table.
+pub fn forwarding_json(settings: serde_json::Value, rules: &[serde_json::Value]) -> String {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "settings": settings,
+        "rules": rules,
+    }))
+    .expect("portforward.json")
+}
+
+/// Builds one forwarding rule (`tcp` or `udp`) from a `host:ports` listen
+/// spec, pinned target sockets and extra rule-level JSON fields.
+pub fn forwarding_rule(
+    key: &str,
+    protocol: &str,
+    listen: &str,
+    targets: &[String],
+    options: serde_json::Value,
+) -> serde_json::Value {
+    let (address, ports) = listen.rsplit_once(':').expect("listen as host:ports");
+    let mut rule = serde_json::json!({
+        "key": key,
+        "name": key,
+        "enable": true,
+        "protocols": [protocol],
+        "listen_address": address,
+        "listen_ports": ports,
+        "target_addresses": targets,
+        "target_ports": "",
+    });
+    let object = rule.as_object_mut().expect("rule object");
+    if let Some(options) = options.as_object() {
+        for (field, value) in options {
+            object.insert(field.clone(), value.clone());
+        }
+    }
+    rule
+}
+
+pub fn tcp_rule(listen: &str, targets: &[String], options: serde_json::Value) -> serde_json::Value {
+    forwarding_rule("tcp", "tcp", listen, targets, options)
+}
+
+pub fn udp_rule(listen: &str, targets: &[String], options: serde_json::Value) -> serde_json::Value {
+    forwarding_rule("udp", "udp", listen, targets, options)
+}
+
+/// Writes portforward.json into the configuration directory so `fgate
+/// check` (and the spawned gateway) pick it up as a sibling of the TOML.
+pub fn write_forwarding(dir: &Path, forwarding: &str) -> Result<()> {
+    std::fs::write(dir.join(PORTFORWARD_FILE), forwarding)?;
+    Ok(())
+}
+
+/// Reserves free loopback TCP ports. The portforward.json model rejects
+/// port 0, so tests pin concrete ports (reserved, then released for the
+/// gateway to bind).
+pub fn free_tcp_ports(count: usize) -> Result<Vec<u16>> {
+    free_ports(
+        count,
+        || std::net::TcpListener::bind("127.0.0.1:0"),
+        |listener| Ok(listener.local_addr()?.port()),
+    )
+}
+
+/// Reserves free loopback IPv6 TCP ports.
+pub fn free_tcp6_ports(count: usize) -> Result<Vec<u16>> {
+    free_ports(
+        count,
+        || std::net::TcpListener::bind("[::1]:0"),
+        |listener| Ok(listener.local_addr()?.port()),
+    )
+}
+
+/// Reserves free loopback UDP ports.
+pub fn free_udp_ports(count: usize) -> Result<Vec<u16>> {
+    free_ports(
+        count,
+        || std::net::UdpSocket::bind("127.0.0.1:0"),
+        |socket| Ok(socket.local_addr()?.port()),
+    )
+}
+
+fn free_ports<T>(
+    count: usize,
+    bind: impl Fn() -> std::io::Result<T>,
+    port: impl Fn(&T) -> std::io::Result<u16>,
+) -> Result<Vec<u16>> {
+    for _ in 0..16 {
+        let mut held = Vec::with_capacity(count);
+        while held.len() < count {
+            match bind() {
+                Ok(listener) => held.push(listener),
+                Err(_) => break,
+            }
+        }
+        if held.len() == count {
+            let ports = held.iter().map(port).collect::<std::io::Result<Vec<_>>>()?;
+            drop(held);
+            return Ok(ports);
+        }
+    }
+    anyhow::bail!("no free loopback TCP ports")
+}
+
 pub struct Gateway {
     pub addr: SocketAddr,
     pub metrics_addr: Option<SocketAddr>,
@@ -177,8 +285,18 @@ impl Gateway {
         Self::with_dir(config, tempfile::tempdir()?).await
     }
 
+    /// Spawns the gateway with a portforward.json sibling of the TOML.
+    pub async fn spawn_forwarding(config: &str, forwarding: &str) -> Result<Self> {
+        Self::with_forwarding(config, tempfile::tempdir()?, forwarding).await
+    }
+
     pub async fn with_dir(config: &str, dir: TempDir) -> Result<Self> {
         Self::with_args(config, dir, &[]).await
+    }
+
+    pub async fn with_forwarding(config: &str, dir: TempDir, forwarding: &str) -> Result<Self> {
+        write_forwarding(dir.path(), forwarding)?;
+        Self::with_dir(config, dir).await
     }
 
     pub async fn with_args(config: &str, dir: TempDir, args: &[&std::ffi::OsStr]) -> Result<Self> {
@@ -231,6 +349,13 @@ impl Gateway {
         Ok(result.status.success())
     }
 
+    /// Validates a TOML configuration together with a portforward.json
+    /// sibling in the same directory.
+    pub async fn check_forwarding(dir: &Path, contents: &str, forwarding: &str) -> Result<bool> {
+        write_forwarding(dir, forwarding)?;
+        Self::check(dir, contents).await
+    }
+
     pub async fn wait_log(&mut self, pattern: &str) -> Result<String> {
         timeout(DEADLINE, async {
             let mut seen = Vec::new();
@@ -251,6 +376,15 @@ impl Gateway {
         let tmp = self.dir.path().join("next.toml");
         std::fs::write(&tmp, contents)?;
         std::fs::rename(tmp, self.dir.path().join("live.toml"))?;
+        Ok(())
+    }
+
+    /// Atomically swaps portforward.json so a SIGHUP reload re-reads it.
+    #[cfg(unix)]
+    pub fn replace_forwarding(&self, forwarding: &str) -> Result<()> {
+        let tmp = self.dir.path().join("next-portforward.json");
+        std::fs::write(&tmp, forwarding)?;
+        std::fs::rename(tmp, self.dir.path().join(PORTFORWARD_FILE))?;
         Ok(())
     }
 

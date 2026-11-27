@@ -18,6 +18,7 @@ use crate::{
     domains,
     forward_ports::MAX_LISTENERS,
     health::{HealthCheck, RawHealthCheck},
+    l4::portforward::bridge,
     site::{RawResponse, SiteResponse},
     tcp_forward::{RawForward, TcpForward},
     tls::{self, CertificateFiles, Tls},
@@ -171,6 +172,28 @@ pub(crate) async fn read_file(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Loads an optional `portforward.json` sibling of the TOML configuration
+/// and bridges it onto the legacy forward rules. Returns `None` when the
+/// file is absent; a present but invalid file propagates the error.
+pub(crate) async fn load_portforward_json(
+    config_dir: &Path,
+) -> Result<Option<(Vec<TcpForward>, Vec<UdpForward>)>> {
+    let path = config_dir.join("portforward.json");
+    match fs::metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(_) => anyhow::bail!("portforward.json must be a regular file"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("inspect portforward.json"),
+    }
+    let bytes = read_file(&path)
+        .await
+        .with_context(|| format!("read {path:?}"))?;
+    let json = std::str::from_utf8(&bytes).context("portforward.json must be UTF-8")?;
+    bridge::compile_from_json(json)
+        .with_context(|| format!("invalid {}", path.display()))
+        .map(Some)
+}
+
 pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     let bytes = read_file(path).await.context("read configuration")?;
     let input = std::str::from_utf8(&bytes).context("config must be UTF-8")?;
@@ -215,6 +238,9 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     ] {
         ensure!((1..=max).contains(&value), "{field} must be in 1..={max}");
     }
+    // A portforward.json next to the TOML adds forwarding rules (WP-34
+    // step 7-10); both sources feed the same listener checks below.
+    let (json_tcp, json_udp) = load_portforward_json(dir).await?.unwrap_or_default();
     if settings.http_enabled {
         ensure!(
             (1..=MAX_ROUTES).contains(&raw.routes.len()),
@@ -228,8 +254,12 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
                 && raw.upstream_ca_file.is_none(),
             "HTTP and TLS route configuration requires server.http_enabled"
         );
+        let forwarding_configured = !raw.tcp_forward.is_empty()
+            || !raw.udp_forward.is_empty()
+            || !json_tcp.is_empty()
+            || !json_udp.is_empty();
         ensure!(
-            !raw.tcp_forward.is_empty() || !raw.udp_forward.is_empty(),
+            forwarding_configured,
             "enable HTTP or configure TCP/UDP forwarding"
         );
     }
@@ -269,6 +299,19 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
     }
 
     ensure!(
+        tcp_forward.len() + json_tcp.len() <= MAX_LISTENERS,
+        "tcp_forward supports up to {MAX_LISTENERS} listeners"
+    );
+    for rule in json_tcp {
+        ensure!(
+            rule.listen.port() == 0 || listens.insert(rule.listen),
+            "duplicate TCP listener in portforward.json rule {}",
+            rule.listen
+        );
+        tcp_forward.push(rule);
+    }
+
+    ensure!(
         raw.udp_forward.len() <= MAX_LISTENERS,
         "udp_forward supports up to {MAX_LISTENERS} listeners"
     );
@@ -294,6 +337,24 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
             );
             udp_forward.push(rule);
         }
+    }
+
+    ensure!(
+        udp_forward.len() + json_udp.len() <= MAX_LISTENERS,
+        "udp_forward supports up to {MAX_LISTENERS} listeners"
+    );
+    for rule in json_udp {
+        ensure!(
+            rule.listen.port() == 0 || udp_listens.insert(rule.listen),
+            "duplicate UDP listener in portforward.json rule {}",
+            rule.listen
+        );
+        udp_sessions += rule.max_sessions;
+        ensure!(
+            udp_sessions <= 4096,
+            "udp_forward supports up to 4096 total sessions"
+        );
+        udp_forward.push(rule);
     }
     let acme = if let Some(acme) = raw.acme {
         ensure!(

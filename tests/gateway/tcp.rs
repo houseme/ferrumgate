@@ -1,6 +1,7 @@
 use std::{cmp::Reverse, net::SocketAddr, time::Duration};
 
 use anyhow::Result;
+use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     time::timeout,
@@ -8,6 +9,8 @@ use tokio::{
 
 use super::common::*;
 
+/// Legacy TOML emission used by `modules.rs` to embed a forwarding rule in
+/// the manifest.
 pub(super) fn forwarding(listen: &str, targets: &[SocketAddr], options: &str) -> String {
     let targets = targets
         .iter()
@@ -15,6 +18,41 @@ pub(super) fn forwarding(listen: &str, targets: &[SocketAddr], options: &str) ->
         .collect::<Vec<_>>()
         .join(", ");
     format!("\n[[tcp_forward]]\nlisten = \"{listen}\"\ntargets = [{targets}]\n{options}\n")
+}
+
+/// Renders a portforward.json document with one TCP rule. A `:0` listen
+/// resolves to a concrete reserved port (the JSON model rejects port 0).
+fn forwarding_with(
+    settings: Value,
+    listen: &str,
+    targets: &[SocketAddr],
+    options: Value,
+) -> Result<String> {
+    Ok(forwarding_json(
+        settings,
+        &[tcp_rule(
+            &reserve(listen)?,
+            &targets.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            options,
+        )],
+    ))
+}
+
+fn forwarding_rules(listen: &str, targets: &[SocketAddr], options: Value) -> Result<String> {
+    forwarding_with(json!({}), listen, targets, options)
+}
+
+fn reserve(listen: &str) -> Result<String> {
+    Ok(if let Some(host) = listen.strip_suffix(":0") {
+        let port = if host == "[::1]" {
+            free_tcp6_ports(1)?[0]
+        } else {
+            free_tcp_ports(1)?[0]
+        };
+        format!("{host}:{port}")
+    } else {
+        listen.to_owned()
+    })
 }
 
 #[tokio::test]
@@ -30,8 +68,9 @@ async fn forwards_tcp_after_a_failed_dial_and_preserves_half_close() -> Result<(
     let dead = std::net::TcpListener::bind("127.0.0.1:0")?;
     let dead_address = dead.local_addr()?;
     drop(dead);
-    let rule = forwarding("127.0.0.1:0", &[dead_address, echo.addr], "");
-    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let forwarding = forwarding_rules("127.0.0.1:0", &[dead_address, echo.addr], json!({}))?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
 
     let mut socket = connect(gateway.addr).await?;
     socket.write_all(b"binary\0relay").await?;
@@ -58,12 +97,15 @@ async fn first_data_timeout_releases_an_idle_slot_after_sending_proxy_header() -
         Ok(())
     })
     .await?;
-    let rule = forwarding(
+    // The JSON model carries the first-data timeout in whole seconds.
+    let forwarding = forwarding_with(
+        json!({"first_data_timeout": 1}),
         "127.0.0.1:0",
         &[origin.addr],
-        "proxy_protocol = \"v1\"\nfirst_data_timeout_ms = 500\nmax_connections = 1",
-    );
-    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+        json!({"proxy_protocol": "v1", "max_connections": 1}),
+    )?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
     let mut idle = connect(gateway.addr).await?;
     let mut byte = [0];
     assert_eq!(timeout(DEADLINE, idle.read(&mut byte)).await??, 0);
@@ -83,8 +125,14 @@ async fn server_first_data_disarms_the_timeout_for_both_directions() -> Result<(
         Ok(())
     })
     .await?;
-    let rule = forwarding("127.0.0.1:0", &[origin.addr], "first_data_timeout_ms = 500");
-    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let forwarding = forwarding_with(
+        json!({"first_data_timeout": 1}),
+        "127.0.0.1:0",
+        &[origin.addr],
+        json!({}),
+    )?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
     let mut client = connect(gateway.addr).await?;
     assert_eq!(timeout(DEADLINE, client.read_u8()).await??, b'a');
     assert!(
@@ -106,8 +154,9 @@ async fn empty_client_half_close_reaches_the_upstream() -> Result<()> {
         Ok(())
     })
     .await?;
-    let rule = forwarding("127.0.0.1:0", &[origin.addr], "");
-    let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let forwarding = forwarding_rules("127.0.0.1:0", &[origin.addr], json!({}))?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
     let mut client = connect(gateway.addr).await?;
     client.shutdown().await?;
     let mut buffer = [0; 3];
@@ -140,13 +189,16 @@ async fn forwards_each_tcp_port_to_the_matching_target_position() -> Result<()> 
         .ok_or_else(|| anyhow::anyhow!("no consecutive loopback TCP ports available"))?;
     let mut targets = [(first.addr.port(), b'a'), (second.addr.port(), b'b')];
     targets.sort_unstable_by_key(|&(port, _)| Reverse(port));
-    let rules = format!(
-        "\n[[tcp_forward]]\nlisten = \"127.0.0.1:{start}-{}\"\ntargets = [\"127.0.0.1:{},{}\"]\n",
-        start + 1,
-        targets[0].0,
-        targets[1].0,
+    let forwarding = forwarding_json(
+        json!({}),
+        &[tcp_rule(
+            &format!("127.0.0.1:{start}-{}", start + 1),
+            &["127.0.0.1".to_string()],
+            json!({"target_ports": format!("{},{}", targets[0].0, targets[1].0)}),
+        )],
     );
-    let _gateway = Gateway::spawn(&config(&rules, "http_enabled = false", "")).await?;
+    let _gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
     for (port, (_, expected)) in (start..=start + 1).zip(targets) {
         let mut client = connect(([127, 0, 0, 1], port).into()).await?;
         assert_eq!(timeout(DEADLINE, client.read_u8()).await??, expected);
@@ -177,8 +229,9 @@ async fn keeps_existing_tcp_flow_alive_during_graceful_shutdown() -> Result<()> 
         }
     })
     .await?;
-    let rule = forwarding("127.0.0.1:0", &[echo.addr], "max_connections = 1");
-    let mut gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+    let forwarding = forwarding_rules("127.0.0.1:0", &[echo.addr], json!({"max_connections": 1}))?;
+    let mut gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
     let mut client = connect(gateway.addr).await?;
     client.write_all(b"a").await?;
     timeout(DEADLINE, entered.notified()).await?;
@@ -196,25 +249,73 @@ async fn keeps_existing_tcp_flow_alive_during_graceful_shutdown() -> Result<()> 
 #[tokio::test]
 async fn rejects_invalid_tcp_targets_and_conflicting_listeners() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let addr = "127.0.0.1:9000".parse()?;
-    let rule = forwarding("127.0.0.1:9050", &[addr], "");
-    for routes in [
-        String::new(),
-        forwarding("127.0.0.1:9050", &[], ""),
-        forwarding("127.0.0.1:9050", &[addr, addr], ""),
-        forwarding("127.0.0.1:9000", &[addr], ""),
-        forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 0"),
-        forwarding("127.0.0.1:9050", &[addr], "first_data_timeout_ms = 3600001"),
-        forwarding("127.0.0.1:9050-9051", &[addr], "") + &rule,
-        forwarding("127.0.0.1:9100-9163", &[addr], "") + &rule,
-        rule.replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
-        rule.replace("127.0.0.1:9050", "127.0.0.1:9050-9051")
-            .replace("127.0.0.1:9000", "127.0.0.1:9051,9050"),
-        rule.repeat(2),
+    let addr: SocketAddr = "127.0.0.1:9000".parse()?;
+    let base = forwarding_rules("127.0.0.1:9050", &[addr], json!({}))?;
+    let duplicated = {
+        let rule = tcp_rule("127.0.0.1:9050", &[addr.to_string()], json!({}));
+        forwarding_json(json!({}), &[rule.clone(), rule])
+    };
+    let maxed = forwarding_json(
+        json!({}),
+        &[
+            tcp_rule("127.0.0.1:9100-9163", &[addr.to_string()], json!({})),
+            tcp_rule("127.0.0.1:9050", &[addr.to_string()], json!({})),
+        ],
+    );
+    let overlapping = forwarding_json(
+        json!({}),
+        &[
+            tcp_rule("127.0.0.1:9050-9051", &[addr.to_string()], json!({})),
+            tcp_rule("127.0.0.1:9050", &[addr.to_string()], json!({})),
+        ],
+    );
+    for forwarding in [
+        forwarding_json(json!({}), &[]),
+        forwarding_rules("127.0.0.1:9050", &[], json!({}))?,
+        forwarding_rules("127.0.0.1:9050", &[addr, addr], json!({}))?,
+        forwarding_rules("127.0.0.1:9000", &[addr], json!({}))?,
+        // The 3600-second first-data ceiling rejects larger settings.
+        forwarding_with(
+            json!({"first_data_timeout": 4000}),
+            "127.0.0.1:9050",
+            &[addr],
+            json!({}),
+        )?,
+        forwarding_rules("127.0.0.1:9050", &[addr], json!({"max_connections": 65536}))?,
+        maxed,
+        // Mapped targets may not collide with the rule's own listeners.
+        forwarding_json(
+            json!({}),
+            &[tcp_rule(
+                "127.0.0.1:9050-9051",
+                &["127.0.0.1".to_string()],
+                json!({"target_ports": "9051,9050"}),
+            )],
+        ),
+        forwarding_json(
+            json!({}),
+            &[tcp_rule(
+                "127.0.0.1:9050",
+                &[addr.to_string()],
+                json!({"target_addresses": ["127.0.0.1:9000-9001"]}),
+            )],
+        ),
+        duplicated,
+        overlapping,
     ] {
-        assert!(!Gateway::check(dir.path(), &config(&routes, "http_enabled = false", "")).await?);
+        assert!(
+            !Gateway::check_forwarding(
+                dir.path(),
+                &config("", "http_enabled = false", ""),
+                &forwarding
+            )
+            .await?
+        );
     }
-    assert!(Gateway::check(dir.path(), &config(&rule, "http_enabled = false", "")).await?);
+    assert!(
+        Gateway::check_forwarding(dir.path(), &config("", "http_enabled = false", ""), &base)
+            .await?
+    );
     Ok(())
 }
 
@@ -234,12 +335,10 @@ async fn sends_proxy_v1_and_v2_before_the_client_payload() -> Result<()> {
         ("v2", "127.0.0.1:0"),
         ("v2", "[::1]:0"),
     ] {
-        let rule = forwarding(
-            address,
-            &[capture.addr],
-            &format!("proxy_protocol = \"{version}\""),
-        );
-        let gateway = Gateway::spawn(&config(&rule, "http_enabled = false", "")).await?;
+        let forwarding =
+            forwarding_rules(address, &[capture.addr], json!({"proxy_protocol": version}))?;
+        let gateway =
+            Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await?;
         let mut client = connect(gateway.addr).await?;
         let source = client.local_addr()?;
         client.write_all(b"application bytes").await?;
@@ -308,16 +407,17 @@ async fn reloads_tcp_source_rules_without_closing_existing_connections() -> Resu
         }
     })
     .await?;
-    let settings = |source: &str| {
-        config(
-            &forwarding("127.0.0.1:0", &[origin.addr], source),
-            "http_enabled = false",
-            "",
-        )
+    let toml = config("", "http_enabled = false", "");
+    let listen = format!("127.0.0.1:{}", free_tcp_ports(1)?[0]);
+    let settings = |source: Value| -> Result<String> {
+        Ok(forwarding_json(
+            json!({}),
+            &[tcp_rule(&listen, &[origin.addr.to_string()], source)],
+        ))
     };
-    let deny = "[tcp_forward.source]\nallow = [\"127.0.0.0/8\"]\ndeny = [\"127.0.0.1\"]";
-    let allow = "[tcp_forward.source]\nallow = [\"127.0.0.1\"]";
-    let mut gateway = Gateway::spawn(&settings(deny)).await?;
+    let deny = json!({"allow": ["127.0.0.0/8"], "deny": ["127.0.0.1"]});
+    let allow = json!({"allow": ["127.0.0.1"]});
+    let mut gateway = Gateway::spawn_forwarding(&toml, &settings(deny.clone())?).await?;
 
     let mut denied = connect(gateway.addr).await?;
     assert!(timeout(DEADLINE, denied.read_u8()).await?.is_err());
@@ -326,14 +426,14 @@ async fn reloads_tcp_source_rules_without_closing_existing_connections() -> Resu
             .await
             .is_err()
     );
-    gateway.replace(&settings(allow))?;
+    gateway.replace_forwarding(&settings(allow.clone())?)?;
     gateway.signal("-HUP").await?;
     gateway.wait_log("configuration reloaded").await?;
 
     let mut existing = connect(gateway.addr).await?;
     existing.write_all(b"a").await?;
     assert_eq!(timeout(DEADLINE, existing.read_u8()).await??, b'a');
-    gateway.replace(&settings(deny))?;
+    gateway.replace_forwarding(&settings(deny)?)?;
     gateway.signal("-HUP").await?;
     gateway.wait_log("configuration reloaded").await?;
 
@@ -342,8 +442,8 @@ async fn reloads_tcp_source_rules_without_closing_existing_connections() -> Resu
     existing.write_all(b"b").await?;
     assert_eq!(timeout(DEADLINE, existing.read_u8()).await??, b'b');
 
-    let invalid = "[tcp_forward.source]\nallow = [\"192.0.2.1/33\"]";
-    assert!(!Gateway::check(gateway.dir.path(), &settings(invalid)).await?);
+    let invalid = settings(json!({"allow": ["192.0.2.1/33"]}))?;
+    assert!(!Gateway::check_forwarding(gateway.dir.path(), &toml, &invalid).await?);
     Ok(())
 }
 
@@ -361,16 +461,12 @@ async fn tcp_source_quota_rejects_new_flows_and_releases_finished_slots() -> Res
         }
     })
     .await?;
-    let base = "max_connections = 3\nmax_connections_per_source = 1";
-    let settings = |options: &str| {
-        config(
-            &forwarding("127.0.0.1:0", &[echo.addr], options),
-            "http_enabled = false",
-            "",
-        )
+    let base = json!({"max_connections": 3, "max_conns_per_source": 1});
+    let spawn = |forwarding: String| async move {
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &forwarding).await
     };
 
-    let gateway = Gateway::spawn(&settings(base)).await?;
+    let gateway = spawn(forwarding_rules("127.0.0.1:0", &[echo.addr], base.clone())?).await?;
     let mut first = connect(gateway.addr).await?;
     first.write_all(b"a").await?;
     assert_eq!(timeout(DEADLINE, first.read_u8()).await??, b'a');
@@ -393,9 +489,12 @@ async fn tcp_source_quota_rejects_new_flows_and_releases_finished_slots() -> Res
     })
     .await??;
 
-    let exempt = Gateway::spawn(&settings(&format!(
-        "{base}\nsource_limit_exempt = [\"127.0.0.0/8\"]"
-    )))
+    let exempt = spawn(forwarding_with(
+        json!({"per_source_exempt": ["127.0.0.0/8"]}),
+        "127.0.0.1:0",
+        &[echo.addr],
+        base,
+    )?)
     .await?;
     let (mut a, mut b) = (connect(exempt.addr).await?, connect(exempt.addr).await?);
     a.write_all(b"c").await?;
@@ -403,9 +502,14 @@ async fn tcp_source_quota_rejects_new_flows_and_releases_finished_slots() -> Res
     assert_eq!(timeout(DEADLINE, a.read_u8()).await??, b'c');
     assert_eq!(timeout(DEADLINE, b.read_u8()).await??, b'd');
     assert!(
-        !Gateway::check(
+        !Gateway::check_forwarding(
             gateway.dir.path(),
-            &settings("max_connections = 2\nmax_connections_per_source = 3")
+            &config("", "http_enabled = false", ""),
+            &forwarding_rules(
+                "127.0.0.1:0",
+                &[echo.addr],
+                json!({"max_connections": 2, "max_conns_per_source": 3}),
+            )?
         )
         .await?
     );

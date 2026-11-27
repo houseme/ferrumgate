@@ -57,9 +57,9 @@ impl Default for RawUdpForward {
 #[derive(Clone)]
 pub(crate) struct UdpForward {
     pub listen: SocketAddr,
-    targets: Arc<[SocketAddr]>,
+    pub(crate) targets: Arc<[SocketAddr]>,
     pub max_sessions: usize,
-    idle: Duration,
+    pub(crate) idle: Duration,
     pub source: SourcePolicy,
 }
 

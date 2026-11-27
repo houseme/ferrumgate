@@ -42,9 +42,9 @@ pub(crate) struct RawForward {
     source_limit_exempt: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
-enum ProxyProtocol {
+pub(crate) enum ProxyProtocol {
     V1,
     V2,
 }
@@ -69,12 +69,12 @@ impl Default for RawForward {
 #[derive(Clone)]
 pub(crate) struct TcpForward {
     pub listen: SocketAddr,
-    targets: Vec<SocketAddr>,
-    max_connections: usize,
-    connect_timeout: Duration,
-    first_data_timeout: Duration,
+    pub(crate) targets: Vec<SocketAddr>,
+    pub(crate) max_connections: usize,
+    pub(crate) connect_timeout: Duration,
+    pub(crate) first_data_timeout: Duration,
     connection_lifetime: Duration,
-    proxy_protocol: Option<ProxyProtocol>,
+    pub(crate) proxy_protocol: Option<ProxyProtocol>,
     pub source: SourcePolicy,
     source_limit: Option<SourceLimit>,
 }

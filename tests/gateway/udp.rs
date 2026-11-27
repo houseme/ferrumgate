@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use anyhow::Result;
+use serde_json::{Value, json};
 use tokio::{net::UdpSocket, sync::mpsc, time::timeout};
 
 use super::common::*;
@@ -20,17 +21,25 @@ async fn echo_target() -> Result<(SocketAddr, mpsc::UnboundedReceiver<SocketAddr
     Ok((address, receive))
 }
 
-fn rule(target: SocketAddr, options: &str) -> String {
-    format!("\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntarget = \"{target}\"\n{options}\n")
+/// Renders a portforward.json document with one UDP rule on a concrete
+/// reserved listen port (the JSON model rejects port 0).
+fn forwarding_with(settings: Value, targets: &[SocketAddr], options: Value) -> Result<String> {
+    Ok(forwarding_json(
+        settings,
+        &[udp_rule(
+            &format!("127.0.0.1:{}", free_udp_ports(1)?[0]),
+            &targets.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            options,
+        )],
+    ))
 }
 
-fn multi_target_rule(targets: &[SocketAddr], options: &str) -> String {
-    let targets = targets
-        .iter()
-        .map(|target| format!("\"{target}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntargets = [{targets}]\n{options}\n")
+fn rule(target: SocketAddr, options: Value) -> Result<String> {
+    forwarding_with(json!({}), &[target], options)
+}
+
+fn multi_target_rule(targets: &[SocketAddr], options: Value) -> Result<String> {
+    forwarding_with(json!({}), targets, options)
 }
 
 async fn client(address: SocketAddr) -> Result<UdpSocket> {
@@ -42,7 +51,11 @@ async fn client(address: SocketAddr) -> Result<UdpSocket> {
 #[tokio::test]
 async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
     let (target, mut peers) = echo_target().await?;
-    let gateway = Gateway::spawn(&config(&rule(target, ""), "http_enabled = false", "")).await?;
+    let gateway = Gateway::spawn_forwarding(
+        &config("", "http_enabled = false", ""),
+        &rule(target, json!({}))?,
+    )
+    .await?;
     let first = client(gateway.addr).await?;
     let second = client(gateway.addr).await?;
     first.send(b"one\0").await?;
@@ -61,11 +74,10 @@ async fn forwards_datagrams_and_isolates_client_associations() -> Result<()> {
 #[tokio::test]
 async fn forwards_empty_and_large_udp_replies_without_truncation() -> Result<()> {
     let target = UdpSocket::bind("127.0.0.1:0").await?;
-    let gateway = Gateway::spawn(&config(
-        &rule(target.local_addr()?, ""),
-        "http_enabled = false",
-        "",
-    ))
+    let gateway = Gateway::spawn_forwarding(
+        &config("", "http_enabled = false", ""),
+        &rule(target.local_addr()?, json!({}))?,
+    )
     .await?;
     let sender = client(gateway.addr).await?;
     sender.send(b"start").await?;
@@ -87,8 +99,9 @@ async fn forwards_empty_and_large_udp_replies_without_truncation() -> Result<()>
 async fn rotates_new_udp_sessions_and_keeps_existing_sessions_on_their_target() -> Result<()> {
     let (first_target, mut first_peers) = echo_target().await?;
     let (second_target, mut second_peers) = echo_target().await?;
-    let settings = multi_target_rule(&[first_target, second_target], "");
-    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+    let settings = multi_target_rule(&[first_target, second_target], json!({}))?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &settings).await?;
     let first = client(gateway.addr).await?;
     let second = client(gateway.addr).await?;
     let third = client(gateway.addr).await?;
@@ -125,8 +138,9 @@ async fn tries_the_next_udp_target_when_connecting_fails() -> Result<()> {
     // A link-local destination with a nonexistent interface index cannot connect.
     let invalid = "[fe80::1%4294967295]:12345".parse()?;
     let (target, mut peers) = echo_target().await?;
-    let settings = multi_target_rule(&[invalid, target], "");
-    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+    let settings = multi_target_rule(&[invalid, target], json!({}))?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &settings).await?;
     let sender = client(gateway.addr).await?;
     sender.send(b"backup").await?;
     let mut response = [0; 16];
@@ -140,11 +154,13 @@ async fn tries_the_next_udp_target_when_connecting_fails() -> Result<()> {
 async fn does_not_replay_a_udp_datagram_when_the_selected_target_is_silent() -> Result<()> {
     let silent = UdpSocket::bind("127.0.0.1:0").await?;
     let backup = UdpSocket::bind("127.0.0.1:0").await?;
+    // The JSON model carries the UDP session timeout in whole seconds.
     let settings = multi_target_rule(
         &[silent.local_addr()?, backup.local_addr()?],
-        "idle_timeout_ms = 100",
-    );
-    let gateway = Gateway::spawn(&config(&settings, "http_enabled = false", "")).await?;
+        json!({"udp_session_timeout": 1}),
+    )?;
+    let gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &settings).await?;
     let sender = client(gateway.addr).await?;
     sender.send(b"once").await?;
     let mut buffer = [0; 16];
@@ -165,12 +181,17 @@ async fn forwards_each_udp_port_independently_to_a_shared_target() -> Result<()>
     let second = UdpSocket::bind("127.0.0.1:0").await?;
     let first_addr = first.local_addr()?;
     let second_addr = second.local_addr()?;
-    let rules = rule(target, "max_sessions = 1").replace(
-        "127.0.0.1:0",
-        &format!("127.0.0.1:{},{}", first_addr.port(), second_addr.port()),
+    let settings = forwarding_json(
+        json!({}),
+        &[udp_rule(
+            &format!("127.0.0.1:{},{}", first_addr.port(), second_addr.port()),
+            &[target.to_string()],
+            json!({"max_connections": 1}),
+        )],
     );
     drop((first, second));
-    let _gateway = Gateway::spawn(&config(&rules, "http_enabled = false", "")).await?;
+    let _gateway =
+        Gateway::spawn_forwarding(&config("", "http_enabled = false", ""), &settings).await?;
 
     let sender = client(first_addr).await?;
     let mut upstream_peers = Vec::new();
@@ -192,11 +213,13 @@ async fn forwards_each_udp_port_independently_to_a_shared_target() -> Result<()>
 #[tokio::test]
 async fn bounds_udp_associations_and_releases_idle_slots() -> Result<()> {
     let (target, _peers) = echo_target().await?;
-    let gateway = Gateway::spawn(&config(
-        &rule(target, "max_sessions = 1\nidle_timeout_ms = 500"),
-        "http_enabled = false",
-        "",
-    ))
+    let gateway = Gateway::spawn_forwarding(
+        &config("", "http_enabled = false", ""),
+        &rule(
+            target,
+            json!({"max_connections": 1, "udp_session_timeout": 1}),
+        )?,
+    )
     .await?;
     let admitted = client(gateway.addr).await?;
     let waiting = client(gateway.addr).await?;
@@ -227,33 +250,96 @@ async fn bounds_udp_associations_and_releases_idle_slots() -> Result<()> {
 #[tokio::test]
 async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let addr = "127.0.0.1:9000".parse()?;
-    let repeated = rule(addr, "")
-        .replace("127.0.0.1:0", "127.0.0.1:9001")
-        .repeat(2);
-    for rules in [
-        rule("255.255.255.255:9000".parse()?, ""),
-        rule("127.0.0.1:0".parse()?, ""),
-        repeated,
-        rule(addr, "max_sessions = 4096") + &rule(addr, "max_sessions = 1"),
-        rule(addr, "max_sessions = 2049").replace("127.0.0.1:0", "127.0.0.1:9050-9051"),
-        rule(addr, "").replace("127.0.0.1:0", "127.0.0.1:9050-9051,9051"),
-        multi_target_rule(&[], ""),
-        multi_target_rule(&[addr; 9], ""),
-        multi_target_rule(&[addr, addr], ""),
-        multi_target_rule(&[addr], "target = \"127.0.0.1:9001\""),
-        multi_target_rule(&[addr], "").replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
+    let addr: SocketAddr = "127.0.0.1:9000".parse()?;
+    let duplicated = {
+        let entry = udp_rule("127.0.0.1:9001", &[addr.to_string()], json!({}));
+        forwarding_json(json!({}), &[entry.clone(), entry])
+    };
+    let invalid_address = udp_rule(
+        "127.0.0.1:0",
+        &[addr.to_string()],
+        json!({"target_addresses": ["127.0.0.1:9000-9001"]}),
+    );
+    for settings in [
+        rule("255.255.255.255:9000".parse()?, json!({}))?,
+        rule("127.0.0.1:0".parse()?, json!({}))?,
+        duplicated,
+        forwarding_json(
+            json!({}),
+            &[
+                udp_rule(
+                    "127.0.0.1:9001",
+                    &[addr.to_string()],
+                    json!({"max_connections": 4096}),
+                ),
+                udp_rule(
+                    "127.0.0.1:9050",
+                    &[addr.to_string()],
+                    json!({"max_connections": 1}),
+                ),
+            ],
+        ),
+        forwarding_json(
+            json!({}),
+            &[udp_rule(
+                "127.0.0.1:9050-9051",
+                &[addr.to_string()],
+                json!({"max_connections": 2049}),
+            )],
+        ),
+        forwarding_json(
+            json!({}),
+            &[udp_rule(
+                "127.0.0.1:9050-9051,9051",
+                &[addr.to_string()],
+                json!({}),
+            )],
+        ),
+        multi_target_rule(&[], json!({}))?,
+        multi_target_rule(&[addr; 9], json!({}))?,
+        multi_target_rule(&[addr, addr], json!({}))?,
+        // A rule must declare at least one protocol.
+        forwarding_json(
+            json!({}),
+            &[forwarding_rule(
+                "udp",
+                "",
+                "127.0.0.1:0",
+                &[addr.to_string()],
+                json!({}),
+            )],
+        ),
+        forwarding_json(json!({}), &[invalid_address]),
     ] {
-        assert!(!Gateway::check(dir.path(), &config(&rules, "http_enabled = false", "")).await?);
+        assert!(
+            !Gateway::check_forwarding(
+                dir.path(),
+                &config("", "http_enabled = false", ""),
+                &settings
+            )
+            .await?
+        );
     }
-    for rule in [
-        rule(addr, ""),
-        multi_target_rule(&[addr], ""),
-        multi_target_rule(&[addr, "[::1]:9080".parse()?], "")
-            .replace("127.0.0.1:0", "127.0.0.1:9050-9051")
-            .replace("127.0.0.1:9000", "127.0.0.1:9000-9001"),
+    for settings in [
+        rule(addr, json!({}))?,
+        multi_target_rule(&[addr], json!({}))?,
+        forwarding_json(
+            json!({}),
+            &[udp_rule(
+                "127.0.0.1:9050-9051",
+                &["127.0.0.1".to_string(), "[::1]:9080".to_string()],
+                json!({"target_ports": "9000-9001"}),
+            )],
+        ),
     ] {
-        assert!(Gateway::check(dir.path(), &config(&rule, "http_enabled = false", "")).await?);
+        assert!(
+            Gateway::check_forwarding(
+                dir.path(),
+                &config("", "http_enabled = false", ""),
+                &settings
+            )
+            .await?
+        );
     }
     Ok(())
 }
@@ -263,10 +349,17 @@ async fn rejects_invalid_udp_targets_duplicate_binds_and_excessive_sessions() ->
 async fn udp_source_reload_blocks_pending_replies_and_new_datagrams() -> Result<()> {
     let target = UdpSocket::bind("127.0.0.1:0").await?;
     let address = target.local_addr()?;
-    let settings = |source: &str| config(&rule(address, source), "http_enabled = false", "");
-    let allow = "[udp_forward.source]\nallow = [\"127.0.0.0/8\"]";
-    let deny = "[udp_forward.source]\nallow = [\"127.0.0.0/8\"]\ndeny = [\"127.0.0.1\"]";
-    let mut gateway = Gateway::spawn(&settings(allow)).await?;
+    let toml = config("", "http_enabled = false", "");
+    let listen = format!("127.0.0.1:{}", free_udp_ports(1)?[0]);
+    let settings = |source: Value| -> Result<String> {
+        Ok(forwarding_json(
+            json!({}),
+            &[udp_rule(&listen, &[address.to_string()], source)],
+        ))
+    };
+    let allow = json!({"allow": ["127.0.0.0/8"]});
+    let deny = json!({"allow": ["127.0.0.0/8"], "deny": ["127.0.0.1"]});
+    let mut gateway = Gateway::spawn_forwarding(&toml, &settings(allow.clone())?).await?;
     let sender = client(gateway.addr).await?;
 
     sender.send(b"before").await?;
@@ -274,7 +367,7 @@ async fn udp_source_reload_blocks_pending_replies_and_new_datagrams() -> Result<
     let (len, peer) = timeout(DEADLINE, target.recv_from(&mut buffer)).await??;
     assert_eq!(&buffer[..len], b"before");
 
-    gateway.replace(&settings(deny))?;
+    gateway.replace_forwarding(&settings(deny.clone())?)?;
     gateway.signal("-HUP").await?;
     gateway.wait_log("configuration reloaded").await?;
     target.send_to(b"stale reply", peer).await?;
@@ -290,7 +383,7 @@ async fn udp_source_reload_blocks_pending_replies_and_new_datagrams() -> Result<
             .is_err()
     );
 
-    gateway.replace(&settings(allow))?;
+    gateway.replace_forwarding(&settings(allow)?)?;
     gateway.signal("-HUP").await?;
     gateway.wait_log("configuration reloaded").await?;
     sender.send(b"allowed").await?;

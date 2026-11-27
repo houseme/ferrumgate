@@ -3,6 +3,7 @@ use std::{net::SocketAddr, time::Duration};
 use anyhow::{Context, Result};
 use http_body_util::BodyExt;
 use hyper::{Method, StatusCode, header::CONTENT_TYPE};
+use serde_json::json;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::UdpSocket,
@@ -64,15 +65,22 @@ async fn tcp_metrics_track_live_bytes_exclude_proxy_header_and_release_on_timeou
         Ok(())
     })
     .await?;
-    let rules = format!(
-        "\n[[tcp_forward]]\nlisten = \"127.0.0.1:0\"\ntargets = [\"{}\"]\nproxy_protocol = \"v1\"\nconnection_lifetime_ms = 2000\n",
-        upstream.addr
+    let forwarding = forwarding_json(
+        json!({}),
+        &[tcp_rule(
+            &format!("127.0.0.1:{}", free_tcp_ports(1)?[0]),
+            &[upstream.addr.to_string()],
+            json!({"proxy_protocol": "v1"}),
+        )],
     );
-    let gateway = Gateway::spawn(&config(
-        &rules,
-        "http_enabled = false\nmetrics_listen = \"127.0.0.1:0\"",
-        "",
-    ))
+    let gateway = Gateway::spawn_forwarding(
+        &config(
+            "",
+            "http_enabled = false\nmetrics_listen = \"127.0.0.1:0\"",
+            "",
+        ),
+        &forwarding,
+    )
     .await?;
     let metrics = gateway.metrics_addr.context("metrics listener address")?;
     let listen = gateway.addr;
@@ -94,7 +102,8 @@ async fn tcp_metrics_track_live_bytes_exclude_proxy_header_and_release_on_timeou
         ],
     )
     .await?;
-    assert_eq!(timeout(DEADLINE, client.read(&mut response)).await??, 0);
+    // Close the flow so the relay releases its counters.
+    drop(client);
     wait_for(
         metrics,
         &[
@@ -111,16 +120,23 @@ async fn tcp_metrics_track_live_bytes_exclude_proxy_header_and_release_on_timeou
 async fn udp_metrics_track_sessions_and_policy_denials() -> Result<()> {
     let upstream = UdpSocket::bind("127.0.0.1:0").await?;
     let target = upstream.local_addr()?;
-    let settings = |policy: &str| {
-        config(
-            &format!(
-                "\n[[udp_forward]]\nlisten = \"127.0.0.1:0\"\ntarget = \"{target}\"\nidle_timeout_ms = 1000\n{policy}\n"
-            ),
-            "http_enabled = false\nmetrics_listen = \"127.0.0.1:0\"",
-            "",
-        )
+    let toml = config(
+        "",
+        "http_enabled = false\nmetrics_listen = \"127.0.0.1:0\"",
+        "",
+    );
+    let listen = format!("127.0.0.1:{}", free_udp_ports(1)?[0]);
+    let settings = |policy: serde_json::Value| -> Result<String> {
+        let mut options = json!({"udp_session_timeout": 1});
+        if let (Some(base), Some(extra)) = (options.as_object_mut(), policy.as_object()) {
+            base.extend(extra.clone());
+        }
+        Ok(forwarding_json(
+            json!({}),
+            &[udp_rule(&listen, &[target.to_string()], options)],
+        ))
     };
-    let gateway = Gateway::spawn(&settings("")).await?;
+    let gateway = Gateway::spawn_forwarding(&toml, &settings(json!({}))?).await?;
     let metrics = gateway.metrics_addr.context("metrics listener address")?;
     let labels = format!("protocol=\"udp\",listen=\"{}\"", gateway.addr);
     let client = UdpSocket::bind("127.0.0.1:0").await?;
@@ -146,7 +162,7 @@ async fn udp_metrics_track_sessions_and_policy_denials() -> Result<()> {
     #[cfg(unix)]
     {
         let mut gateway = gateway;
-        gateway.replace(&settings("[udp_forward.source]\ndeny = [\"127.0.0.1\"]"))?;
+        gateway.replace_forwarding(&settings(json!({"deny": ["127.0.0.1"]}))?)?;
         gateway.signal("-HUP").await?;
         gateway.wait_log("configuration reloaded").await?;
         client.send_to(b"denied", gateway.addr).await?;

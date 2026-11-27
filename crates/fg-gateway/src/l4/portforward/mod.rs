@@ -1,5 +1,6 @@
 //! Port forwarding aligned to the upstream model (WP-34): portforward.json
 //! with settings + rules, upstream defaults, collection API.
+pub mod bridge;
 pub mod compile;
 pub mod lucky;
 pub mod model;
