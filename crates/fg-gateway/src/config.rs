@@ -110,8 +110,11 @@ pub(crate) struct Config {
 }
 
 pub(crate) struct Routes {
-    by_host: HashMap<String, Vec<Route>>,
-    wildcards: Vec<String>,
+    // `pub(crate)` so `web::bridge` can assemble the table for the
+    // webservice model (WP-20 step 5); `load` remains the other
+    // constructor.
+    pub(crate) by_host: HashMap<String, Vec<Route>>,
+    pub(crate) wildcards: Vec<String>,
 }
 
 pub(crate) struct Route {

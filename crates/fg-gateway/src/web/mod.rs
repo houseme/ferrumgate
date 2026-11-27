@@ -8,8 +8,17 @@ pub(crate) use legacy::Web;
 
 pub mod domains;
 pub mod model;
+pub mod routes;
 pub mod table;
 pub mod validate;
 
+// WP-20 step 5: bridges the model onto the legacy serving pipeline.
+// `pub(crate)` because the legacy handler types it exposes are
+// `pub(crate)` themselves.
+pub(crate) mod bridge;
+
 pub use domains::{Pattern, PatternError, capture, normalize_pattern};
 pub use model::{FileConfig, Listener, Settings, Site};
+pub use routes::{ListenerPersistFn, ListenerRoutesState, mount};
+
+pub(crate) use bridge::{CompiledSiteHandler, compile_routes, compile_site_handler};
