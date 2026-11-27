@@ -1,0 +1,79 @@
+[package]
+name = "fg-dns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls = { workspace = true, features = ["webpki-roots"] }
+hyper-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "net", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+# 构建测试时启用全部提供商 feature（`cargo test -p fg-dns` 即覆盖所有契约测试）。
+fg-dns = { path = ".", features = [
+    "dns-bunny",
+    "dns-callback",
+    "dns-cloudflare",
+    "dns-dnspod",
+    "dns-dnspodcom",
+    "dns-duckdns",
+    "dns-dynv6",
+    "dns-gandi",
+    "dns-porkbun",
+] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "net", "rt-multi-thread"] }
+
+[features]
+default = []
+dns-bunny = []
+dns-callback = []
+dns-cloudflare = []
+dns-dnspod = []
+dns-dnspodcom = []
+dns-duckdns = []
+dns-dynv6 = []
+dns-gandi = []
+dns-porkbun = []
+
+# 契约测试位于 tests/contract/ 子目录（WP-41 §3.1 布局），需要显式登记为测试目标。
+[[test]]
+name = "contract-bunny"
+path = "tests/contract/bunny.rs"
+
+[[test]]
+name = "contract-callback"
+path = "tests/contract/callback.rs"
+
+[[test]]
+name = "contract-cloudflare"
+path = "tests/contract/cloudflare.rs"
+
+[[test]]
+name = "contract-dnspod"
+path = "tests/contract/dnspod.rs"
+
+[[test]]
+name = "contract-duckdns"
+path = "tests/contract/duckdns.rs"
+
+[[test]]
+name = "contract-dynv6"
+path = "tests/contract/dynv6.rs"
+
+[[test]]
+name = "contract-gandi"
+path = "tests/contract/gandi.rs"
+
+[[test]]
+name = "contract-porkbun"
+path = "tests/contract/porkbun.rs"
