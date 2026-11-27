@@ -22,7 +22,7 @@ mod static_files;
 mod tcp_forward;
 mod tls;
 mod udp_forward;
-mod web;
+pub mod web;
 mod websocket;
 
 use std::path::Path;

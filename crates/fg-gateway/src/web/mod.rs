@@ -8,6 +8,8 @@ pub(crate) use legacy::Web;
 
 pub mod domains;
 pub mod model;
+pub mod table;
+pub mod validate;
 
 pub use domains::{Pattern, PatternError, capture, normalize_pattern};
 pub use model::{FileConfig, Listener, Settings, Site};
