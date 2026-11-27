@@ -1234,6 +1234,7 @@ dependencies = [
  "base64 0.23.1",
  "cap-std",
  "fg-core",
+ "fg-net",
  "futures-util",
  "hickory-resolver",
  "http-body-util",

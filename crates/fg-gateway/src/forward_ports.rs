@@ -1,8 +1,9 @@
 use std::net::SocketAddr;
 
 use anyhow::{Context, Result, ensure};
+use fg_net::ports::{MAX_PORTS, parse_ports};
 
-pub(crate) const MAX_LISTENERS: usize = 64;
+pub(crate) const MAX_LISTENERS: usize = MAX_PORTS;
 
 pub(crate) fn parse(address: &str) -> Result<Vec<SocketAddr>> {
     if let Ok(single) = address.parse::<SocketAddr>() {
@@ -15,27 +16,15 @@ pub(crate) fn parse(address: &str) -> Result<Vec<SocketAddr>> {
     let mut address = format!("{host}:0")
         .parse::<SocketAddr>()
         .context("invalid socket address")?;
-    let mut expanded = Vec::new();
-    for part in ports
-        .split([',', '，', ' '])
-        .filter(|part| !part.is_empty())
-    {
-        let (start, end) = part.split_once('-').unwrap_or((part, part));
-        let start = start.trim().parse::<u16>().context("invalid first port")?;
-        let end = end.trim().parse::<u16>().context("invalid last port")?;
-        ensure!(start != 0 && start <= end, "invalid port range");
-        let ports = start..=end;
-        ensure!(
-            expanded.len() + ports.len() <= MAX_LISTENERS,
-            "port list supports up to {MAX_LISTENERS} entries"
-        );
-        expanded.extend(ports.map(|port| {
+    let list = parse_ports(ports).context("invalid port list")?;
+    Ok(list
+        .ports
+        .into_iter()
+        .map(|port| {
             address.set_port(port);
             address
-        }));
-    }
-    ensure!(!expanded.is_empty(), "port list must contain a port");
-    Ok(expanded)
+        })
+        .collect())
 }
 
 pub(crate) fn targets(address: &str, listener_count: usize) -> Result<Vec<SocketAddr>> {

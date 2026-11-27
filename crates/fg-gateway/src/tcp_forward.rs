@@ -1,13 +1,7 @@
 use std::{
     collections::HashSet,
-    io,
     net::{IpAddr, SocketAddr},
-    pin::Pin,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering::Relaxed},
-    },
-    task::{Context as TaskContext, Poll},
+    sync::{Arc, atomic::Ordering::Relaxed},
     time::Duration,
 };
 
@@ -15,7 +9,6 @@ use anyhow::{Context, Result, ensure};
 use ipnet::IpNet;
 use serde::Deserialize;
 use tokio::{
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf, copy_bidirectional},
     net::{TcpListener, TcpStream},
     sync::watch,
     task::JoinSet,
@@ -25,6 +18,11 @@ use tokio::{
 use crate::{
     forward_metrics::ForwardStats,
     forward_ports,
+    l4::shared::{
+        failover::dial_targets,
+        pipe::{FirstData, PipeLimits, RelayResult},
+        proxy_proto::{self, write_header},
+    },
     source_policy::{RawSourcePolicy, SourcePolicy, compile_networks},
     source_quota::SourceQuota,
 };
@@ -249,141 +247,55 @@ async fn relay(
     stats: Option<&ForwardStats>,
 ) {
     let _ = client.set_nodelay(true);
-    for &target in targets {
-        if let Ok(Ok(mut upstream)) = timeout(connect_timeout, TcpStream::connect(target)).await {
-            let _ = upstream.set_nodelay(true);
-            if let Some(protocol) = proxy_protocol {
-                let result = async {
-                    protocol
-                        .write(&mut upstream, source, client.local_addr()?)
-                        .await
-                }
+    let Ok(mut upstream) = dial_targets(targets, connect_timeout).await else {
+        tracing::debug!("all TCP forward targets failed to connect");
+        return;
+    };
+    if let Some(protocol) = proxy_protocol {
+        let protocol = match protocol {
+            ProxyProtocol::V1 => proxy_proto::ProxyProtocol::V1,
+            ProxyProtocol::V2 => proxy_proto::ProxyProtocol::V2,
+        };
+        let result =
+            async { write_header(protocol, &mut upstream, source, client.local_addr()?).await }
                 .await;
-                if let Err(error) = result {
-                    tracing::debug!(kind = ?error.kind(), "TCP PROXY header failed");
-                    return;
-                }
-            }
-            let first_data = timeout(first_data_timeout, async {
-                let (mut from_client, mut from_upstream) = ([0; 1], [0; 1]);
-                tokio::select! {
-                    result = client.peek(&mut from_client) => result,
-                    result = upstream.peek(&mut from_upstream) => result,
-                }
-            })
-            .await;
-            let result = match first_data {
-                // EOF is readable too. Relay it so the other peer can still respond.
-                Ok(Ok(_)) => match stats {
-                    Some(stats) => {
-                        copy_bidirectional(
-                            &mut CountWrites(&mut client, &stats.bytes_out),
-                            &mut CountWrites(&mut upstream, &stats.bytes_in),
-                        )
-                        .await
-                    }
-                    None => copy_bidirectional(&mut client, &mut upstream).await,
-                },
-                Ok(Err(error)) => Err(error),
-                Err(_) => {
-                    tracing::debug!("TCP first data timed out");
-                    return;
-                }
-            };
-            if let Err(error) = result {
-                tracing::debug!(kind = ?error.kind(), "TCP relay ended");
-            }
+        if let Err(error) = result {
+            tracing::debug!(kind = ?error.kind(), "TCP PROXY header failed");
             return;
         }
     }
-    tracing::debug!("all TCP forward targets failed to connect");
-}
-
-struct CountWrites<'a>(&'a mut TcpStream, &'a AtomicU64);
-
-impl AsyncRead for CountWrites<'_> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.0).poll_read(cx, buffer)
-    }
-}
-
-impl AsyncWrite for CountWrites<'_> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        let result = Pin::new(&mut *self.0).poll_write(cx, buffer);
-        if let Poll::Ready(Ok(written)) = result {
-            self.1.fetch_add(written as u64, Relaxed);
+    let limits = PipeLimits {
+        first_data_timeout,
+        drain: Duration::ZERO,
+    };
+    // EOF is readable too. Relay it so the other peer can still respond.
+    let result = match stats {
+        Some(stats) => {
+            crate::l4::shared::pipe::relay_counted(
+                &mut client,
+                &mut upstream,
+                limits,
+                FirstData::None,
+                || false,
+                &stats.bytes_out,
+                &stats.bytes_in,
+            )
+            .await
         }
-        result
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.0).poll_flush(cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut *self.0).poll_shutdown(cx)
-    }
-}
-
-impl ProxyProtocol {
-    async fn write(
-        self,
-        upstream: &mut TcpStream,
-        source: SocketAddr,
-        destination: SocketAddr,
-    ) -> io::Result<()> {
-        let source_ip = source.ip().to_canonical();
-        let destination_ip = destination.ip().to_canonical();
-        if source_ip.is_ipv4() != destination_ip.is_ipv4() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "inconsistent TCP address families",
-            ));
+        None => {
+            crate::l4::shared::pipe::relay(
+                &mut client,
+                &mut upstream,
+                limits,
+                FirstData::None,
+                || false,
+            )
+            .await
         }
-        match self {
-            Self::V1 => {
-                let family = if source_ip.is_ipv4() { "TCP4" } else { "TCP6" };
-                let header = format!(
-                    "PROXY {family} {source_ip} {destination_ip} {} {}\r\n",
-                    source.port(),
-                    destination.port()
-                );
-                upstream.write_all(header.as_bytes()).await
-            }
-            Self::V2 => {
-                let mut header = [0u8; 52];
-                header[..12].copy_from_slice(b"\r\n\r\n\0\r\nQUIT\n");
-                header[12] = 0x21; // Version 2, PROXY command.
-                let ports_at = match (source_ip, destination_ip) {
-                    (IpAddr::V4(source), IpAddr::V4(destination)) => {
-                        header[13] = 0x11;
-                        header[15] = 12;
-                        header[16..20].copy_from_slice(&source.octets());
-                        header[20..24].copy_from_slice(&destination.octets());
-                        24
-                    }
-                    (IpAddr::V6(source), IpAddr::V6(destination)) => {
-                        header[13] = 0x21;
-                        header[15] = 36;
-                        header[16..32].copy_from_slice(&source.octets());
-                        header[32..48].copy_from_slice(&destination.octets());
-                        48
-                    }
-                    _ => unreachable!("verified matching address families"),
-                };
-                header[ports_at..ports_at + 2].copy_from_slice(&source.port().to_be_bytes());
-                header[ports_at + 2..ports_at + 4]
-                    .copy_from_slice(&destination.port().to_be_bytes());
-                upstream.write_all(&header[..ports_at + 4]).await
-            }
-        }
+    };
+    match result {
+        RelayResult::FirstDataTimeout => tracing::debug!("TCP first data timed out"),
+        RelayResult::Error(error) => tracing::debug!(kind = ?error.kind(), "TCP relay ended"),
+        RelayResult::Closed | RelayResult::Killed => {}
     }
 }

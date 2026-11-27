@@ -1,8 +1,10 @@
 use std::net::IpAddr;
 
-use anyhow::{Context, Result, ensure};
-use ipnet::{IpNet, Ipv4Net};
+use anyhow::{Context, Result};
+use ipnet::IpNet;
 use serde::Deserialize;
+
+pub(crate) use fg_net::source_rule::compile_networks;
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -37,36 +39,6 @@ impl SourcePolicy {
                 .as_ref()
                 .is_none_or(|allow| allow.iter().any(|network| network.contains(&address)))
     }
-}
-
-pub(crate) fn compile_networks(entries: Vec<String>) -> Result<Vec<IpNet>> {
-    ensure!(
-        entries.len() <= 1024,
-        "a source list supports at most 1024 entries"
-    );
-    let mut networks = Vec::with_capacity(entries.len());
-    for (index, entry) in entries.iter().enumerate() {
-        let address = entry.parse::<IpAddr>().ok();
-        let network = if let Some(address) = address {
-            IpNet::from(address.to_canonical())
-        } else {
-            match entry
-                .parse::<IpNet>()
-                .with_context(|| format!("source entry {index} is not an IP or CIDR"))?
-            {
-                IpNet::V6(network) if network.prefix_len() >= 96 => {
-                    if let Some(mapped) = network.network().to_ipv4_mapped() {
-                        IpNet::V4(Ipv4Net::new(mapped, network.prefix_len() - 96)?)
-                    } else {
-                        IpNet::V6(network)
-                    }
-                }
-                network => network,
-            }
-        };
-        networks.push(network.trunc());
-    }
-    Ok(IpNet::aggregate(&networks))
 }
 
 #[cfg(test)]
