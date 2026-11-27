@@ -190,6 +190,27 @@ impl AccountManager {
         }
     }
 
+    /// Issues an administrator session for a username the gateway has
+    /// authenticated (fnOS SSO). Skips password and TOTP checks; the caller
+    /// must have verified the request crossed the gateway socket.
+    pub fn login_via_trusted_gateway(&self, username: &str) -> Result<Session> {
+        let snapshot = self.snapshot.load_full();
+        let account = &snapshot.account;
+        // The single administrator account is matched case-insensitively, the
+        // same normalization the login path applies to username checks
+        // elsewhere; the issued session always carries the canonical
+        // username, exactly as a password login does.
+        ensure!(
+            account.username.eq_ignore_ascii_case(username),
+            "gateway identity is not the administrator"
+        );
+        // No password factor is verified here, so the must-change-password
+        // flags stay untouched; `password_login_off` only governs the
+        // password factor and does not block a gateway-authenticated
+        // identity. Expiry comes from the shared session settings.
+        snapshot.issue(SystemTime::now())
+    }
+
     pub fn configure_login_limits(&self, limits: LoginLimits) -> Result<()> {
         self.limiter.configure(limits)
     }
@@ -632,6 +653,26 @@ pub(super) fn open_lock(store: &ConfigStore, name: &str) -> Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trusted_gateway_login_issues_admin_sessions() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (manager, _) = AccountManager::open(ConfigStore::open(dir.path())?, None)?;
+        // The fixture administrator is the default "admin" account.
+        let session = manager.login_via_trusted_gateway("admin")?;
+        let identity = manager
+            .identify(&session.token)
+            .expect("gateway session must verify");
+        assert_eq!(identity.username, "admin");
+        assert_eq!(identity.role, Role::Admin);
+        // Matching is case-normalized and the session stays valid.
+        let upper = manager.login_via_trusted_gateway("ADMIN")?;
+        assert!(manager.identify(&upper.token).is_some());
+        // Unknown gateway identities never receive a session.
+        assert!(manager.login_via_trusted_gateway("someone-else").is_err());
+        assert!(manager.login_via_trusted_gateway("").is_err());
+        Ok(())
+    }
 
     #[test]
     fn entry_marker_key_is_stable_and_domain_separated() -> Result<()> {
