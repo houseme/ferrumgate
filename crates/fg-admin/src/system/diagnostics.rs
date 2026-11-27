@@ -17,8 +17,8 @@ use axum::Json;
 use regex::Regex;
 use serde::Serialize;
 
-use crate::{ApiError, ApiRouter, RouteModels};
 use super::SummarySource;
+use crate::{ApiError, ApiRouter, RouteModels};
 
 const REDACTED: &str = "<redacted>";
 
@@ -30,37 +30,144 @@ const MAX_ARRAY_ITEMS: usize = 100;
 
 /// Keys whose values are fixed enums (protocols, modes, provider ids).
 const VERBATIM_KEYS: [&str; 44] = [
-    "type", "mode", "protocol", "protocols", "proto", "network", "provider", "kind", "family",
-    "level", "minLevel", "tlsMode", "minTls", "lbPolicy", "authType", "keyType", "method",
-    "format", "countryMode", "proxyMode", "ipMode", "channel", "role", "state", "status",
-    "backendState", "language", "timeZone", "schedule", "repeat", "version", "os", "arch",
-    "edgeIpVersion", "scope", "scopes", "tool", "healthStatus", "driver", "contentType", "acme",
-    "restart", "tlsVersion", "shell",
+    "type",
+    "mode",
+    "protocol",
+    "protocols",
+    "proto",
+    "network",
+    "provider",
+    "kind",
+    "family",
+    "level",
+    "minLevel",
+    "tlsMode",
+    "minTls",
+    "lbPolicy",
+    "authType",
+    "keyType",
+    "method",
+    "format",
+    "countryMode",
+    "proxyMode",
+    "ipMode",
+    "channel",
+    "role",
+    "state",
+    "status",
+    "backendState",
+    "language",
+    "timeZone",
+    "schedule",
+    "repeat",
+    "version",
+    "os",
+    "arch",
+    "edgeIpVersion",
+    "scope",
+    "scopes",
+    "tool",
+    "healthStatus",
+    "driver",
+    "contentType",
+    "acme",
+    "restart",
+    "tlsVersion",
+    "shell",
 ];
 
 /// Timestamp keys: times carry no privacy and help correlate issues.
 const TIME_KEYS: [&str; 25] = [
-    "createdAt", "updatedAt", "lastRun", "nextRun", "lastCheck", "lastSync", "lastAttempt",
-    "nextRetry", "notBefore", "notAfter", "expiresAt", "lastUsedAt", "lastSeen", "lastAction",
-    "lastActive", "started", "finished", "startedAt", "modTime", "time", "sampledAt", "checkedAt",
-    "created", "deadline", "applied",
+    "createdAt",
+    "updatedAt",
+    "lastRun",
+    "nextRun",
+    "lastCheck",
+    "lastSync",
+    "lastAttempt",
+    "nextRetry",
+    "notBefore",
+    "notAfter",
+    "expiresAt",
+    "lastUsedAt",
+    "lastSeen",
+    "lastAction",
+    "lastActive",
+    "started",
+    "finished",
+    "startedAt",
+    "modTime",
+    "time",
+    "sampledAt",
+    "checkedAt",
+    "created",
+    "deadline",
+    "applied",
 ];
 
 /// Address-family keys: keep scheme/port/IP class, drop the host.
 const ADDR_KEYS: [&str; 47] = [
-    "listen", "httpsListen", "listenAddress", "listenIp", "bind", "bindAddr", "localAddr",
-    "localIp", "target", "targets", "targetAddresses", "to", "from", "dest", "destination",
-    "upstreams", "addr", "addrs", "serverAddr", "server", "publicAddr", "stunServer",
-    "stunServers", "keepAliveServers", "checkAddr", "upnpGateway", "natpmpGateway",
-    "dashboardAddr", "broadcastIps", "ip", "ips", "ipv4", "ipv6", "lastUsedIP", "ipList",
-    "resolvers", "dnsServers", "dns", "curAddr", "trustedProxies", "host", "hostIp",
-    "upnpLocalHost", "upnpControlUrl", "publicHost", "socks5", "proxy",
+    "listen",
+    "httpsListen",
+    "listenAddress",
+    "listenIp",
+    "bind",
+    "bindAddr",
+    "localAddr",
+    "localIp",
+    "target",
+    "targets",
+    "targetAddresses",
+    "to",
+    "from",
+    "dest",
+    "destination",
+    "upstreams",
+    "addr",
+    "addrs",
+    "serverAddr",
+    "server",
+    "publicAddr",
+    "stunServer",
+    "stunServers",
+    "keepAliveServers",
+    "checkAddr",
+    "upnpGateway",
+    "natpmpGateway",
+    "dashboardAddr",
+    "broadcastIps",
+    "ip",
+    "ips",
+    "ipv4",
+    "ipv6",
+    "lastUsedIP",
+    "ipList",
+    "resolvers",
+    "dnsServers",
+    "dns",
+    "curAddr",
+    "trustedProxies",
+    "host",
+    "hostIp",
+    "upnpLocalHost",
+    "upnpControlUrl",
+    "publicHost",
+    "socks5",
+    "proxy",
 ];
 
 /// Free-text keys (errors, reasons): keep content, redact like logs.
 const TEXT_KEYS: [&str; 10] = [
-    "error", "lastError", "ipError", "message", "reason", "lastExit", "warnings", "errors",
-    "summary", "detail",
+    "error",
+    "lastError",
+    "ipError",
+    "message",
+    "reason",
+    "lastExit",
+    "warnings",
+    "errors",
+    "summary",
+    "detail",
 ];
 
 /// One bundle file (name → text content); the endpoint serves them as a
@@ -184,10 +291,7 @@ impl Redactor {
             return s.to_owned();
         }
         let s = self.replace_literals(s);
-        let s = self
-            .re_user_path
-            .replace_all(&s, "${1}<user>")
-            .into_owned();
+        let s = self.re_user_path.replace_all(&s, "${1}<user>").into_owned();
         let s = self
             .re_url
             .replace_all(&s, |captures: &regex::Captures| {
@@ -216,7 +320,11 @@ impl Redactor {
                 // Plain lowercase words ("basic authentication") are not
                 // credentials.
                 let credential_like = credential.bytes().any(|b| {
-                    b.is_ascii_digit() || b.is_ascii_uppercase() || b == b'+' || b == b'/' || b == b'='
+                    b.is_ascii_digit()
+                        || b.is_ascii_uppercase()
+                        || b == b'+'
+                        || b == b'/'
+                        || b == b'='
                 });
                 if credential_like {
                     format!("{}{}{REDACTED}", &captures[1], &captures[2])
@@ -321,9 +429,9 @@ impl Redactor {
 
     fn is_public_domain(&self, domain: &str) -> bool {
         let lowered = domain.to_ascii_lowercase();
-        self.public_domains.iter().any(|public| {
-            lowered == *public || lowered.ends_with(&format!(".{public}"))
-        })
+        self.public_domains
+            .iter()
+            .any(|public| lowered == *public || lowered.ends_with(&format!(".{public}")))
     }
 
     fn replace_literals(&self, s: &str) -> String {
@@ -356,10 +464,7 @@ impl Redactor {
                     } else {
                         // Domain, id and user-defined keys are not kept.
                         anonymous += 1;
-                        out.insert(
-                            format!("<key-{anonymous}>"),
-                            self.sanitize_value(child, ""),
-                        );
+                        out.insert(format!("<key-{anonymous}>"), self.sanitize_value(child, ""));
                     }
                 }
                 Value::Object(out)
@@ -380,9 +485,7 @@ impl Redactor {
                 }
                 Value::Array(out)
             }
-            Value::String(text) => {
-                Value::String(self.sanitize_string(&text, key))
-            }
+            Value::String(text) => Value::String(self.sanitize_string(&text, key)),
             Value::Number(number) => {
                 if self.re_sensitive_key.is_match(key) && !self.verbatim.contains(key) {
                     Value::String(REDACTED.to_owned())
@@ -468,7 +571,7 @@ fn replace_word(s: &str, from: &str, to: &str) -> String {
     let lowered_from = from.to_ascii_lowercase();
     loop {
         let mut position = None;
-        let mut lowered_rest = rest.to_ascii_lowercase();
+        let lowered_rest = rest.to_ascii_lowercase();
         let mut offset = 0usize;
         while let Some(found) = lowered_rest[offset..].find(&lowered_from) {
             let start = offset + found;
@@ -494,9 +597,8 @@ fn replace_word(s: &str, from: &str, to: &str) -> String {
 
 fn is_number_list(s: &str) -> bool {
     !s.is_empty()
-        && s.bytes().all(|b| {
-            b.is_ascii_digit() || b == b',' || b == b'-' || b == b':' || b == b' '
-        })
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || b == b',' || b == b'-' || b == b':' || b == b' ')
 }
 
 /// Builds the sanitized bundle. `config_files` are the raw top-level
@@ -511,12 +613,11 @@ pub fn build_bundle(
     let mut files = Vec::new();
     files.push(BundleFile {
         name: "README.txt".to_owned(),
-        content:
-            "FerrumGate 诊断包\n\n所有文本经过脱敏：配置目录、主目录与主机名替换为占位符；\n\
+        content: "FerrumGate 诊断包\n\n所有文本经过脱敏：配置目录、主目录与主机名替换为占位符；\n\
              密钥值、认证头、令牌、地址（保留类别与端口）与非公共域名均已移除。\n\
              config/ 下的 JSON 保留结构与枚举，其余字符串替换为 <redacted>。\n\
              日志导出（logs=1）与崩溃记录随后续增量接入。\n"
-                .to_owned(),
+            .to_owned(),
     });
     let summary_text = serde_json::to_string_pretty(&summary).unwrap_or_else(|_| "{}".into());
     files.push(BundleFile {
@@ -599,6 +700,50 @@ pub fn read_config_files(store: &fg_config::ConfigStore) -> Vec<(String, Vec<u8>
         }
     }
     files
+}
+
+/// Mounts `GET /api/system/diagnostics` (session-only via the forbidden
+/// prefix table): serves the sanitized bundle as a JSON preview. `?logs=0`
+/// is accepted for interface compatibility; log export lands with the
+/// logging-buffer handoff.
+pub(crate) fn mount(router: ApiRouter, source: Arc<SummarySource>) -> ApiRouter {
+    router.modeled_route(
+        axum::http::Method::GET,
+        "/api/system/diagnostics",
+        "Preview the sanitized diagnostics bundle",
+        RouteModels::default().response::<DiagnosticsPreview>(),
+        move || {
+            let source = source.clone();
+            async move {
+                let redactor = Redactor::new(&source.config_dir);
+                let summary = serde_json::json!({
+                    "generatedAt": time::OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default(),
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "os": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                    "rustc": option_env!("FERRUMGATE_RUSTC_VERSION").unwrap_or(""),
+                    "uptimeSeconds": source.uptime_seconds(),
+                    "timeZone": source.settings.time_zone.clone(),
+                    "inDocker": Path::new("/.dockerenv").exists(),
+                    "adminListen": {
+                        "http": source.settings.listen,
+                        "https": source.settings.https_listen,
+                    },
+                    "procRssBytes": source.proc_rss_bytes,
+                    "modules": source.module_states(),
+                });
+                let store = fg_config::ConfigStore::open(&source.config_dir)
+                    .map_err(|_| ApiError::internal())?;
+                let configs = read_config_files(&store);
+                let bundle = build_bundle(&redactor, summary, configs, false);
+                Ok::<_, ApiError>(Json(DiagnosticsPreview {
+                    files: bundle.iter().map(BundleFile::preview).collect(),
+                }))
+            }
+        },
+    )
 }
 
 #[cfg(test)]
@@ -691,60 +836,22 @@ mod tests {
         let files = vec![
             ("account".to_owned(), br#"{"passwordHash":"x"}"#.to_vec()),
             ("tokens".to_owned(), br#"{"tokens":[]}"#.to_vec()),
-            ("ddns".to_owned(), br#"{"token":"fix-secret-1","server":"dns.example.com"}"#.to_vec()),
+            (
+                "ddns".to_owned(),
+                br#"{"token":"fix-secret-1","server":"dns.example.com"}"#.to_vec(),
+            ),
         ];
         let summary = serde_json::json!({"version": env!("CARGO_PKG_VERSION")});
         let bundle = build_bundle(&redactor, summary, files, false);
         let names: Vec<_> = bundle.iter().map(|file| file.name.as_str()).collect();
         assert_eq!(names, ["README.txt", "summary.json", "config/ddns.json"]);
-        let ddns = bundle.iter().find(|file| file.name == "config/ddns.json").unwrap();
+        let ddns = bundle
+            .iter()
+            .find(|file| file.name == "config/ddns.json")
+            .unwrap();
         assert!(!ddns.content.contains("fix-secret-1"), "{}", ddns.content);
         // "server" is an address key: the domain collapses to <host>.
         assert!(ddns.content.contains("<host>"), "{}", ddns.content);
         assert!(!ddns.content.contains("example.com"), "{}", ddns.content);
     }
-}
-
-/// Mounts `GET /api/system/diagnostics` (session-only via the forbidden
-/// prefix table): serves the sanitized bundle as a JSON preview. `?logs=0`
-/// is accepted for interface compatibility; log export lands with the
-/// logging-buffer handoff.
-pub(crate) fn mount(router: ApiRouter, source: Arc<SummarySource>) -> ApiRouter {
-    router.modeled_route(
-        axum::http::Method::GET,
-        "/api/system/diagnostics",
-        "Preview the sanitized diagnostics bundle",
-        RouteModels::default().response::<DiagnosticsPreview>(),
-        move || {
-            let source = source.clone();
-            async move {
-                let redactor = Redactor::new(&source.config_dir);
-                let summary = serde_json::json!({
-                    "generatedAt": time::OffsetDateTime::now_utc()
-                        .format(&time::format_description::well_known::Rfc3339)
-                        .unwrap_or_default(),
-                    "version": env!("CARGO_PKG_VERSION"),
-                    "os": std::env::consts::OS,
-                    "arch": std::env::consts::ARCH,
-                    "rustc": option_env!("FERRUMGATE_RUSTC_VERSION").unwrap_or(""),
-                    "uptimeSeconds": source.uptime_seconds(),
-                    "timeZone": source.settings.time_zone.clone(),
-                    "inDocker": Path::new("/.dockerenv").exists(),
-                    "adminListen": {
-                        "http": source.settings.listen,
-                        "https": source.settings.https_listen,
-                    },
-                    "procRssBytes": source.proc_rss_bytes,
-                    "modules": source.module_states(),
-                });
-                let store = fg_config::ConfigStore::open(&source.config_dir)
-                    .map_err(|_| ApiError::internal())?;
-                let configs = read_config_files(&store);
-                let bundle = build_bundle(&redactor, summary, configs, false);
-                Ok::<_, ApiError>(Json(DiagnosticsPreview {
-                    files: bundle.iter().map(BundleFile::preview).collect(),
-                }))
-            }
-        },
-    )
 }

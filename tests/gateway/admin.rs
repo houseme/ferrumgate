@@ -1200,11 +1200,11 @@ async fn safe_entry_and_lan_only_enforced_over_real_process() -> Result<()> {
     async fn entry_session(
         client: &mut hyper::client::conn::http1::SendRequest<super::common::TestBody>,
     ) -> Result<hyper::Response<hyper::body::Incoming>> {
-        Ok(send(
+        send(
             client,
             request(Method::GET, "/api/session", "localhost", full("")),
         )
-        .await?)
+        .await
     }
 
     // Run 1: the safe-entry gate answers credential requests with the
@@ -1253,7 +1253,9 @@ async fn safe_entry_and_lan_only_enforced_over_real_process() -> Result<()> {
         "entry path is not denied: {text}"
     );
     let mut session = request(Method::GET, "/api/session", "localhost", full(""));
-    session.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    session
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse()?);
     let response = send(&mut client, session).await?;
     assert_eq!(
         response.status(),

@@ -552,7 +552,11 @@ pub async fn origin_guard(
         }
         OriginCheck::UntrustedPresent => {
             if needs_guard && !login_exception {
-                log_rejected_origin(origin.as_deref(), host.as_deref(), sec_fetch_site.as_deref());
+                log_rejected_origin(
+                    origin.as_deref(),
+                    host.as_deref(),
+                    sec_fetch_site.as_deref(),
+                );
                 (StatusCode::FORBIDDEN, "拒绝跨源请求").into_response()
             } else {
                 next.run(request).await
@@ -623,8 +627,7 @@ pub async fn rewrite_response(
 
 /// 首页路径：`/`，或前缀本身 / 前缀加尾斜杠（rewrite 在 restore 内外都能用）。
 fn is_index_path(path: &str, prefix: &str) -> bool {
-    path == "/"
-        || (!prefix.is_empty() && (path == prefix || path == format!("{prefix}/")))
+    path == "/" || (!prefix.is_empty() && (path == prefix || path == format!("{prefix}/")))
 }
 
 /// `Location` 补前缀；`Set-Cookie` 的 Path 属性补前缀。
@@ -1091,9 +1094,9 @@ mod tests {
         let builder = hyper::Request::builder()
             .method(hyper::Method::from_bytes(method.as_bytes()).expect("method"))
             .uri(uri);
-        let builder = headers
-            .iter()
-            .fold(builder, |builder, (name, value)| builder.header(*name, *value));
+        let builder = headers.iter().fold(builder, |builder, (name, value)| {
+            builder.header(*name, *value)
+        });
         let request = builder
             .body(Full::new(Bytes::new()))
             .expect("build request");
@@ -1176,9 +1179,8 @@ mod tests {
     fn guard_state() -> (OriginGuardState, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = fg_config::ConfigStore::open(dir.path()).expect("store");
-        let (manager, _) =
-            fg_auth::AccountManager::open(store.clone(), Some("test-password-123"))
-                .expect("account manager");
+        let (manager, _) = fg_auth::AccountManager::open(store.clone(), Some("test-password-123"))
+            .expect("account manager");
         (
             OriginGuardState {
                 confirmed: Arc::new(Mutex::new(ConfirmedOrigins::default())),
@@ -1202,7 +1204,10 @@ mod tests {
         let prefix = Arc::new("/app/gately".to_string());
         let app = axum::Router::new()
             .fallback(echo)
-            .layer(axum::middleware::from_fn_with_state(prefix.clone(), restore));
+            .layer(axum::middleware::from_fn_with_state(
+                prefix.clone(),
+                restore,
+            ));
         let addr = serve(app).await;
 
         // 裸前缀 → 308 重定向到 prefix + "/"，query 保留
@@ -1221,7 +1226,10 @@ mod tests {
             addr,
             "GET",
             "/app/gately/api/echo?a=1&b=2",
-            &[("x-real-ip", "203.0.113.7"), ("x-forwarded-for", "198.51.100.9")],
+            &[
+                ("x-real-ip", "203.0.113.7"),
+                ("x-forwarded-for", "198.51.100.9"),
+            ],
         )
         .await;
         assert_eq!(status, hyper::StatusCode::OK);
@@ -1249,7 +1257,10 @@ mod tests {
         // 外层先插一个假的 ConnectInfo：restore 应替换或按规则保留
         let app = axum::Router::new()
             .fallback(echo)
-            .layer(axum::middleware::from_fn_with_state(prefix.clone(), restore))
+            .layer(axum::middleware::from_fn_with_state(
+                prefix.clone(),
+                restore,
+            ))
             .layer(axum::middleware::from_fn(inject_fake_connect_info));
         let addr = serve(app).await;
 
@@ -1307,11 +1318,13 @@ mod tests {
         assert_eq!(status, hyper::StatusCode::OK);
         let facts = json_body(&body);
         assert_eq!(facts["host"], serde_json::json!(["nas.local:5666"]));
-        assert!(state
-            .confirmed
-            .lock()
-            .expect("lock")
-            .contains("https://nas.local:5666"));
+        assert!(
+            state
+                .confirmed
+                .lock()
+                .expect("lock")
+                .contains("https://nas.local:5666")
+        );
         assert_eq!(
             ConfirmedOrigins::load(&state.store).list,
             vec!["https://nas.local:5666".to_owned()]
@@ -1330,7 +1343,10 @@ mod tests {
         )
         .await;
         assert_eq!(status, hyper::StatusCode::OK);
-        assert_eq!(json_body(&body)["host"], serde_json::json!(["nas.local:5666"]));
+        assert_eq!(
+            json_body(&body)["host"],
+            serde_json::json!(["nas.local:5666"])
+        );
         assert_eq!(
             ConfirmedOrigins::load(&state.store).list.len(),
             1,
@@ -1469,7 +1485,10 @@ mod tests {
                 addr,
                 "POST",
                 path,
-                &[("origin", "https://nas.local:5666"), ("x-test-role", "admin")],
+                &[
+                    ("origin", "https://nas.local:5666"),
+                    ("x-test-role", "admin"),
+                ],
             )
             .await;
             assert_eq!(status, hyper::StatusCode::OK, "{path} 应放行");
@@ -1483,7 +1502,10 @@ mod tests {
             addr,
             "POST",
             "/api/login-fake",
-            &[("origin", "https://nas.local:5666"), ("x-test-role", "admin")],
+            &[
+                ("origin", "https://nas.local:5666"),
+                ("x-test-role", "admin"),
+            ],
         )
         .await;
         assert_eq!(status, hyper::StatusCode::FORBIDDEN);
@@ -1562,9 +1584,9 @@ mod tests {
                 prefix.clone(),
                 rewrite_response,
             ));
-        let app = axum::Router::new()
-            .fallback_service(inner)
-            .layer(axum::middleware::from_fn_with_state(prefix.clone(), restore));
+        let app = axum::Router::new().fallback_service(inner).layer(
+            axum::middleware::from_fn_with_state(prefix.clone(), restore),
+        );
         let addr = serve(app).await;
 
         // Location 绝对路径补前缀
@@ -1576,10 +1598,7 @@ mod tests {
         );
         // 协议相对地址（// 开头）不动
         let (_, headers, _) = send(addr, "GET", "/app/gately/api/external", &[]).await;
-        assert_eq!(
-            header_values(&headers, "location"),
-            vec!["//other.local/x"]
-        );
+        assert_eq!(header_values(&headers, "location"), vec!["//other.local/x"]);
         // Set-Cookie 的 Path 补前缀，多条各自处理
         let (_, headers, _) = send(addr, "GET", "/app/gately/api/cookie", &[]).await;
         assert_eq!(
@@ -1616,4 +1635,3 @@ mod tests {
         assert!(body.contains(r#"href="./y.js""#), "{body}");
     }
 }
-

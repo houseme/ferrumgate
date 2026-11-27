@@ -337,16 +337,12 @@ pub async fn guard(State(config): State<GuardConfig>, request: Request, next: Ne
         Decision::Allow => {
             let mut response = next.run(request).await;
             if plant {
-                let marker = crate::access::entry::plant_marker(
-                    &config.1,
-                    std::time::SystemTime::now(),
-                );
-                if let Ok(value) = HeaderValue::from_str(
-                    &crate::access::entry::marker_set_cookie(&marker),
-                ) {
-                    response
-                        .headers_mut()
-                        .append(header::SET_COOKIE, value);
+                let marker =
+                    crate::access::entry::plant_marker(&config.1, std::time::SystemTime::now());
+                if let Ok(value) =
+                    HeaderValue::from_str(&crate::access::entry::marker_set_cookie(&marker))
+                {
+                    response.headers_mut().append(header::SET_COOKIE, value);
                 }
             }
             response
