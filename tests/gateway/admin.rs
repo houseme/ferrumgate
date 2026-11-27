@@ -1232,6 +1232,17 @@ async fn safe_entry_and_lan_only_enforced_over_real_process() -> Result<()> {
     )
     .await?;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    // Visiting the entry path plants the signed marker; the planted
+    // cookie opens the gate for the following request.
+    let cookie = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find(|value| value.starts_with("gately_entry="))
+        .and_then(|value| value.split(';').next())
+        .expect("the entry visit plants the marker cookie")
+        .to_owned();
     let text = page(response).await?;
     assert!(
         text.contains("API route not found"),
@@ -1241,12 +1252,13 @@ async fn safe_entry_and_lan_only_enforced_over_real_process() -> Result<()> {
         !text.contains("noindex"),
         "entry path is not denied: {text}"
     );
-    // Visiting the entry path plants no marker yet, so the gate stays shut.
-    let response = entry_session(&mut client).await?;
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    assert!(
-        page(response).await?.contains("noindex"),
-        "gate still closed without a marker"
+    let mut session = request(Method::GET, "/api/session", "localhost", full(""));
+    session.headers_mut().insert(header::COOKIE, cookie.parse()?);
+    let response = send(&mut client, session).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "the gate opened: authentication answers instead of the guard"
     );
     drop(client);
     stop_management(&mut child).await?;

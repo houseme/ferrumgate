@@ -324,8 +324,33 @@ pub async fn guard(State(config): State<GuardConfig>, request: Request, next: Ne
         });
     let passed = crate::access::entry::marker_present(request.headers(), &config.1);
     let banned = false; // ban-list integration arrives with WP-26/WP-50
+    // Visiting the entry path itself plants the signed marker cookie so
+    // the next request passes the gate.
+    let plant = passed || decide(&path, &client, passed, banned, &config.0) == Decision::Allow;
+    let plant = plant
+        && config
+            .0
+            .safe_path
+            .as_deref()
+            .is_some_and(|safe| path == safe || path.starts_with(&format!("{safe}/")));
     match decide(&path, &client, passed, banned, &config.0) {
-        Decision::Allow => next.run(request).await,
+        Decision::Allow => {
+            let mut response = next.run(request).await;
+            if plant {
+                let marker = crate::access::entry::plant_marker(
+                    &config.1,
+                    std::time::SystemTime::now(),
+                );
+                if let Ok(value) = HeaderValue::from_str(
+                    &crate::access::entry::marker_set_cookie(&marker),
+                ) {
+                    response
+                        .headers_mut()
+                        .append(header::SET_COOKIE, value);
+                }
+            }
+            response
+        }
         Decision::Deny(reason) => {
             if matches!(config.0.deny_mode, DenyMode::Close | DenyMode::Drop)
                 && matches!(reason, DenyReason::LanOnly | DenyReason::Banned)
