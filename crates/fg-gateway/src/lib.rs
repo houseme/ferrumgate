@@ -13,6 +13,7 @@ mod forward_metrics;
 mod forward_ports;
 mod health;
 pub mod l4;
+mod legacy_config;
 mod proxy;
 mod server;
 mod site;

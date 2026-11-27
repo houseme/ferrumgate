@@ -1,28 +1,27 @@
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
-    net::{IpAddr, SocketAddr},
-    path::{Path, PathBuf},
+    net::IpAddr,
+    path::Path,
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Context, Result, ensure};
 use hyper::http::uri::{Authority, PathAndQuery};
-use serde::Deserialize;
 use tokio::{fs, io::AsyncReadExt};
 
 use crate::{
-    acme::{AcmeConfig, Managed, RawAcme},
-    backend::{BackendPool, RawBackend},
+    acme::{AcmeConfig, Managed},
+    backend::BackendPool,
     domains,
     forward_ports::MAX_LISTENERS,
-    health::{HealthCheck, RawHealthCheck},
+    health::HealthCheck,
     l4::portforward::bridge,
-    site::{RawResponse, SiteResponse},
-    tcp_forward::{RawForward, TcpForward},
-    tls::{self, CertificateFiles, Tls},
-    udp_forward::{RawUdpForward, UdpForward},
+    site::SiteResponse,
+    tcp_forward::TcpForward,
+    tls::{self, Tls},
+    udp_forward::UdpForward,
     web::{
         identity::IdentityHeader,
         proxy::{cors::Cors, headers::HeaderEdit, rewrite::Rewrite},
@@ -34,75 +33,10 @@ const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
 const MAX_ROUTES: usize = 1024;
 const MAX_BACKENDS: usize = 2048;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawConfig {
-    schema_version: u32,
-    #[serde(default)]
-    disabled_modules: Vec<String>,
-    #[serde(default)]
-    server: Settings,
-    #[serde(default)]
-    routes: Vec<RawRoute>,
-    #[serde(default)]
-    tcp_forward: Vec<RawForward>,
-    #[serde(default)]
-    udp_forward: Vec<RawUdpForward>,
-    #[serde(default)]
-    certificates: Vec<CertificateFiles>,
-    upstream_ca_file: Option<PathBuf>,
-    acme: Option<RawAcme>,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
-pub(crate) struct Settings {
-    pub listen: SocketAddr,
-    pub metrics_listen: Option<SocketAddr>,
-    pub http_enabled: bool,
-    pub tls: bool,
-    pub tls_handshake_timeout_ms: u64,
-    pub max_connections: usize,
-    pub header_timeout_ms: u64,
-    pub connect_timeout_ms: u64,
-    pub response_header_timeout_ms: u64,
-    pub connection_lifetime_ms: u64,
-    pub shutdown_timeout_ms: u64,
-}
-
-impl Default for Settings {
-    fn default() -> Self {
-        Self {
-            listen: SocketAddr::from(([127, 0, 0, 1], 8080)),
-            metrics_listen: None,
-            http_enabled: true,
-            tls: false,
-            tls_handshake_timeout_ms: 5_000,
-            max_connections: 1024,
-            header_timeout_ms: 5_000,
-            connect_timeout_ms: 2_000,
-            response_header_timeout_ms: 30_000,
-            connection_lifetime_ms: 300_000,
-            shutdown_timeout_ms: 10_000,
-        }
-    }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawRoute {
-    host: String,
-    path_prefix: Option<String>,
-    upstream: Option<String>,
-    #[serde(default)]
-    backends: Vec<RawBackend>,
-    #[serde(default)]
-    websocket: bool,
-    #[serde(default)]
-    upstream_h2c: bool,
-    health: Option<RawHealthCheck>,
-    response: Option<RawResponse>,
-}
+// The legacy TOML shapes live in `legacy_config` (WP-39 step 1) so the
+// migration tool shares exactly what this loader validated.
+use crate::legacy_config::RawConfig;
+pub(crate) use crate::legacy_config::Settings;
 
 pub(crate) struct Config {
     pub disabled_modules: Vec<String>,
