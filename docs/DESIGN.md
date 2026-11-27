@@ -68,15 +68,71 @@ Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，
 
 启动时先校验完整配置，完成监听绑定后记录就绪日志。Unix 接收 SIGHUP 后重新读取和校验，单次发布完整运行快照。整个 `[server]` 表视作启动参数，变更需重启。已开始的代理请求使用已选上游。同一持久连接上的下一次请求获取新快照。新快照使用新的连接池和 TLS 配置，已开始的 TLS 会话保留原握手结果。错误候选仍保留在线快照。文件应在同一目录写入新文件后原子替换。SIGINT、Unix SIGTERM 停止接入，连接进入优雅关闭，随后按期限取消剩余任务。
 
-## 4. 阶段 B 手动 TLS
+## 4. 阶段 B 手动 TLS 与证书模块
 
-`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。精确 HTTPS 路由须有覆盖其域名的 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配。签发链完整性和当前有效期由 TLS 客户端校验。先选精确 SNI 证书，随后尝试覆盖单个子域标签的通配证书。通配证书的 SAN 必须包含配置的名称。未知 SNI 会在握手时被拒绝。无 SNI 时先选与 TCP 连接本地地址匹配的有效 IP 证书，否则选择有效期结束最晚的 IP 证书，HTTP authority 限于该证书声明的地址。没有匹配证书时拒绝握手。无 SNI 的 IP 路径禁用会话恢复。TLS 下的 Host 需与 SNI 一致，否则返回 421。
+`[server] tls = true` 让单个业务监听器使用 TLS 1.2 或 1.3，HTTP 明文与 HTTPS 使用两种独立启动配置。精确 HTTPS 路由须有覆盖其域名的 `[[certificates]]`，字段为 `host`、`cert_file`、`key_file`。域名须匹配叶子证书 SAN，证书文件按叶子到中间证书排序，密钥文件提供一把 rustls 支持的 PEM 私钥。rustls 验证叶子证书的解析、SAN 及密钥匹配，签发链完整性和当前有效期由 TLS 客户端校验。TLS 下的 Host 需与 SNI 一致，否则返回 421。
+
+证书模块（`ssl`）的期望状态是配置目录下的 `ssl.json`。文件含私钥，Unix 上为 0600，只进入配置备份，不出现在任何接口响应、日志或 `fgate check` 输出中。缺失时按默认配置加载（自动续签开启、没有证书）；文件存在但读不出、解析失败或校验失败时整个模块初始化失败，即进程启动失败；单个条目加载失败只把自己排除在索引外，不影响其他条目。TOML 的 `[[certificates]]` 与 `[acme]` 在 WP-39 迁移完成前继续可用，两类来源并存时 TLS 解析器先查 ssl.json 证书池，未命中再回退 TOML 证书与 ACME 管理状态；WP-39 的迁移方向是把 TOML 证书与 ACME 配置一次性转换成 ssl.json 条目后移除旧路径。
 
 外连 HTTPS 验证证书链和目标名称。默认信任 `webpki-roots` 的根证书集。根字段 `upstream_ca_file` 可追加私有 CA，添加后对当前所有 HTTPS 上游生效。指定的 TLS 文件相对配置文件目录解析，每个文件最多 1 MiB。Unix 热加载以一代提交路由、证书和上游信任配置。使用带版本的证书和密钥文件名，再替换 TOML。TLS 配置示例和轮换命令见 [EXECUTION.md](EXECUTION.md)。
 
+### 证书条目与设置
+
+| 字段 | 说明 |
+|---|---|
+| `key` | 条目键；为空或与其他条目重复时生成 12 位小写十六进制值回填 |
+| `remark` | 备注兼文件名材料，须匹配 `^[A-Za-z0-9*_.@-]+$`，用作文件名时 `*` 换成 `_` |
+| `group` | 分组，仅影响展示 |
+| `enable` | 关闭的条目不参与加载与索引 |
+| `source` | `acme`、`upload`、`file`、`fnos` 之一 |
+| `acme` | ACME 参数对象，完整结构与校验随 WP-32 落地；`keyType` 只接受 `P256`、`P384`、`2048`、`4096`，缺省即默认 `P256` |
+| `certFile`、`keyFile` | 文件来源的两个路径；绝对路径直用，相对路径锚定配置目录 |
+| `fnosDomain` | 飞牛来源在系统登记表中查询的域名 |
+| `certPem`、`keyPem`、`issuerPem` | 条目内保存的完整链、私钥与签发者（acme、upload 来源） |
+| `mapping`、`deploys` | 证书映射与部署目标，WP-33 占位 |
+| `updatedAt` | 最近一次签发或上传的时间 |
+| `issuedProfile` | 签发时使用的档位，与当前 `acme.profile` 不一致时重新签发 |
+
+`settings` 有四个字段：`enable`（自动续签总开关，默认开）、`renewBeforeDays`（默认 30）、`shortLivedRenewHours`（短期证书续签小时阈值，默认 24，超过 80 钳到 80）与 `defaultEmail`；前两类数值为 0 时取默认值。`accounts{}` 以 CA 目录地址加邮箱为键，每项保存邮箱、目录地址、账户私钥 `keyPem` 与注册成功后的 `registration` 地址，目录与邮箱一致时复用同一账户。
+
+### 规范化与校验
+
+规范化先于校验：设置数值 0 取默认、`shortLivedRenewHours` 收敛到 80 上限，条目键回填后按来源校验，返回第一个失败条目的错误。文件来源必须提供 `certFile` 与 `keyFile`；上传来源的证书内容必须可解析且私钥与叶子证书配对，无法解析与不配对分别报告；ACME 来源本层只查 `keyType` 四值，其余参数校验随 WP-32 深化；飞牛来源按系统登记表取内容，本层没有可校验的静态字段。
+
+### 四种来源
+
+| 来源 | 内容位置 | 轮换方式 |
+|---|---|---|
+| `acme` | 条目内 `certPem`/`keyPem`/`issuerPem` | WP-32 的签发调度；链中只有叶子时自动拼接 `issuerPem` |
+| `upload` | 条目内保存的 PEM | 用户重新上传并经校验后替换 |
+| `file` | `certFile`/`keyFile` 指向的文件 | 每 30 分钟重读一轮（启动 30 秒后首查），内容未变沿用已加载的证书，比较内容指纹后变化才重新解析替换 |
+| `fnos` | 飞牛系统证书登记 `/usr/trim/etc/network_cert_all.conf` | 每 30 分钟按 `fnosDomain` 查询登记表当前指向并加载 |
+
+所有来源统一经 rustls 解析完整链与私钥，`from_der` 在装配时内建校验密钥配对，配不上的条目记入失败并保留上一份好证书。飞牛登记表读取上限 4 MiB，超出部分连同被截断的半行忽略。本仓库没有上游 `fnos.go` 快照，登记表按宽松假设解析并逐条注明：非注释行按空白拆成「域名 路径」，路径必须绝对，域名小写并去尾点，同域名后行覆盖前行；登记指向目录时取 `privkey.pem` 加 `fullchain.pem`（缺 `fullchain.pem` 退 `cert.pem`），指向文件时把它当完整链、私钥取同目录的 `privkey.pem`。域名从登记表消失后保留最后加载的证书继续服务，并在状态中提示错误。登记文件不存在时该来源不可用，界面隐藏该选项而不是报错。
+
+### 证书索引与选择
+
+对每张启用且加载成功的证书：DNS SAN 与 IP 字面量进精确表，`*.example.com` 以父域 `example.com` 为键进通配表、只覆盖一层子域；同名冲突取到期最晚的一张，到期未知的让位给已知的；含 IP SAN 的证书按同样规则竞争 IP 默认。握手选择顺序：SNI 归一化（小写、去尾点、IP 字面量统一规范写法，含方括号与 IPv4 映射形式）后精确命中 → 去掉首段查通配 → 无 SNI 时先按连接本机地址查 IP 证书（IPv4 映射地址折叠后匹配），本机地址不在任何证书中（NAT、端口转发）或不可知时回退 IP 默认 → 仍无则拒绝握手。热路径对每次握手只做一次只读快照读取且零分配；证书集合或内容变化（重载、续期、上传、文件轮换）时整体重建索引并原子替换，`watch` 版本递增通知订阅者。
+
+### TLS 接线
+
+Web 监听器的 rustls 证书解析器先查 ssl.json 证书池，未命中再走 TOML 与 ACME 管理状态的原路径；不装配证书池时行为与旧实现逐字节一致。无 SNI 的 IP 路径禁用服务端会话恢复并停发 TLS 1.3 会话票据（保留既有行为），HTTP authority 限于已选证书声明的地址。
+
+### 续期调度
+
+调度器随进程启动，30 秒后首查，之后每 30 分钟一轮，每轮重读 ssl.json 使设置、条目集与条目内内容即时生效。对每个启用的 ACME 条目判定 `needs_renewal`，六类理由：尚未签发、证书无法解析、证书域名与配置不一致、签发档位与配置不一致、短期证书剩余不足 `shortLivedRenewHours` 小时、其余证书剩余不足 `renewBeforeDays` 天。短期证书指档位为 `shortlived` 或总有效期不足 10 天。失败条目把原因记入失败表并保留上一份证书，6 小时退避后重查；单个条目失败不阻塞其他条目。`enable = false` 时停止签发与判定，已有证书照常服务。真实签发在 WP-32 接入命中后的钩子，当前轮次只记录原因并按退避重试。调度器每轮取当前代的证书状态，配置重载换代不打断任务，停机随排空期限汇合。
+
+### 展示与自检
+
+指标两项，以条目键为标签：`ferrumgate_cert_days_remaining` 为剩余整天数（向下取整，过期后为负），`ferrumgate_cert_expiry_timestamp_seconds` 为到期 Unix 秒；无到期时间的证书跳过。摘要 `CertSummary` 给出阈值内即将到期、已过期与加载或签发失败的条目数。自检输出 `cert.ok`、`cert.expiring`、`cert.expired`，另附缺失清单——启用的 HTTPS 站点中没有任何证书覆盖其访问域名的。站点域名通配可匹配任意层级而证书通配只覆盖一层，缺失清单按实际访问的域名逐个判断，不展开站点模式。
+
+### 管理接口与私钥安全
+
+接口属权限域 `ssl`：证书集合 `GET|POST /api/ssl/certs`、`POST /api/ssl/certs/{key}/copy`、`PUT|DELETE /api/ssl/certs/{key}`、`PUT /api/ssl/certs/{key}/enable`、`PUT /api/ssl/certs-order`、`PUT /api/ssl/certs-enable`、`PUT /api/ssl/certs-group`、`POST /api/ssl/certs-delete`，设置 `GET|PUT /api/ssl/settings`。私钥只保存在 ssl.json 并经下载接口取出；列表与详情脱敏私钥，提交掩码时由合并钩子恢复原值。签发与部署相关接口随 WP-32、WP-33 落地。
+
 ### ACME HTTP-01
 
-启用 `[acme]` 后，由独立明文监听器服务准确匹配 Host／token 的临时路径。一个配置管理最多 20 个标识的 SAN 证书。HTTP-01 支持精确 DNS 名和 shortlived 档位的 IPv4／IPv6 标识，DNS-01 支持精确与通配 DNS 名。ACME 账户与证书私钥分别持久化在私有状态目录，目录锁防止并行写入。组合 PEM 同目录替换并同步后再发布到共享 SNI 选择器；配置热加载继续引用同一管理状态。管理设置发生变化时重启。
+本节描述现有 TOML `[acme]` 路径的行为，是 WP-39 迁移前的过渡实现；WP-32 把签发流程并入 ssl.json 的证书条目与 `accounts{}` 模型。启用 `[acme]` 后，由独立明文监听器服务准确匹配 Host／token 的临时路径。一个配置管理最多 20 个标识的 SAN 证书。HTTP-01 支持精确 DNS 名和 shortlived 档位的 IPv4／IPv6 标识，DNS-01 支持精确与通配 DNS 名。ACME 账户与证书私钥分别持久化在私有状态目录，目录锁防止并行写入。组合 PEM 同目录替换并同步后再发布到共享 SNI 选择器；配置热加载继续引用同一管理状态。管理设置发生变化时重启。
 
 有效证书在重启时复用。指定 `acme.profile` 后，订单必须确认该 profile。证书档位和私钥随同一身份文件提交。重启时发现档位变化则立即申请新证书，并保留旧证书直到切换完成。签发和续期检查密钥配对、SAN 和有效时间。无 SNI 路径可使用 ACME 安装的 IP 证书，含多个 IP 的托管证书只接受这些地址作为 HTTP authority。归档账户在 CA 目录及邮箱一致时重用。首次注册可通过私有文件读取 EAB 密钥，密钥与归档账户分开保存。终止时取消监听器与后台任务。证书和账户状态可跨重启恢复，单个未完成订单的恢复留待后续。 [Gately 证书模块](https://gately.cn/en/docs/modules/ssl)
 

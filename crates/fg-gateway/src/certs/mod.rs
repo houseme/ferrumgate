@@ -11,6 +11,7 @@ pub mod index;
 pub mod info;
 pub(crate) mod legacy;
 pub mod model;
+pub mod routes;
 pub mod provider;
 pub mod source;
 pub mod validate;

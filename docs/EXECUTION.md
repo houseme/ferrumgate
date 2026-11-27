@@ -1310,3 +1310,12 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 与旧实现的默认值差异（迁移时需提示，建议采用新默认值）：现有连接超时 2 秒/响应头 30 秒（设置级）对应新模型的连接 10 秒/握手 10 秒/响应头不限（站点级可覆盖）；转发头当前为始终写（新模型 `forwardedHeaders` 可关）；`Host` 当前恒为目标地址（新模型 `useTargetHost=false` 保留访客 Host）。
 - 测试：31 + 29 + 24 个新测试；fg-gateway 全量 188 lib + 3 集成；根 gateway e2e 68 通过（9 忽略）；Clippy 0 警告。
 - 尚余（3b 增量）：建连失败重试接入 `forward()`（需小体积精确长度请求体缓冲重放；hyper `Incoming` 被 client 消费后不可重放，`Attempt`/`body_read` 标记逻辑已单测就绪）；四种负载策略替换 legacy 池选择（`Pool::from_site` 编译入口已就绪，尚未被 bridge 消费）；per-site TLS 客户端（`insecureSkipVerify`/`upstreamSniFromHost` 需按站点客户端，`disableKeepAlives` 需空闲池归零客户端组）；`sendProxyProtocol` 发送；访客读写空闲超时进服务循环；身份头写入（等 WP-24 Visitor）与按用户分流分派进 `dispatch`。
+
+### WP-31 证书条目模型与多种来源（步骤 1-9 交付）
+
+- 2026-11-28 交付三个增量（a3be4ac、2b25eeb、c04bf5d）。a3be4ac（步骤 1-3）：`ssl.json` 模型（`settings`、`certs[]`、`accounts{}`，条目含 key、remark、group、enable、source、acme、certFile/keyFile、fnosDomain、certPem/keyPem/issuerPem、mapping/deploys 占位、updatedAt、issuedProfile）与规范化校验（0 值取默认 30 天/24 小时、`shortLivedRenewHours` 钳 80、备注字符集 `^[A-Za-z0-9*_.@-]+$`、文件来源必填双路径、上传来源解析加密钥配对、ACME `keyType` 四值、空键与重复键回填 12 位小写十六进制），以及证书信息解析（DNS/IP SAN、签发者 CN 带 DN 回退、有效期、SHA-256 指纹）和 SNI 索引（精确表、一层通配按父域为键、IP 默认取到期最晚、名称归一化含大小写/尾点/IPv4 映射与方括号 IPv6）。
+- 2b25eeb（步骤 4、6、7、9）：四种来源——acme/upload 读条目内 PEM（链中只有叶子时拼入 `issuerPem`）、file 按 FNV-1a 内容指纹做变化检测重读（内容不变沿用旧 `Arc`）、fnos 跟随 `/usr/trim/etc/network_cert_all.conf`（4 MiB 截断、域名小写去尾点、目录取 privkey+fullchain 或 privkey+cert、域名被删除后保留最后加载的证书并记为错误）；`CertProvider` 整体换索引并递增 `watch` 版本，热路径单次只读快照零分配；`SslState` 加载语义（ssl.json 缺失按默认、解析失败整个模块初始化失败、单条目失败不阻塞其他）；续期调度 30 秒首查、30 分钟一轮、失败 6 小时退避（三个时长可注入），`needs_renewal` 六类理由，`enable=false` 不签发不停服务，WP-32 签发钩子已标记；`CertSummary` 分类与 `ferrumgate_cert_days_remaining`、`ferrumgate_cert_expiry_timestamp_seconds` 两个指标。
+- c04bf5d（步骤 5 接线）：TLS 解析器先查 ssl.json 证书池再回退 TOML/ACME（不装配证书池时行为逐字节不变，无 SNI 仍禁用会话恢复）；`config::load` 从 TOML 旁读取 ssl.json 并把证书池交给 TLS 装配；进程级续期调度器每轮取当前代证书状态、随 drain 关闭——重启/停机 e2e 曾抓到调度器悬挂导致排空等待，改为挂到 drain 后修复。
+- 接口摩擦：rustls 0.23 的 `CertifiedKey::from_der` 内建密钥匹配，配不上的私钥在装配一步即报「证书与私钥无法装配」，`keys_match` 退为二次确认；索引测试夹具不能用伪造链——`from_der` 需解析叶子证书提取公钥，假链被证书校验拒绝，最终内嵌真实自签证书与配对私钥（`fixture_key.pem`）；fnos 登记表格式没有上游 `fnos.go` 快照可核对，按宽松假设解析并在源码逐条注明，待上游快照核对。
+- 测试规模：certs 模块 46 个测试；fg-gateway 全量 245 lib + 3 集成；根 gateway e2e 68 通过（9 忽略）；Clippy 0 警告。
+- 尚余：步骤 8 集合与设置接口（`/api/ssl/*`，权限域 `ssl`）与步骤 11 收尾；WP-32 在 `needs_renewal` 命中点接入真实签发流程；WP-33 证书映射与部署目标；自检缺失清单接线（`cert.ok`/`expiring`/`expired` 分类已有，按实际访问域名逐个判断站点覆盖待接运行时）。
