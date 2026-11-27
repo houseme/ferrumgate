@@ -1239,6 +1239,24 @@ macOS arm64、Rust stable 1.100.0 上通过 386 项工作区测试和 9 项本�
 
 深度集成接线（386 项含新增）：管理监听改走自定义 accept 循环——accept 时经 `accept_action` 落实 `close`（直接断开）与 `drop`（共享 HoldSlots 池挂起，drain 即中止、in-flight 连接 3 秒窗口后取消），Serve 连接经 hyper-util auto builder 支持 WebSocket 升级与 h2 CONNECT 协议，每连接注入 `ConnectInfo`；`--gateway-socket`/`--gateway-prefix` 启用 0660 Unix Socket 的完整 serve 链——restore 以整体包裹方式生效（axum 0.8 的 layer 在路由匹配之后，前缀剥离必须包裹路由器，测试已钉住）、origin guard 确认并持久化来源、rewrite_response 改写 Location/Cookie/首页，网关路径跳过仅内网/安全入口/强制 HTTPS；`POST /api/login/fnos` 经 Socket 标记 + gatewaySSO + `X-Trim-*` 四条件签发管理员会话（已有会话保持、失败统一 403 不泄漏状态），`SessionCookies` 公开供二进制构建；访问入口路径时种植签名标记 Cookie，端到端验证「访问入口 → Cookie → 门禁开启 → 认证应答」全流程；真实进程冒烟覆盖双就绪日志、跨源 403、TCP 直连 `X-Trim-*` 一律拒绝。HTTPS 证书装配经 WP-31/WP-32 联调。诊断包（`GET /api/system/diagnostics`，仅会话）输出脱敏 JSON 预览：redactor 覆盖配置目录/主目录/主机名字面量、密钥键值对、认证头、bearer/basic 凭据、秘密命令行参数、MAC、长令牌与用户路径；地址折叠为方案/端口/IP 类别（CGNAT 单列），非公共域名替换为 `<domain>` 并保留公共服务白名单；配置 JSON 保留结构、枚举与时间键，动态键匿名化、数组截断至 100、其余字符串一律 `<redacted>`，账号与令牌文件永不读取（负向测试断言密钥、域名与真实地址不入档）。
 
+### WP-36 L4 共用基础
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-net
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-gateway --lib l4::shared
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway tcp
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway udp
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p ferrumgate --test gateway acme::pebble -- --ignored
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 409 项工作区测试和 9 项本机 Pebble ACME 测试。`fg_net::ports` 的解析四例：混合写法保序展开（单端口、逗号列表、范围、全角分隔符）、非法输入区分空项/端口 0/越界/逆序范围（u32 先行解析使 0 与 65536 错误各异）、目标映射单目标复用与等长按位、collapse 去重排序合并连续区间。`quota` 五例：默认一半（第 6 条连接对同源 Full、另一来源仍成功）、豁免网段永不 Full、回环/内网/CGNAT/ULA 全豁免（复用 WP-14 的 is_internal 口径）、IPv6 按 /64 分组且 ::ffff: 映射与 V4 同组、许可 drop 释放与 10 秒告警节流。`openports` 两例：属主覆盖与空表撤销、快照读侧无锁（ArcSwap 旧代快照不随发布变化）。`source_rule` 五例：封禁 → 拒绝名单 → 白名单/黑名单 → 敲门的顺序（封禁胜过名单命中、敲门关闭时名单命中也拒绝）、实时注册表查询（同过滤器下清除封禁即放行，不重建）、mapped-V4 前缀缩减与聚合、逐清单错误命名、1024 项上限。`l4::shared` 七例（真实 socket 对）：半关闭保留（一端 EOF 后另一方向继续）、双方沉默时首次数据超时、任一方发言后不再受限、取消闭包排空返回 Killed、顺序拨号在第二监听器（静默但可连）成功、全部拒绝返回最后一个错误、PROXY v1 文本行与 v2 二进制布局（v4 28 字节/v6 52 字节）逐字段回读。
+
+步骤 7 纯重构：tcp_forward 的私有故障转移循环、PROXY 头写入、CountWrites 与首数据 peek 全部替换为共用组件（stats 计数映射 bytes_out/bytes_in、FirstData::None 保持双侧等待语义、日志文案逐条复现）；forward_ports 的展开循环改为委托 `fg_net::ports::parse_ports`（SocketAddr 形 API 与 64 上限不变，既有单测不改地通过）；source_policy 删除 29 行重复的 `compile_networks` 改为重导出 `fg_net::source_rule::compile_networks`。三个消费文件净减 125 行，`tests/gateway/tcp` 12 项、`udp` 10 项、`fg-gateway` lib 18 项一个不改地通过。splice 式零拷贝记录为后续优化；订阅列表由 Web 服务写入 `fg_net` 注册表的句柄随 WP-26 接入。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
