@@ -45,6 +45,9 @@ struct Resolver {
     wildcard: HashMap<String, Arc<CertifiedKey>>,
     ip: HashMap<IpAddr, IpCertificate>,
     managed: Option<ManagedNames>,
+    /// WP-31 ssl.json certificates (`certs` module provider). Consulted
+    /// before the TOML/ACME paths; `None` keeps legacy-only behavior.
+    certs: Option<Arc<crate::certs::provider::Provider>>,
 }
 
 struct ManagedNames {
@@ -110,6 +113,16 @@ impl ServerTls {
 
 impl Resolver {
     fn ip_certificate(&self, local: IpAddr) -> Option<(Arc<CertifiedKey>, Arc<[IpAddr]>)> {
+        use crate::certs::provider::CertificateSource as _;
+        // ssl.json IP certificates first: exact local-address match, then
+        // the provider's latest-expiry IP default (NAT case).
+        if let Some(certs) = &self.certs
+            && let Some(loaded) = certs.select(None, Some(local))
+            && !loaded.info.ip_addresses.is_empty()
+        {
+            let hosts: Arc<[IpAddr]> = loaded.info.ip_addresses.clone().into();
+            return Some((loaded.tls.clone(), hosts));
+        }
         let now = crate::acme::unix_now();
         let mapped = match local {
             IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4),
@@ -158,6 +171,15 @@ impl std::fmt::Debug for Resolver {
 
 impl ResolvesServerCert for Resolver {
     fn resolve(&self, hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        use crate::certs::provider::CertificateSource as _;
+        // ssl.json certificates (exact domains, one-label wildcards) win;
+        // the TOML/ACME paths stay as fallback.
+        if let Some(certs) = &self.certs
+            && let Some(name) = hello.server_name()
+            && let Some(loaded) = certs.select(Some(name), None)
+        {
+            return Some(loaded.tls.clone());
+        }
         let managed = self.managed.as_ref().filter(|names| {
             hello
                 .server_name()
@@ -185,6 +207,7 @@ pub(crate) async fn load<'a>(
     upstream_ca_file: Option<&Path>,
     route_hosts: impl Iterator<Item = &'a String>,
     managed: Option<(Vec<String>, Arc<Managed>)>,
+    certs: Option<Arc<crate::certs::provider::Provider>>,
 ) -> Result<Tls> {
     ensure!(
         enabled == (!certificates.is_empty() || managed.is_some()) && certificates.len() <= 1024,
@@ -200,6 +223,7 @@ pub(crate) async fn load<'a>(
             exact: ResolvesServerCertUsingSni::new(),
             wildcard: HashMap::new(),
             ip: HashMap::new(),
+            certs,
             managed: managed.map(|(domains, store)| {
                 let ips = domains
                     .iter()

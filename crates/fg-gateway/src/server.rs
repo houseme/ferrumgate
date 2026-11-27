@@ -31,6 +31,9 @@ pub(crate) struct Generation {
     pub proxy: Proxy,
     pub tls: Option<ServerTls>,
     pub forward_sources: Vec<SourcePolicy>,
+    /// Live ssl.json certificate state (the renewal scheduler updates
+    /// whichever generation is current).
+    pub certs: Arc<crate::certs::SslState>,
 }
 
 impl Generation {
@@ -38,6 +41,7 @@ impl Generation {
         Self {
             proxy: Proxy::new(config.routes, &config.settings, config.tls.client),
             tls: config.tls.server,
+            certs: config.certs,
             forward_sources: config
                 .tcp_forward
                 .into_iter()
@@ -179,6 +183,27 @@ async fn serve_gateway(
     let (drain, drain_rx) = watch::channel(false);
     let management_drain = drain_rx.clone();
     let mut modules = JoinSet::new();
+    {
+        // WP-31: one renewal scheduler for the whole process; it picks up
+        // the live generation's certificate state each round, so reloads
+        // never strand it on a stale provider. It leaves with the drain
+        // so graceful shutdown can join every task.
+        let generations = state.clone();
+        let certs_dir = path.clone();
+        let mut scheduler_drain = drain_rx.clone();
+        modules.spawn(async move {
+            tokio::select! {
+                () = crate::certs::run_scheduler(
+                    move || generations.load().certs.clone(),
+                    certs_dir,
+                    std::time::Duration::from_secs(30),
+                    std::time::Duration::from_secs(30 * 60),
+                    std::time::Duration::from_secs(6 * 3600),
+                ) => {}
+                _ = scheduler_drain.changed() => {}
+            }
+        });
+    }
     if let Some(certificates) = certificates {
         start(certificates, drain_rx.clone(), &mut modules);
     }

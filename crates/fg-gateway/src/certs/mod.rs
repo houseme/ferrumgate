@@ -322,8 +322,12 @@ impl SslState {
 /// re-read file-backed sources. Cancellation-safe: a dropped task stops
 /// between `tokio::time::sleep` points. Shutdown wiring joins a later
 /// batch (不接收关闭句柄).
+/// Renewal scheduler: first pass after `first`, then every `interval`;
+/// entries that failed wait `backoff`. `current` hands the scheduler the
+/// live [`SslState`] each round so a config reload (new generation)
+/// keeps being maintained without restarting the task.
 pub async fn run_scheduler(
-    state: Arc<SslState>,
+    current: impl Fn() -> Arc<SslState> + Send + Sync + 'static,
     config_dir: PathBuf,
     first: Duration,
     interval: Duration,
@@ -331,7 +335,7 @@ pub async fn run_scheduler(
 ) {
     tokio::time::sleep(first).await;
     loop {
-        state.tick(&config_dir, backoff).await;
+        current().tick(&config_dir, backoff).await;
         tokio::time::sleep(interval).await;
     }
 }
@@ -599,7 +603,10 @@ mod tests {
         );
 
         tokio::spawn(run_scheduler(
-            Arc::clone(&state),
+            {
+                let state = Arc::clone(&state);
+                move || Arc::clone(&state)
+            },
             dir.path().to_path_buf(),
             Duration::from_millis(10),
             Duration::from_millis(20),
@@ -640,7 +647,10 @@ mod tests {
         assert_eq!(*version.borrow_and_update(), 2);
 
         tokio::spawn(run_scheduler(
-            Arc::clone(&state),
+            {
+                let state = Arc::clone(&state);
+                move || Arc::clone(&state)
+            },
             dir.path().to_path_buf(),
             Duration::from_millis(10),
             Duration::from_millis(20),

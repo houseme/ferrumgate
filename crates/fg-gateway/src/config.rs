@@ -112,6 +112,9 @@ pub(crate) struct Config {
     pub acme: Option<AcmeConfig>,
     pub tcp_forward: Vec<TcpForward>,
     pub udp_forward: Vec<UdpForward>,
+    /// WP-31 ssl.json certificate state (empty provider when the file is
+    /// absent); the renewal scheduler keeps the live generation current.
+    pub certs: Arc<crate::certs::SslState>,
 }
 
 pub(crate) struct Routes {
@@ -499,6 +502,11 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         list.sort_unstable_by_key(|route| std::cmp::Reverse(route.prefix.len()));
     }
     wildcards.sort_by_key(|pattern| std::cmp::Reverse(pattern.len()));
+    let certs = Arc::new(
+        crate::certs::load(dir)
+            .await
+            .context("prepare certificates (ssl.json)")?,
+    );
     let tls = tls::load(
         dir,
         settings.tls,
@@ -506,6 +514,7 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         raw.upstream_ca_file.as_deref(),
         by_host.keys(),
         acme.as_ref().map(|acme| (acme.domains.clone(), managed)),
+        Some(certs.provider()),
     )
     .await?;
     Ok(Config {
@@ -516,6 +525,7 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
         udp_forward,
         settings,
         routes: Routes { by_host, wildcards },
+        certs,
     })
 }
 
