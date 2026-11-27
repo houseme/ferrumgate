@@ -1345,3 +1345,11 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 2026-11-28 交付 cfe06a0。`fg-cron`：cron.json 模型（上游无 settings）、调度引擎（5 段、6 段含秒、`@every`/`@daily` 等描述符、dom/dow 双受限 OR、位掩码推进、周日 0/7 别名、中文 describe）、运行时（每启用任务一个独立 CancellationToken 循环、重叠触发记「已跳过」、错过的触发不补偿〔上游语义〕、generation watch 重载循环、drain 后 30 秒期限等在途）、命令执行（`sh -c`、env 注入 `FERRUMGATE_TASKNAME`、600 秒保护超时〔上游无字段，FerrumGate 自有常量〕、输出截 4000 字符）、HTTP 任务（reqwest，2xx 且 successContent 命中、insecureSkipVerify、超时默认 30 秒上限 600 秒）、每任务 20 条内存历史、`/api/cron` 12 个操作按集合契约（run 同步等待、失败回 500 输出摘要）。
 - 测试规模：40 项（lib 27 + exec 8 + runtime 5）；外部命令替身用 rustc 现场编译的 Rust 小可执行文件夹具（约定禁 shell 脚本）；Clippy -D warnings、fmt 干净。
 - 尚余：REGISTRY/bootstrap 接线、fg-logging 补 `Cron` 来源变体（当前 tracing 目标落到 System）、HTTP 出站换接 `Deps.http`（WP-14 的 OutboundHttp）、全局时区注入（WP-07）、Windows `.bat` 分支按文档实现未本机验证。
+
+### WP-41 DNS 提供商适配（步骤 1-6 交付）
+
+- 2026-11-28 交付 d542b19。fg-dns 核心机制：`DnsProvider` trait + 能力一致性注册宏（声明 ACME 能力必须提供 `TxtRecords` 实现，编译期保证）、`UpsertAction` 与上游语义一致、八类 `ProviderError`（含 i18n 键与密钥脱敏）、`OutboundHttp`（hyper-util + webpki 根、20 秒默认超时、4 MiB 响应上限、不跟随重定向、日志只记 method/host/path/status）、七类错误经本地假服务器逐一验证、删除流程纯函数（A/AAAA 地址折叠含 v4-mapped、TXT 去引号、CNAME 尾点）、TXT_TTL=600、Go 兼容转义的 simple 骨架、35 个内置多级后缀的拆分表（未收录后缀回退最后两段，可在配置显式指定主域名）、自定义回调渲染器。
+- 第一批 9 个适配项全部带契约测试（方法/路径/认证头/请求体逐字段对照上游测试样例，55 项契约断言）：cloudflare、dnspod/dnspodcom、duckdns、dynv6、porkbun、callback、gandi、bunny。
+- 已核实偏差（写回 WP-41 文档注记）：文档「37 项」与契约表实际 36 行不符，`ALL_NAMES` 按契约表 36 个名称收录；cloudflare/dnspod/dnspodcom/porkbun/dynv6 的能力标记按上游源码为准（均支持 TXT 增删），与 §3.3「Cloudflare/DNSPod 的 ACME DNS-01 即可用」一致。
+- 测试规模：116 项（单元 61 + 契约 55）；Clippy -D warnings（含 no-default-features）、fmt 干净；每提供商一个 `dns-*` feature，default 为空、测试自依赖启用全部。
+- 尚余：步骤 7 签名工具（SigV4/TC3-HMAC-SHA256/阿里云 RPC/华为云 AK/SK/OVH 三步）、第二三批 28 项、与 WP-40/WP-32 的联调（`Deps.http` 换接 fg-net 出站策略）、`credentials_extra_masked_for_readonly` 随 WP-11 脱敏约定。
