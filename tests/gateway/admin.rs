@@ -1162,3 +1162,138 @@ async fn demo_mode_refuses_writes_and_sensitive_reads_for_everyone() -> Result<(
     stop_management(&mut child).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn safe_entry_and_lan_only_enforced_over_real_process() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let config_path = directory.path().join("gateway.toml");
+    let accounts = directory.path().join("accounts");
+    let store = fg_config::ConfigStore::open(&accounts)?;
+    let initial = "Fixture-initial$23";
+    let password = "Lk8$yN3-pv";
+    {
+        let (manager, _) = fg_auth::AccountManager::open(store.clone(), Some(initial))?;
+        manager.change_credentials(initial, "operator", password)?;
+    }
+    let backend = Origin::http("safe entry fixture").await?;
+    std::fs::write(
+        &config_path,
+        config(&route("app.test", backend.addr, "/"), "", ""),
+    )?;
+    let start = || -> Result<Child> {
+        Ok(Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--config"])
+            .arg(&config_path)
+            .args(["--admin-listen", "127.0.0.1:0", "--admin-dir"])
+            .arg(&accounts)
+            .env_remove("FERRUMGATE_LOG_LEVEL")
+            .env_remove("FERRUMGATE_INITIAL_PASSWORD")
+            .stderr(Stdio::piped())
+            .stdout(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?)
+    };
+    async fn page(response: hyper::Response<hyper::body::Incoming>) -> Result<String> {
+        let bytes = response.into_body().collect().await?.to_bytes();
+        Ok(String::from_utf8(bytes.to_vec())?)
+    }
+    async fn entry_session(
+        client: &mut hyper::client::conn::http1::SendRequest<super::common::TestBody>,
+    ) -> Result<hyper::Response<hyper::body::Incoming>> {
+        Ok(send(
+            client,
+            request(Method::GET, "/api/session", "localhost", full("")),
+        )
+        .await?)
+    }
+
+    // Run 1: the safe-entry gate answers credential requests with the
+    // guard's minimal 404 page before authentication ever sees them.
+    store.save(
+        "ferrumgate",
+        &json!({
+            "listen":"127.0.0.1:0", "safePath":"/hidden-entry",
+            "lanOnly":true, "denyMode":""
+        }),
+    )?;
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("bootstrap output")?).lines();
+    let admin = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(admin).await?).await?;
+    let response = entry_session(&mut client).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = page(response).await?;
+    assert!(text.contains("noindex"), "guard entry 404 page: {text}");
+    // The entry path itself stays reachable and shows the API fallback,
+    // not the guard page (which also says 404 Not Found).
+    let response = send(
+        &mut client,
+        request(Method::GET, "/hidden-entry", "localhost", full("")),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = page(response).await?;
+    assert!(
+        text.contains("API route not found"),
+        "entry path falls through: {text}"
+    );
+    assert!(
+        !text.contains("noindex"),
+        "entry path is not denied: {text}"
+    );
+    // Visiting the entry path plants no marker yet, so the gate stays shut.
+    let response = entry_session(&mut client).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        page(response).await?.contains("noindex"),
+        "gate still closed without a marker"
+    );
+    drop(client);
+    stop_management(&mut child).await?;
+
+    // Run 2: without a safe path the entry gate disappears; the loopback
+    // peer is internal, so LAN-only still lets authentication answer.
+    store.save(
+        "ferrumgate",
+        &json!({"listen":"127.0.0.1:0", "lanOnly":true}),
+    )?;
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("lan-only output")?).lines();
+    let admin = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(admin).await?).await?;
+    let response = entry_session(&mut client).await?;
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "guard did not fire for an internal peer"
+    );
+    drop(client);
+    stop_management(&mut child).await?;
+
+    // Run 3: the stealth mode answers the entry denial with a generic
+    // stock 404 that reveals nothing about the product.
+    store.save(
+        "ferrumgate",
+        &json!({
+            "listen":"127.0.0.1:0", "safePath":"/hidden-entry",
+            "lanOnly":true, "denyMode":"notfound"
+        }),
+    )?;
+    let mut child = start()?;
+    let mut lines = BufReader::new(child.stderr.take().context("notfound output")?).lines();
+    let admin = wait_listener(&mut lines, "management ready").await?;
+    let mut client = http_client(connect(admin).await?).await?;
+    let response = entry_session(&mut client).await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let text = page(response).await?;
+    let stock = "<html>\r\n<head><title>404 Not Found</title></head>\r\n\
+                 <body>\r\n<center><h1>404 Not Found</h1></center>\r\n\
+                 <hr><center>web server</center>\r\n</body>\r\n</html>\r\n";
+    assert_eq!(text, stock, "stealth denial is the stock 404 page");
+    let lower = text.to_lowercase();
+    assert!(!lower.contains("gately") && !lower.contains("ferrumgate"));
+    assert!(!lower.contains("noindex"));
+    drop(client);
+    stop_management(&mut child).await?;
+    Ok(())
+}
