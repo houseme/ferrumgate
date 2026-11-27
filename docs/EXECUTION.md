@@ -1326,3 +1326,22 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 已定偏差（写回 WP-90 §8 注记）：gen 只为 workspace 中实际存在的 crate 生成 `mod-<id>` feature（当前实现 guard、cron 两个），check 把清单中有、crate 不存在的模块报 planned 而非错误；resolve 在选择集含未实现模块时直接报错。fg-core 的 build.rs 最小声明新顶层小节使清单继续可解析；每个 mod-*/lang-* feature 转发 `fg-core/...`，`features::built()` 因此观察最终构建配置（str 匹配非 const 稳定，门控为普通函数；生成数组带 `#[rustfmt::skip]` 保持再生成幂等）。
 - 测试规模：xtask 26 项（manifest 6、resolve 8、gen 6、check 3 等）；fg-core 全量回归通过；Clippy 0 警告、fmt 干净。
 - 尚余（P6）：语言档位裁剪嵌入文案与 fg-ui 清单、运行时 absentModules 行为、六种构建矩阵验收、size-baseline、fg-gateway 拆分。
+
+### WP-37 自动放行防火墙（库实现交付）
+
+- 2026-11-28 交付 0a55ca1。`fg_net::fwopen` 单文件承载上游 internal/fwopen 的职责拆分：实例标识（配置目录 SHA-256 短哈希，文件内自实现避免引入 sha2）与启动清理、`Group` 按 key 登记期望放行（后台线程按登记顺序串行写、与在途写互斥的 `clear_all`）、`for_listen` 端口计算（双栈/v4/v6、绑定地址限定 daddr、回环不放行、HTTP/3 同号 UDP、区间合并、规则带 `ferrumgate-open:` 注释）、30 秒对账严格照上游 diff 算法（他实例规则只标记不动、legacy 旧注释迁移、空闲链不增删）。Linux 后端探测 nft/iptables/ip6tables（含 iptables-nft 识别与内核无 nf_tables 时的 legacy 专用链回退、群晖 PRIMITIVE_INPUT、iptables-save 解析），命令以参数数组 + 10 秒超时执行；非 Linux 编译为显式 unsupported 空实现。
+- 测试规模：35 个单元 + 5 个集成（全部 `{主题}_{行为}_{预期}`）；另以 `--target x86_64-unknown-linux-gnu` 交叉 clippy/check 验证 Linux-only 路径并修复 9 个仅 Linux 可见的编译错误。fg-net 仅新增 `serde_json` workspace 引用（解析 `nft -j` 输出）。
+- 尚余：步骤 8 监听接线（web/pf/protoroute 各持 Group，监听成功后 `want`、停止时 `clear_all`，`Deps.fw_open` 注入）、步骤 9 Linux 网络命名空间真机验证、DESIGN/EXECUTION 的模块章节、与 WP-51 的命令执行封装共用。
+
+### WP-50 统一封禁表（核心与 fg-guard 交付）
+
+- 2026-11-28 交付 512477a。`fg_net::banlist`：`BanKey`（裸 IPv6 聚合 /64、v4-mapped 还原、显式 CIDR 保留）、递增封禁（30 天窗口内翻倍至策略上限；默认 3600 秒、默认上限 7 天、可配最大 365 天）、32768 上限淘汰（先到期后最早临时自动；永久与手动不淘汰）、白名单与内网忽略（默认含回环/链路本地/100.64/10/ULA）、登录免封（仅免 trap/scan，24 小时、1024 上限）、手动封禁拒绝回环目标、ArcSwap 无锁 `is_banned` 热路径、`guard/bans.json` 持久化（0600、tmp+rename、2 秒合并延迟保存；fg-net 不引 serde_json，手写编解码器）、RFC 3339 手写模块。设计稿的 EventBus/anyhow 依赖改为 `BanHooks` 回调与 `io::Result`（fg-net 依赖边界不可扩，语义不变）。
+- `fg-guard`：guard.json 设置（enable/firewall 占位〔WP-51〕/时长参数/ignorePrivate/ignoreList）、`GuardService` 门面（`guard.banned` 事件、`table()` 共享句柄）、`/api/guard` bans/settings/status 集合契约路由、容量自检（>90% 警告）、`fg_core::module::Module` 入口（ID=guard，drain 后 flush）。
+- 测试规模：fg-net 16 单测 + 6 集成、fg-guard 8 单测 + 7 集成，共 102 项相关用例全绿；Clippy -D warnings、fmt 干净。
+- 尚余：根进程接线（REGISTRY/管理路由/自检/登录免封/本机 /64 收集/`Deps` 注入）、WP-51 nftables 集合同步（settings.firewall 占位）、WP-52/53 的 trap/scan/jail 生产者、WP-26 调用点切换；`is_banned` 的 CIDR 兜底线性扫描与上游一致，必要时 WP-51 后加前缀索引。
+
+### WP-62 计划任务（完整模块交付）
+
+- 2026-11-28 交付 cfe06a0。`fg-cron`：cron.json 模型（上游无 settings）、调度引擎（5 段、6 段含秒、`@every`/`@daily` 等描述符、dom/dow 双受限 OR、位掩码推进、周日 0/7 别名、中文 describe）、运行时（每启用任务一个独立 CancellationToken 循环、重叠触发记「已跳过」、错过的触发不补偿〔上游语义〕、generation watch 重载循环、drain 后 30 秒期限等在途）、命令执行（`sh -c`、env 注入 `FERRUMGATE_TASKNAME`、600 秒保护超时〔上游无字段，FerrumGate 自有常量〕、输出截 4000 字符）、HTTP 任务（reqwest，2xx 且 successContent 命中、insecureSkipVerify、超时默认 30 秒上限 600 秒）、每任务 20 条内存历史、`/api/cron` 12 个操作按集合契约（run 同步等待、失败回 500 输出摘要）。
+- 测试规模：40 项（lib 27 + exec 8 + runtime 5）；外部命令替身用 rustc 现场编译的 Rust 小可执行文件夹具（约定禁 shell 脚本）；Clippy -D warnings、fmt 干净。
+- 尚余：REGISTRY/bootstrap 接线、fg-logging 补 `Cron` 来源变体（当前 tracing 目标落到 System）、HTTP 出站换接 `Deps.http`（WP-14 的 OutboundHttp）、全局时区注入（WP-07）、Windows `.bat` 分支按文档实现未本机验证。
