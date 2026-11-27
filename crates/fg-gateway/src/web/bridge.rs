@@ -29,6 +29,7 @@ use crate::{
             headers::{self, HeaderEdit},
             rewrite::{Rewrite, RewriteError},
         },
+        upstream::{Policy, parse_target},
     },
 };
 
@@ -166,6 +167,9 @@ fn compile_wp23_options(
         request_headers,
         response_headers,
         cors,
+        // Dial-failure retry only makes sense with somewhere to go; a
+        // lone backend never retries (same bound as MAX_ATTEMPTS).
+        retry: site.targets.len() > 1,
     }
 }
 
@@ -251,7 +255,7 @@ fn compile_proxy_site(site: &Site, label: &str) -> Result<CompiledSiteHandler, V
     }
     let mut backends = Vec::with_capacity(site.targets.len());
     for (index, target) in site.targets.iter().enumerate() {
-        match raw_backend(&normalize_target(target)) {
+        match raw_backend(target) {
             Ok(backend) => backends.push(backend),
             Err(error) => {
                 errors.push(format!(
@@ -279,7 +283,14 @@ fn compile_proxy_site(site: &Site, label: &str) -> Result<CompiledSiteHandler, V
     if !errors.is_empty() {
         return Err(errors);
     }
-    let pool = match BackendPool::compile(None, backends, site.upstream_h2c) {
+    let pool = match BackendPool::compile(
+        None,
+        backends,
+        site.upstream_h2c,
+        // An unknown policy is a validate-time error (`web::validate`);
+        // the bridge stays lenient and keeps the default rotation.
+        Policy::parse(&site.lb_policy).unwrap_or_default(),
+    ) {
         Ok(pool) => Some(pool),
         Err(error) => {
             errors.push(format!("site {label}: {error:#}"));
@@ -325,16 +336,40 @@ async fn compile_response(
         .map_err(|error| vec![format!("site {label}: {error:#}")])
 }
 
-/// Targets are bare `host:port` addresses in the webservice model; the
-/// legacy schema requires an HTTP(S) origin, so a missing scheme means
-/// plain HTTP.
-fn normalize_target(target: &str) -> String {
-    let trimmed = target.trim();
-    if trimmed.contains("://") {
+/// Synthesizes the raw backend from one `site.targets` line (WP-23 3b):
+/// the line is parsed as a target (`URL [weight=N] [backup]`), a bare
+/// `host:port` line without parameters defaults to plain HTTP, and the
+/// legacy schema origin is rebuilt from the parsed target (credentials
+/// dropped, origin path) together with its weight and backup flag.
+fn raw_backend(line: &str) -> Result<RawBackend, String> {
+    let trimmed = line.trim();
+    let normalized = if trimmed.is_empty()
+        || trimmed.contains("://")
+        || trimmed.contains(char::is_whitespace)
+    {
         trimmed.to_owned()
     } else {
         format!("http://{trimmed}")
-    }
+    };
+    let target = parse_target(&normalized).map_err(|error| error.to_string())?;
+    let scheme = target.uri.scheme_str().unwrap_or("http");
+    let authority = target
+        .uri
+        .authority()
+        .expect("parse_target validated the authority")
+        .as_str();
+    // Credentials never reach the legacy pool: its compile rejects
+    // user-info authorities.
+    let host_port = match authority.rsplit_once('@') {
+        Some((_userinfo, rest)) => rest,
+        None => authority,
+    };
+    serde_json::from_value(json!({
+        "upstream": format!("{scheme}://{host_port}/"),
+        "weight": target.weight,
+        "backup": target.backup,
+    }))
+    .map_err(|error| error.to_string())
 }
 
 /// A label for error messages: the site key, falling back to its name.
@@ -349,12 +384,6 @@ fn site_label(site: &Site) -> String {
     } else {
         label.to_owned()
     }
-}
-
-/// Synthesizes the raw backend exactly as the serde loader would from a
-/// TOML `upstream` value: weight defaults to 1, no backup.
-fn raw_backend(upstream: &str) -> serde_json::Result<RawBackend> {
-    serde_json::from_value(json!({ "upstream": upstream }))
 }
 
 /// Synthesizes the raw static response for a site root.

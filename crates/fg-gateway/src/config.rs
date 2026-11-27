@@ -26,6 +26,7 @@ use crate::{
     web::{
         identity::IdentityHeader,
         proxy::{cors::Cors, headers::HeaderEdit, rewrite::Rewrite},
+        upstream::Policy,
     },
 };
 
@@ -157,6 +158,10 @@ pub(crate) struct SiteProxyOptions {
     pub request_headers: Vec<HeaderEdit>,
     pub response_headers: Vec<HeaderEdit>,
     pub cors: Option<Cors>,
+    /// Retry the next backend on a connection failure (WP-23). The TOML
+    /// path keeps the legacy single-attempt behavior; the webservice
+    /// model enables it for multi-backend proxy sites.
+    pub retry: bool,
 }
 
 impl Default for SiteProxyOptions {
@@ -170,6 +175,7 @@ impl Default for SiteProxyOptions {
             request_headers: Vec::new(),
             response_headers: Vec::new(),
             cors: None,
+            retry: false,
         }
     }
 }
@@ -460,8 +466,13 @@ pub(crate) async fn load(path: &Path, managed: Arc<Managed>) -> Result<Config> {
                 .map(HealthCheck::compile)
                 .transpose()
                 .with_context(|| format!("invalid routes[{index}].health"))?;
-            let backends = BackendPool::compile(route.upstream, route.backends, route.upstream_h2c)
-                .with_context(|| format!("invalid routes[{index}] backend pool"))?;
+            let backends = BackendPool::compile(
+                route.upstream,
+                route.backends,
+                route.upstream_h2c,
+                Policy::default(),
+            )
+            .with_context(|| format!("invalid routes[{index}] backend pool"))?;
             backend_count += backends.len();
             ensure!(
                 backend_count <= MAX_BACKENDS,

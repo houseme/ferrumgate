@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use http_body_util::{Either, Empty, Full};
+use http_body_util::{BodyExt, Either, Empty, Full};
 use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
@@ -19,7 +19,7 @@ use hyper::{
 };
 use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::{
-    client::legacy::{Client, connect::HttpConnector},
+    client::legacy::{Client, Error as SendError, connect::HttpConnector},
     rt::{TokioExecutor, TokioTimer},
 };
 use tokio::time::timeout;
@@ -38,9 +38,31 @@ use crate::{
     websocket::{Handshake, Tunnel},
 };
 
-pub(crate) type RequestBody = Either<DataBody, Empty<Bytes>>;
+/// The request bodies the proxy clients accept (WP-23 3b): the streaming
+/// downstream body, a buffered body that can be replayed on the next
+/// backend after a dial failure, and the empty body of bodyless requests.
+pub(crate) enum RequestBody {
+    Data(DataBody),
+    Replay(ReplayBody),
+    Empty(Empty<Bytes>),
+}
+
+/// Probe requests (health checks) arrive in the legacy `Either` shape;
+/// this conversion keeps `probe_http` callers unchanged.
+impl From<Either<DataBody, Empty<Bytes>>> for RequestBody {
+    fn from(body: Either<DataBody, Empty<Bytes>>) -> Self {
+        match body {
+            Either::Left(inner) => Self::Data(inner),
+            Either::Right(empty) => Self::Empty(empty),
+        }
+    }
+}
 
 type Reply = Response<Either<DataBody, LocalBody>>;
+
+/// Buffer size above which a request body is no longer replayed and the
+/// attempt plan collapses to a single backend (WP-23 3b).
+const MAX_REPLAY_BYTES: usize = 256 * 1024;
 
 pub(crate) struct Proxy {
     routes: Routes,
@@ -93,7 +115,11 @@ impl Proxy {
         crate::health::monitor(self, &self.routes, events).await;
     }
 
-    pub async fn probe_http(&self, request: Request<RequestBody>, h2c: bool) -> bool {
+    pub async fn probe_http<B>(&self, request: Request<B>, h2c: bool) -> bool
+    where
+        RequestBody: From<B>,
+    {
+        let request = request.map(RequestBody::from);
         let response = if h2c {
             self.h2c_client.request(request)
         } else {
@@ -170,7 +196,7 @@ impl Proxy {
         if !config::valid_authority(&authority) {
             return reply(StatusCode::BAD_REQUEST);
         }
-        let (upstream_uri, route, backend) = {
+        let (route, mut attempts) = {
             let host = config::canonical_host(authority.host()).expect("validated authority");
             if tls_identity.is_some_and(|identity| !identity.matches(&host)) {
                 return reply(StatusCode::MISDIRECTED_REQUEST);
@@ -249,22 +275,28 @@ impl Proxy {
                     return response;
                 }
             }
-            let Some(backend) = route.backends.select(route.health.is_some()) else {
-                return reply(StatusCode::SERVICE_UNAVAILABLE);
-            };
-            let uri = Uri::builder()
-                .scheme(backend.scheme.clone())
-                .authority(backend.authority.clone())
-                .path_and_query(target.clone())
-                .build()
-                .expect("validated authority and origin-form target");
-            (uri, route, backend)
+            // WP-23 3b: retryable sites plan up to three backends, led by
+            // the pool policy's pick; `attempts` never comes back empty,
+            // so the plan replaces the legacy selection outright (calling
+            // `select` too would burn a round-robin ticket per request).
+            // The legacy path (`retry = false`) keeps exactly the selected
+            // backend and behaves as before.
+            if options.retry {
+                let attempts = route.backends.attempts(route.health.is_some(), peer.ip());
+                (route, attempts)
+            } else {
+                let Some(backend) = route.backends.select(route.health.is_some()) else {
+                    return reply(StatusCode::SERVICE_UNAVAILABLE);
+                };
+                (route, vec![backend])
+            }
         };
         let grpc = is_grpc(request.headers());
         if grpc && !downstream_h2 {
             return reply(StatusCode::HTTP_VERSION_NOT_SUPPORTED);
         }
-        if grpc && !route.upstream_h2c && backend.scheme != Scheme::HTTPS {
+        // The lead attempt stands in for the legacy single selection.
+        if grpc && !route.upstream_h2c && attempts[0].scheme != Scheme::HTTPS {
             return reply(StatusCode::BAD_GATEWAY);
         }
         let (handshake, chunked) = if request.headers().contains_key(UPGRADE) {
@@ -281,6 +313,11 @@ impl Proxy {
                 Err(()) => return reply(StatusCode::BAD_REQUEST),
             }
         };
+        // Upgrade handshakes are bound to the connection that completes
+        // them, so they never retry: one backend, one attempt.
+        if handshake.is_some() {
+            attempts.truncate(1);
+        }
         let headers = request.headers_mut();
         let forwarding_headers: Vec<_> = headers
             .keys()
@@ -293,10 +330,12 @@ impl Proxy {
         // `use_target_host` keeps the legacy backend address as `Host`;
         // otherwise the visitor's original authority is passed through.
         // `original_host` is cloned because X-Forwarded-Host still needs it.
+        // The template carries the lead attempt's address; the loop below
+        // re-inserts it per attempt.
         headers.insert(
             HOST,
             if route.options.use_target_host {
-                backend.host.clone()
+                attempts[0].host.clone()
             } else {
                 original_host.clone()
             },
@@ -329,7 +368,8 @@ impl Proxy {
         // place, so they have the final say about what the backend sees.
         headers::apply(headers, &route.options.request_headers);
         let upstream_h2_required = handshake.is_none() && (route.upstream_h2c || grpc);
-        if downstream_h2 && upstream_h2_required {
+        let upstream_trailers = downstream_h2 && upstream_h2_required;
+        if upstream_trailers {
             headers.insert(TE, HeaderValue::from_static("trailers"));
         }
         let body_needs_framing =
@@ -339,12 +379,6 @@ impl Proxy {
                 .headers_mut()
                 .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
         }
-        *request.uri_mut() = upstream_uri;
-        *request.version_mut() = if upstream_h2_required {
-            Version::HTTP_2
-        } else {
-            Version::HTTP_11
-        };
         // A matching `Origin` earns CORS headers on every successful
         // response (regular and 101 alike); captured before the body moves.
         let cors_origin = route.options.cors.as_ref().and_then(|cors| {
@@ -356,29 +390,106 @@ impl Proxy {
                 None
             }
         });
-        let request = request
-            .map(|body| Either::Left(DataBody::new(body, downstream_h2 && upstream_h2_required)));
-        let pending = if handshake.is_some() {
-            self.upgrade_client.request(request)
-        } else if route.upstream_h2c {
-            self.h2c_client.request(request)
+        // The request template is frozen here: method, version and the
+        // fully edited headers (strip, forwarding, identity, edits). Each
+        // attempt clones it and only swaps the `Host`/target authority.
+        let (mut template, body) = request.into_parts();
+        template.version = if upstream_h2_required {
+            Version::HTTP_2
         } else {
-            self.client.request(request)
+            Version::HTTP_11
+        };
+        // Streaming bodies cannot be resent, so they cap the plan at one
+        // attempt; bodyless requests need no replay and small exact-sized
+        // bodies are buffered for it.
+        let mut body_plan = if attempts.len() > 1 {
+            if body.is_end_stream() {
+                BodyPlan::Empty
+            } else if body
+                .size_hint()
+                .exact()
+                .is_some_and(|length| length <= MAX_REPLAY_BYTES as u64)
+            {
+                match BodyExt::collect(body).await {
+                    Ok(collected) => BodyPlan::Replay(collected.to_bytes()),
+                    // The client aborted mid-body; nothing to forward.
+                    Err(_) => return reply(StatusCode::BAD_REQUEST),
+                }
+            } else {
+                attempts.truncate(1);
+                BodyPlan::Stream(Some(body))
+            }
+        } else {
+            BodyPlan::Stream(Some(body))
         };
         let deadline = route
             .options
             .response_header_timeout
             .unwrap_or(self.response_header_timeout);
-        let result = timeout(deadline, pending).await;
-
-        match &result {
-            Ok(Ok(_)) => route.backends.connected(backend, route.health.is_some()),
-            Ok(Err(error)) if error.is_connect() => route.backends.connection_failed(backend),
-            _ => {}
+        let active = route.health.is_some();
+        let mut outcome = None;
+        for (index, &backend) in attempts.iter().enumerate() {
+            route.backends.enter(backend);
+            let mut parts = template.clone();
+            // `use_target_host` keeps the legacy backend address as
+            // `Host`, so it follows the attempt; otherwise the visitor's
+            // original authority (already in the template) passes through.
+            if route.options.use_target_host {
+                parts.headers.insert(HOST, backend.host.clone());
+            }
+            parts.uri = Uri::builder()
+                .scheme(backend.scheme.clone())
+                .authority(backend.authority.clone())
+                .path_and_query(target.clone())
+                .build()
+                .expect("validated authority and origin-form target");
+            let request = Request::from_parts(parts, body_plan.take_body(upstream_trailers));
+            let pending = if handshake.is_some() {
+                self.upgrade_client.request(request)
+            } else if route.upstream_h2c {
+                self.h2c_client.request(request)
+            } else {
+                self.client.request(request)
+            };
+            let result = timeout(deadline, pending).await;
+            route.backends.leave(backend);
+            match result {
+                Ok(Ok(response)) => {
+                    route.backends.connected(backend, active);
+                    outcome = Some(AttemptOutcome::Served(response));
+                    break;
+                }
+                // Only a dial failure switches backends: nothing was sent,
+                // so re-issuing is safe even for POST (WP-23 step 5).
+                Ok(Err(error)) if error.is_connect() && index + 1 < attempts.len() => {
+                    route.backends.connection_failed(backend);
+                    tracing::debug!(
+                        backend = %backend.authority,
+                        error = %error,
+                        "upstream dial failed; retrying the next backend"
+                    );
+                    continue;
+                }
+                Ok(Err(error)) => {
+                    if error.is_connect() {
+                        route.backends.connection_failed(backend);
+                    }
+                    outcome = Some(AttemptOutcome::Failed(error));
+                    break;
+                }
+                Err(_) => {
+                    outcome = Some(AttemptOutcome::TimedOut);
+                    break;
+                }
+            }
         }
+        let outcome =
+            outcome.expect("the attempt plan is never empty, so the loop always concludes");
 
-        match result {
-            Ok(Ok(mut response)) if response.status() == StatusCode::SWITCHING_PROTOCOLS => {
+        match outcome {
+            AttemptOutcome::Served(mut response)
+                if response.status() == StatusCode::SWITCHING_PROTOCOLS =>
+            {
                 let (Some(handshake), Some(tunnel)) = (handshake, tunnel) else {
                     return reply(StatusCode::BAD_GATEWAY);
                 };
@@ -398,7 +509,7 @@ impl Proxy {
                 }
                 response.map(|_| Either::Right(Either::Left(Full::default())))
             }
-            Ok(Ok(mut response)) if !response.status().is_informational() => {
+            AttemptOutcome::Served(mut response) if !response.status().is_informational() => {
                 if strip_hop_headers(response.headers_mut()).is_err() {
                     return reply(StatusCode::BAD_GATEWAY);
                 }
@@ -415,15 +526,15 @@ impl Proxy {
                 *response.version_mut() = downstream_version;
                 response.map(|body| Either::Left(DataBody::new(body, trailers)))
             }
-            Ok(Ok(_)) => reply(StatusCode::BAD_GATEWAY),
-            Ok(Err(error)) => {
+            AttemptOutcome::Served(_) => reply(StatusCode::BAD_GATEWAY),
+            AttemptOutcome::Failed(error) => {
                 tracing::debug!(
                     connect_error = error.is_connect(),
                     "upstream request failed"
                 );
                 reply(StatusCode::BAD_GATEWAY)
             }
-            Err(_) => {
+            AttemptOutcome::TimedOut => {
                 tracing::debug!("upstream response header deadline expired");
                 reply(StatusCode::GATEWAY_TIMEOUT)
             }
@@ -510,6 +621,41 @@ fn is_grpc(headers: &HeaderMap) -> bool {
         })
 }
 
+/// How the attempt loop concluded (WP-23 3b). `Served` carries the first
+/// response the pool produced; the failure variants mirror the two error
+/// branches of the legacy single-attempt send.
+enum AttemptOutcome {
+    Served(Response<Incoming>),
+    Failed(SendError),
+    TimedOut,
+}
+
+/// One request's upstream body across attempts. A streaming body is
+/// single-shot (callers cap the plan at one attempt), an empty body needs
+/// nothing, and a small buffered body is replayed per backend.
+enum BodyPlan {
+    Stream(Option<Incoming>),
+    Replay(Bytes),
+    Empty,
+}
+
+impl BodyPlan {
+    /// Builds the body for one attempt. The stream slot is taken at most
+    /// once — streaming requests never retry.
+    fn take_body(&mut self, trailers: bool) -> RequestBody {
+        match self {
+            Self::Stream(slot) => RequestBody::Data(DataBody::new(
+                slot.take().expect("streaming bodies are single-shot"),
+                trailers,
+            )),
+            // `Bytes` clones are reference-counted, so each attempt gets
+            // an independent cursor over the same buffer.
+            Self::Replay(bytes) => RequestBody::Replay(ReplayBody::new(bytes.clone())),
+            Self::Empty => RequestBody::Empty(Empty::new()),
+        }
+    }
+}
+
 pub(crate) struct DataBody {
     inner: Incoming,
     trailers: bool,
@@ -572,6 +718,86 @@ impl Body for DataBody {
     }
 }
 
+impl Body for RequestBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        match &mut *self {
+            Self::Data(inner) => Pin::new(inner).poll_frame(cx),
+            Self::Replay(inner) => Pin::new(inner).poll_frame(cx),
+            // `Empty` never fails: its infallible error coerces away.
+            Self::Empty(inner) => Pin::new(inner).poll_frame(cx).map(|frame| {
+                frame.map(|result| result.map_err(|never| match never {}))
+            }),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Data(inner) => inner.is_end_stream(),
+            Self::Replay(inner) => inner.sent,
+            Self::Empty(inner) => inner.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Data(inner) => inner.size_hint(),
+            Self::Replay(inner) => inner.size_hint(),
+            Self::Empty(inner) => inner.size_hint(),
+        }
+    }
+}
+
+/// A buffered request body (WP-23 3b): the whole payload in the first
+/// frame, nothing afterwards. The attempt loop clones the shared `Bytes`
+/// per backend, so a dial failure can resend the identical payload.
+pub(crate) struct ReplayBody {
+    bytes: Bytes,
+    sent: bool,
+}
+
+impl ReplayBody {
+    fn new(bytes: Bytes) -> Self {
+        Self {
+            bytes,
+            sent: false,
+        }
+    }
+}
+
+impl Body for ReplayBody {
+    type Data = Bytes;
+    type Error = hyper::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
+        if self.sent {
+            return Poll::Ready(None);
+        }
+        self.sent = true;
+        Poll::Ready(Some(Ok(Frame::data(std::mem::take(&mut self.bytes)))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.sent
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(if self.sent {
+            0
+        } else {
+            u64::try_from(self.bytes.len()).expect("body length fits u64")
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -618,3 +844,9 @@ mod tests {
 #[cfg(test)]
 #[path = "../../../tests/gateway/wp23_options.rs"]
 mod wp23_options;
+
+// WP-23 3b: dial-failure retry and the load policies, exercised the same
+// way (`tests/gateway/wp23_retry.rs`, crate-private pipeline).
+#[cfg(test)]
+#[path = "../../../tests/gateway/wp23_retry.rs"]
+mod wp23_retry;
