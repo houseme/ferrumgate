@@ -1,10 +1,12 @@
-//! Repository maintenance tasks: `xtask i18n-extract` and `xtask i18n-check`.
+//! Repository maintenance tasks: `xtask i18n-extract`, `xtask i18n-check`
+//! and the WP-90 module manifest commands under `xtask modules`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
 pub mod i18n;
+pub mod modules;
 
 fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -41,6 +43,10 @@ fn main() -> Result<()> {
             } else {
                 bail!("i18n-check found {} violations", violations.len());
             }
+        }
+        "modules" => {
+            let rest: Vec<String> = arguments.collect();
+            modules::run(&root, &rest)
         }
         other => bail!("unknown task {other}"),
     }

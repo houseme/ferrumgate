@@ -4,10 +4,23 @@ use std::{collections::BTreeSet, env, fs, io::Write, path::PathBuf};
 
 use serde::Deserialize;
 
+// The catalog only needs the module table. The other top-level sections
+// (groups, languages, targets, presets) are owned and validated by
+// `xtask modules check`; they are declared here so the manifest keeps
+// parsing, with their field names still checked.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // only `module` is read; the rest keep parsing strict
 struct Manifest {
+    #[serde(default)]
+    group: Vec<toml::Value>,
     module: Vec<Module>,
+    #[serde(default)]
+    language: Vec<toml::Value>,
+    #[serde(default)]
+    target: Vec<toml::Value>,
+    #[serde(default)]
+    preset: Vec<toml::Value>,
 }
 
 #[derive(Deserialize)]

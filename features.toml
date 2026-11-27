@@ -1,5 +1,32 @@
+# 模块清单的唯一来源（WP-90）。由它生成：根 Cargo.toml 的 [features] 段与可选模块依赖、
+# crates/fg-core/src/features.rs、modules.json——用 `cargo xtask modules gen` 重新生成，
+# 用 `cargo xtask modules check` 校验一致性。
 # 模块元数据取自 Gately 442162e4d0b64df119bc5fe6469a088adee844c4（Apache-2.0）。
 # 运行时依赖按该版本的 internal/modules/registry 注册代码核对。
+
+[[group]]
+id = "network"
+title = { zh_cn = "网络", zh_tw = "網路", en = "Network" }
+
+[[group]]
+id = "tunnel"
+title = { zh_cn = "隧道", zh_tw = "隧道", en = "Tunnel" }
+
+[[group]]
+id = "web"
+title = { zh_cn = "Web", zh_tw = "Web", en = "Web" }
+
+[[group]]
+id = "storage"
+title = { zh_cn = "存储", zh_tw = "儲存", en = "Storage" }
+
+[[group]]
+id = "tools"
+title = { zh_cn = "工具", zh_tw = "工具", en = "Tools" }
+
+[[group]]
+id = "system"
+title = { zh_cn = "系统", zh_tw = "系統", en = "System" }
 
 [[module]]
 id = "portforward"
@@ -111,7 +138,7 @@ description = { zh_cn = "基于 OWASP CRS 的应用防火墙", zh_tw = "基於 O
 id = "webservice"
 group = "web"
 core = true
-requires = ["ssl","waf"]
+requires = ["ssl", "waf"]
 title = { zh_cn = "Web 服务", zh_tw = "Web 服務", en = "Web Services" }
 description = { zh_cn = "反向代理、重定向与静态站点", zh_tw = "反向代理、重新導向與靜態網站", en = "Reverse proxy, redirects and static sites" }
 
@@ -179,7 +206,7 @@ description = { zh_cn = "容器管理与镜像更新", zh_tw = "容器管理與�
 id = "webdav"
 group = "storage"
 core = false
-requires = ["ssl"]
+requires = []
 tag = "no_webdav"
 size_kb = 128
 title = { zh_cn = "WebDAV 服务", zh_tw = "WebDAV 服務", en = "WebDAV Service" }
@@ -189,7 +216,7 @@ description = { zh_cn = "WebDAV 文件共享服务", zh_tw = "WebDAV 檔案分�
 id = "ftp"
 group = "storage"
 core = false
-requires = ["ssl"]
+requires = []
 tag = "no_ftp"
 size_kb = 320
 title = { zh_cn = "FTP 服务", zh_tw = "FTP 服務", en = "FTP Service" }
@@ -264,3 +291,115 @@ tag = "no_backup"
 size_kb = 128
 title = { zh_cn = "配置备份", zh_tw = "設定備份", en = "Configuration Backup" }
 description = { zh_cn = "定时把全部配置备份到本地或存储挂载", zh_tw = "依排程把全部設定備份到本機或儲存掛載", en = "Back up all configuration to local disk or mounted storage on a schedule" }
+
+# 语言档位：feature 名对应根 Cargo.toml 的 lang-*；tag 是上游的构建标签。
+[[language]]
+id = "all"
+feature = "lang-all"
+locales = ["zh-CN", "zh-TW", "en", "de", "es", "fr", "ja", "ko", "pt-BR", "ru"]
+
+[[language]]
+id = "cjk-en"
+feature = "lang-cjk-en"
+tag = "lang_cjken"
+locales = ["zh-CN", "zh-TW", "en"]
+size_kb = 704
+
+[[language]]
+id = "zh"
+feature = "lang-zh-cn"
+tag = "lang_zh"
+locales = ["zh-CN"]
+size_kb = 896
+
+# 打包目标（见 WP-92）。
+[[target]]
+id = "docker"
+
+[[target]]
+id = "linux-amd64"
+
+[[target]]
+id = "linux-arm64"
+
+[[target]]
+id = "linux-arm"
+
+[[target]]
+id = "linux-mipsle"
+
+[[target]]
+id = "linux-mips"
+
+[[target]]
+id = "linux-riscv64"
+
+[[target]]
+id = "windows-amd64"
+
+[[target]]
+id = "darwin-amd64"
+
+[[target]]
+id = "darwin-arm64"
+
+[[target]]
+id = "freebsd-amd64"
+
+[[target]]
+id = "fnos-x86"
+
+[[target]]
+id = "fnos-arm"
+
+[[target]]
+id = "openwrt-amd64"
+
+[[target]]
+id = "openwrt-arm64"
+
+[[target]]
+id = "openwrt-arm"
+
+[[target]]
+id = "openwrt-mipsle"
+
+[[target]]
+id = "openwrt-mips"
+
+[[target]]
+id = "openwrt-riscv64"
+
+# 预设只是可选模块列表的简写；核心模块始终包含。
+[[preset]]
+id = "minimal"
+modules = []
+
+[[preset]]
+id = "router"
+modules = ["protoroute", "ddns", "stun", "frp", "guard", "knock", "wol", "cron", "notify", "nettools"]
+
+[[preset]]
+id = "nas"
+modules = [
+    "protoroute",
+    "ddns",
+    "stun",
+    "frp",
+    "guard",
+    "knock",
+    "wol",
+    "cron",
+    "notify",
+    "nettools",
+    "tailscale",
+    "cloudflared",
+    "webterminal",
+    "docker",
+    "webdav",
+    "smb",
+    "filebrowser",
+    "storage",
+    "perf",
+    "backup",
+]
