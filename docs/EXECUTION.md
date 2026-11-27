@@ -1319,3 +1319,10 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 接口摩擦：rustls 0.23 的 `CertifiedKey::from_der` 内建密钥匹配，配不上的私钥在装配一步即报「证书与私钥无法装配」，`keys_match` 退为二次确认；索引测试夹具不能用伪造链——`from_der` 需解析叶子证书提取公钥，假链被证书校验拒绝，最终内嵌真实自签证书与配对私钥（`fixture_key.pem`）；fnos 登记表格式没有上游 `fnos.go` 快照可核对，按宽松假设解析并在源码逐条注明，待上游快照核对。
 - 测试规模：certs 模块 46 个测试；fg-gateway 全量 245 lib + 3 集成；根 gateway e2e 68 通过（9 忽略）；Clippy 0 警告。
 - 尚余：步骤 8 集合与设置接口（`/api/ssl/*`，权限域 `ssl`）与步骤 11 收尾；WP-32 在 `needs_renewal` 命中点接入真实签发流程；WP-33 证书映射与部署目标；自检缺失清单接线（`cert.ok`/`expiring`/`expired` 分类已有，按实际访问域名逐个判断站点覆盖待接运行时）。
+
+### WP-90 定制构建（步骤 1-4 交付）
+
+- 2026-11-28 交付 f582f1e + 1f64639。`features.toml` 成为模块清单唯一来源：27 个模块（核心 3 + 可选 24）、6 分组、requires（backup→storage、webservice→ssl+waf）、三语 title/desc、3 个语言档位（all 10 语言、cjk-en、zh）、3 个预设（minimal/router/nas）、19 个发布目标。`cargo xtask modules gen` 从它确定性生成三产物——根 Cargo.toml 的 `[features]` 段与可选模块依赖、`crates/fg-core/src/features.rs` 编译期常量、上游同格式 `modules.json`——连跑两次字节一致；`modules resolve` 补齐 requires 多级依赖、输出 Cargo 参数与 sha256 组合键（金标准向量已固定）；`modules check` 校验清单 ↔ 生成产物 ↔ 根 features ↔ 已实现 crate 四者一致。
+- 已定偏差（写回 WP-90 §8 注记）：gen 只为 workspace 中实际存在的 crate 生成 `mod-<id>` feature（当前实现 guard、cron 两个），check 把清单中有、crate 不存在的模块报 planned 而非错误；resolve 在选择集含未实现模块时直接报错。fg-core 的 build.rs 最小声明新顶层小节使清单继续可解析；每个 mod-*/lang-* feature 转发 `fg-core/...`，`features::built()` 因此观察最终构建配置（str 匹配非 const 稳定，门控为普通函数；生成数组带 `#[rustfmt::skip]` 保持再生成幂等）。
+- 测试规模：xtask 26 项（manifest 6、resolve 8、gen 6、check 3 等）；fg-core 全量回归通过；Clippy 0 警告、fmt 干净。
+- 尚余（P6）：语言档位裁剪嵌入文案与 fg-ui 清单、运行时 absentModules 行为、六种构建矩阵验收、size-baseline、fg-gateway 拆分。
