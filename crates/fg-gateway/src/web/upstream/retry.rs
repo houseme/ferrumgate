@@ -4,11 +4,11 @@
 //! the request body has been read (hence sent), never retry.
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::time::SystemTime;
 
-use super::{Backend, Pool, MAX_ATTEMPTS};
+use super::{Backend, MAX_ATTEMPTS, Pool};
 
 /// One request's backend attempts. `current` is the in-flight backend;
 /// `tried` are the pool indices already attempted this request.
@@ -46,7 +46,12 @@ impl Attempt {
     /// marks the failed `current` via [`Attempt::mark_tried`] first).
     /// `None` once the attempt budget is spent, nothing untried remains,
     /// or the body was already read (no resend after bytes went out).
-    pub fn next(&self, pool: &Pool, _client: std::net::IpAddr, now: SystemTime) -> Option<Arc<Backend>> {
+    pub fn next(
+        &self,
+        pool: &Pool,
+        _client: std::net::IpAddr,
+        now: SystemTime,
+    ) -> Option<Arc<Backend>> {
         if self.body_read.load(Relaxed) || self.tried.len() >= MAX_ATTEMPTS {
             return None;
         }
@@ -123,7 +128,11 @@ mod tests {
 
     #[test]
     fn dial_failure_switches_backend_up_to_three() {
-        let pool = compile_pool(&["http://10.0.0.1:1", "http://10.0.0.2:2", "http://10.0.0.3:3"]);
+        let pool = compile_pool(&[
+            "http://10.0.0.1:1",
+            "http://10.0.0.2:2",
+            "http://10.0.0.3:3",
+        ]);
         let now = SystemTime::UNIX_EPOCH;
         let client = client();
 
@@ -136,7 +145,8 @@ mod tests {
                 .next(&pool, client, now)
                 .unwrap_or_else(|| panic!("attempt {expected} must still have budget"));
             assert!(
-                seen.iter().all(|tried| !std::ptr::eq(tried.as_ref(), next.as_ref())),
+                seen.iter()
+                    .all(|tried| !std::ptr::eq(tried.as_ref(), next.as_ref())),
                 "attempt {expected} must switch to a fresh backend"
             );
             seen.push(Arc::clone(&next));
@@ -160,13 +170,19 @@ mod tests {
         attempt.mark_tried(&pool);
 
         let backup = attempt.next(&pool, client, now).expect("backup takes over");
-        assert!(backup.target.backup, "the fallback must be the backup backend");
+        assert!(
+            backup.target.backup,
+            "the fallback must be the backup backend"
+        );
         assert!(!std::ptr::eq(primary.as_ref(), backup.as_ref()));
         assert!(std::ptr::eq(backup.as_ref(), pool.get(1).as_ref()));
 
         attempt.current = backup;
         attempt.mark_tried(&pool);
-        assert!(attempt.next(&pool, client, now).is_none(), "both backends tried");
+        assert!(
+            attempt.next(&pool, client, now).is_none(),
+            "both backends tried"
+        );
     }
 
     #[test]
@@ -193,14 +209,20 @@ mod tests {
             ErrorKind::HostUnreachable,
             ErrorKind::NetworkDown,
         ] {
-            assert!(is_dial_failure(&io::Error::from(kind)), "{kind:?} must retry");
+            assert!(
+                is_dial_failure(&io::Error::from(kind)),
+                "{kind:?} must retry"
+            );
         }
         for kind in [
             ErrorKind::PermissionDenied,
             ErrorKind::UnexpectedEof,
             ErrorKind::BrokenPipe,
         ] {
-            assert!(!is_dial_failure(&io::Error::from(kind)), "{kind:?} must not retry");
+            assert!(
+                !is_dial_failure(&io::Error::from(kind)),
+                "{kind:?} must not retry"
+            );
         }
     }
 

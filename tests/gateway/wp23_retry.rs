@@ -189,9 +189,7 @@ async fn spawn_frontend(proxy: Proxy) -> Result<SocketAddr> {
                         service_fn(move |request: Request<Incoming>| {
                             let proxy = proxy.clone();
                             async move {
-                                Ok::<_, Infallible>(
-                                    proxy.forward(request, peer, None, None).await,
-                                )
+                                Ok::<_, Infallible>(proxy.forward(request, peer, None, None).await)
                             }
                         }),
                     )
@@ -332,7 +330,10 @@ async fn policy_least_conn_picks_the_idle_backend() -> Result<()> {
     let fast = echo_backend(Duration::ZERO).await?;
     let gateway = spawn_gateway(vec![site(
         "lc.test",
-        vec![format!("127.0.0.1:{}", slow.port), format!("127.0.0.1:{}", fast.port)],
+        vec![
+            format!("127.0.0.1:{}", slow.port),
+            format!("127.0.0.1:{}", fast.port),
+        ],
         |site| site.lb_policy = "least_conn".to_owned(),
     )])
     .await?;
@@ -360,7 +361,11 @@ async fn policy_least_conn_picks_the_idle_backend() -> Result<()> {
 
     assert_eq!(slow_status, StatusCode::OK);
     assert_eq!(fast_status, StatusCode::OK);
-    assert_eq!(port(&slow_body), slow.port, "the idle tie goes to the first");
+    assert_eq!(
+        port(&slow_body),
+        slow.port,
+        "the idle tie goes to the first"
+    );
     assert_eq!(
         port(&fast_body),
         fast.port,
@@ -375,7 +380,10 @@ async fn policy_ip_hash_pins_one_client_to_one_backend() -> Result<()> {
     let second = echo_backend(Duration::ZERO).await?;
     let gateway = spawn_gateway(vec![site(
         "ih.test",
-        vec![format!("127.0.0.1:{}", first.port), format!("127.0.0.1:{}", second.port)],
+        vec![
+            format!("127.0.0.1:{}", first.port),
+            format!("127.0.0.1:{}", second.port),
+        ],
         |site| site.lb_policy = "ip_hash".to_owned(),
     )])
     .await?;

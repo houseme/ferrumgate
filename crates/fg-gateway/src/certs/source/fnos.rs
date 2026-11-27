@@ -297,11 +297,8 @@ mod tests {
         let root = tempfile::tempdir().expect("tempdir");
         let dir = cert_dir(root.path(), "renew-001", "fullchain.pem");
         let registry = root.path().join("network_cert_all.conf");
-        std::fs::write(
-            &registry,
-            format!("example.com {}\n", dir.display()),
-        )
-        .expect("write registry");
+        std::fs::write(&registry, format!("example.com {}\n", dir.display()))
+            .expect("write registry");
 
         let cert = entry("example.com");
         let first = load_from(&cert, &registry)

@@ -75,7 +75,11 @@ impl RouteUserKey {
         match self {
             Self::Name(name) => format!("name:{name}"),
             Self::ThirdParty { provider, id } => {
-                format!("{}:{}", provider.to_ascii_lowercase(), id.to_ascii_lowercase())
+                format!(
+                    "{}:{}",
+                    provider.to_ascii_lowercase(),
+                    id.to_ascii_lowercase()
+                )
             }
         }
     }

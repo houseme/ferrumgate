@@ -36,7 +36,10 @@ mod tests {
         let (cert_pem, key_pem) = FIXTURE_PEM
             .split_once("-----BEGIN PRIVATE KEY-----")
             .expect("fixture holds one certificate and one key");
-        (cert_pem.to_string(), format!("-----BEGIN PRIVATE KEY-----{key_pem}"))
+        (
+            cert_pem.to_string(),
+            format!("-----BEGIN PRIVATE KEY-----{key_pem}"),
+        )
     }
 
     /// 一个只填了 stored PEM 字段的条目。
@@ -69,7 +72,11 @@ mod tests {
     fn stored_empty_pem_is_none() {
         assert!(load(&entry("", "", "")).unwrap().is_none());
         // 纯空白同样视为未签发。
-        assert!(load(&entry("  \n\t", "  \n\t", "  \n\t")).unwrap().is_none());
+        assert!(
+            load(&entry("  \n\t", "  \n\t", "  \n\t"))
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// `LoadedCert` 未实现 `Debug`，用匹配而非 `unwrap_err` 取错误消息。

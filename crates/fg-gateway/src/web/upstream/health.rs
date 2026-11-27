@@ -105,13 +105,12 @@ fn probe_client() -> &'static ProbeClient {
     static CLIENT: OnceLock<ProbeClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls = ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .expect("ring supports the default protocol versions")
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        let tls =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .expect("ring supports the default protocol versions")
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         let https = HttpsConnectorBuilder::new()
@@ -163,11 +162,9 @@ pub async fn probe_once(target: &Target, check: &ActiveCheck) -> bool {
         .unwrap_or(if scheme == "https" { 443 } else { 80 });
     timeout(check.timeout, async {
         match check.mode {
-            CheckMode::Tcp => {
-                TcpStream::connect((host.trim_matches(['[', ']']), port))
-                    .await
-                    .is_ok()
-            }
+            CheckMode::Tcp => TcpStream::connect((host.trim_matches(['[', ']']), port))
+                .await
+                .is_ok(),
             CheckMode::Http => probe_http(scheme, host, port, &check.path).await,
         }
     })
@@ -334,7 +331,10 @@ mod tests {
             let (interval, timeout_secs, fails, passes) = bad;
             assert!(
                 matches!(
-                    ActiveCheck::compile(&site("http", "/", interval, timeout_secs, fails, passes), false),
+                    ActiveCheck::compile(
+                        &site("http", "/", interval, timeout_secs, fails, passes),
+                        false
+                    ),
                     Err(CheckError::BadRange(_))
                 ),
                 "out-of-range {bad:?} must be rejected"
@@ -383,7 +383,10 @@ mod tests {
     #[tokio::test]
     async fn probe_http() {
         let app = axum::Router::new()
-            .route("/", axum::routing::get(|| async { axum::http::StatusCode::OK }))
+            .route(
+                "/",
+                axum::routing::get(|| async { axum::http::StatusCode::OK }),
+            )
             .route(
                 "/fail",
                 axum::routing::get(|| async { axum::http::StatusCode::INTERNAL_SERVER_ERROR }),
@@ -410,7 +413,11 @@ mod tests {
             "500 is unhealthy"
         );
         assert!(
-            !probe_once(&target(addr), &http_check("/slow", Duration::from_millis(50))).await,
+            !probe_once(
+                &target(addr),
+                &http_check("/slow", Duration::from_millis(50))
+            )
+            .await,
             "a response slower than the timeout is unhealthy"
         );
     }

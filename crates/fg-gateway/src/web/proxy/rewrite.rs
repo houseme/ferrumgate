@@ -80,7 +80,10 @@ impl Rewrite {
             // Internal rewrite: substitute the path (`$1..$N` backrefs via
             // regex replace semantics) and re-attach the original query.
             None => {
-                let new_path = self.pattern.replace_all(path, self.to.as_str()).into_owned();
+                let new_path = self
+                    .pattern
+                    .replace_all(path, self.to.as_str())
+                    .into_owned();
                 match query {
                     Some(q) => Outcome::Rewritten(format!("{new_path}?{q}")),
                     None => Outcome::Rewritten(new_path),

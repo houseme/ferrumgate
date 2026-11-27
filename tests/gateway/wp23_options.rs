@@ -142,9 +142,7 @@ async fn spawn_frontend(proxy: Proxy) -> Result<SocketAddr> {
                         service_fn(move |request: Request<Incoming>| {
                             let proxy = proxy.clone();
                             async move {
-                                Ok::<_, Infallible>(
-                                    proxy.forward(request, peer, None, None).await,
-                                )
+                                Ok::<_, Infallible>(proxy.forward(request, peer, None, None).await)
                             }
                         }),
                     )
@@ -288,21 +286,19 @@ async fn request_response_header_edits() -> Result<()> {
     });
     let gateway = spawn_gateway(vec![site]).await?;
 
-    let (status, fields, body) = send_request(
-        gateway,
-        "GET",
-        "/",
-        "edit.test",
-        &[("x-trace", "forged")],
-    )
-    .await?;
+    let (status, fields, body) =
+        send_request(gateway, "GET", "/", "edit.test", &[("x-trace", "forged")]).await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["seen"]["x-extra"], "hello", "request edit added");
     assert!(
         body["seen"].get("x-trace").is_none(),
         "client X-Trace deleted before the backend"
     );
-    assert_eq!(header(&fields, "x-resp"), Some("yes"), "response edit added");
+    assert_eq!(
+        header(&fields, "x-resp"),
+        Some("yes"),
+        "response edit added"
+    );
     assert!(
         fields.get("x-trace-resp").is_none(),
         "backend X-Trace-Resp deleted"

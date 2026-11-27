@@ -27,8 +27,7 @@ enum Mode {
     Tcp,
 }
 
-#[derive(Deserialize)]
-#[derive(serde::Serialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RawHealthCheck {
     mode: Mode,

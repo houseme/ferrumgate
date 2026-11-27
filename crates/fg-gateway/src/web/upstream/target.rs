@@ -146,8 +146,7 @@ pub fn display_url(target: &Target) -> String {
     let scheme = uri.scheme_str().unwrap_or("http");
     let authority = uri.authority().expect("validated authority");
     let (host, explicit_port) = split_host_port(authority.as_str());
-    let port =
-        explicit_port.unwrap_or(if scheme == "https" { 443 } else { 80 });
+    let port = explicit_port.unwrap_or(if scheme == "https" { 443 } else { 80 });
     let default = matches!((scheme, port), ("http", 80) | ("https", 443));
     if default {
         format!("{scheme}://{host}")
@@ -188,7 +187,10 @@ mod tests {
         let credentialed = target("http://user:pass@host:8080/");
         assert_eq!(display_url(&credentialed), "http://host:8080");
         assert_eq!(host_of(&credentialed), "host:8080");
-        assert_eq!(host_header(&credentialed), HeaderValue::from_static("host:8080"));
+        assert_eq!(
+            host_header(&credentialed),
+            HeaderValue::from_static("host:8080")
+        );
         // Default port 80 is omitted; https likewise hides 443.
         assert_eq!(display_url(&target("http://host/")), "http://host");
         assert_eq!(
@@ -284,14 +286,10 @@ mod tests {
 
     #[test]
     fn parse_targets_preserves_order_and_propagates_errors() {
-        let lines: Vec<String> = [
-            "http://a:1/",
-            "http://b:2 weight=5 backup",
-            "https://c:3/",
-        ]
-        .iter()
-        .map(|line| line.to_string())
-        .collect();
+        let lines: Vec<String> = ["http://a:1/", "http://b:2 weight=5 backup", "https://c:3/"]
+            .iter()
+            .map(|line| line.to_string())
+            .collect();
         let parsed = parse_targets(&lines).expect("all lines valid");
         let urls: Vec<String> = parsed.iter().map(display_url).collect();
         assert_eq!(urls, ["http://a:1", "http://b:2", "https://c:3"]);
@@ -304,8 +302,7 @@ mod tests {
             "nonsense".to_string(),
         ]
         .to_vec();
-        let broken_error =
-            parse_targets(&broken).expect_err("first bad line propagates");
+        let broken_error = parse_targets(&broken).expect_err("first bad line propagates");
         assert_eq!(
             broken_error,
             TargetError::UnknownParam("foo=bar".to_string())

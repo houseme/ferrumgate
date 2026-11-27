@@ -137,7 +137,10 @@ mod tests {
         let cursor = AtomicU64::new(0);
         let mut heavy_picks = 0;
         for _ in 0..40 {
-            if is_same(pick(Policy::RoundRobin, &cands, ip(1), &cursor), &backends[0]) {
+            if is_same(
+                pick(Policy::RoundRobin, &cands, ip(1), &cursor),
+                &backends[0],
+            ) {
                 heavy_picks += 1;
             }
         }
@@ -156,7 +159,12 @@ mod tests {
         let cands = candidates(&backends);
         let cursor = AtomicU64::new(0);
         let order: Vec<bool> = (0..6)
-            .map(|_| is_same(pick(Policy::RoundRobin, &cands, ip(1), &cursor), &backends[0]))
+            .map(|_| {
+                is_same(
+                    pick(Policy::RoundRobin, &cands, ip(1), &cursor),
+                    &backends[0],
+                )
+            })
             .collect();
         // Equal weights cycle one candidate per ticket: a,b,c,a,b,c — so
         // `order` marks a pick at 0 and 3 only.
@@ -215,13 +223,19 @@ mod tests {
         let mut saw_heavy = false;
         let mut saw_light = false;
         for octet in 1..=64u8 {
-            if is_same(pick(Policy::IpHash, &cands, ip(octet), &cursor), &backends[0]) {
+            if is_same(
+                pick(Policy::IpHash, &cands, ip(octet), &cursor),
+                &backends[0],
+            ) {
                 saw_heavy = true;
             } else {
                 saw_light = true;
             }
         }
-        assert!(saw_heavy && saw_light, "64 sampled clients hit one backend only");
+        assert!(
+            saw_heavy && saw_light,
+            "64 sampled clients hit one backend only"
+        );
     }
 
     #[test]
@@ -265,11 +279,20 @@ mod tests {
         let backends = [only];
         let cands = candidates(&backends);
         let cursor = AtomicU64::new(0);
-        for policy in [Policy::RoundRobin, Policy::Random, Policy::IpHash, Policy::LeastConn] {
+        for policy in [
+            Policy::RoundRobin,
+            Policy::Random,
+            Policy::IpHash,
+            Policy::LeastConn,
+        ] {
             assert!(is_same(pick(policy, &cands, ip(1), &cursor), &backends[0]));
         }
         // The fast path returns before any ticket work: the cursor must
         // stay untouched.
-        assert_eq!(cursor.load(Relaxed), 0, "short circuit must not advance the cursor");
+        assert_eq!(
+            cursor.load(Relaxed),
+            0,
+            "short circuit must not advance the cursor"
+        );
     }
 }

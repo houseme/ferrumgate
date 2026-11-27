@@ -4,8 +4,8 @@
 #![allow(dead_code)]
 
 use hyper::header::{
-    HeaderName, HeaderValue, ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
-    ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, VARY,
+    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_MAX_AGE, HeaderName, HeaderValue, VARY,
 };
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -105,10 +105,7 @@ mod tests {
     use super::*;
 
     /// Looks up a header value by its lowercase wire name.
-    fn get<'a>(
-        headers: &'a [(HeaderName, HeaderValue)],
-        name: &str,
-    ) -> Option<&'a HeaderValue> {
+    fn get<'a>(headers: &'a [(HeaderName, HeaderValue)], name: &str) -> Option<&'a HeaderValue> {
         headers
             .iter()
             .find(|(header, _)| header.as_str() == name)
@@ -127,17 +124,29 @@ mod tests {
         // A preflight is OPTIONS *with* Access-Control-Request-Method.
         assert!(is_preflight("OPTIONS", Some("DELETE")));
         assert!(!is_preflight("GET", None));
-        assert!(!is_preflight("OPTIONS", None), "plain OPTIONS is not a preflight");
+        assert!(
+            !is_preflight("OPTIONS", None),
+            "plain OPTIONS is not a preflight"
+        );
 
         let pre = cors.preflight_headers("https://app.example.com");
         assert_eq!(
             get(&pre, "access-control-allow-origin").unwrap(),
             "https://app.example.com"
         );
-        assert_eq!(get(&pre, "access-control-allow-methods").unwrap(), "GET, POST");
-        assert_eq!(get(&pre, "access-control-allow-headers").unwrap(), "X-Request-Id");
+        assert_eq!(
+            get(&pre, "access-control-allow-methods").unwrap(),
+            "GET, POST"
+        );
+        assert_eq!(
+            get(&pre, "access-control-allow-headers").unwrap(),
+            "X-Request-Id"
+        );
         assert_eq!(get(&pre, "access-control-max-age").unwrap(), "600");
-        assert_eq!(get(&pre, "access-control-allow-credentials").unwrap(), "true");
+        assert_eq!(
+            get(&pre, "access-control-allow-credentials").unwrap(),
+            "true"
+        );
     }
 
     #[test]
@@ -179,7 +188,10 @@ mod tests {
         };
         let pre = cors.preflight_headers("https://a.example.com");
         assert!(get(&pre, "access-control-allow-methods").is_none());
-        assert_eq!(get(&pre, "access-control-allow-headers").unwrap(), "X-Token");
+        assert_eq!(
+            get(&pre, "access-control-allow-headers").unwrap(),
+            "X-Token"
+        );
     }
 
     #[test]

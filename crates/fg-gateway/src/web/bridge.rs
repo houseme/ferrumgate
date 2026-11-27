@@ -343,14 +343,12 @@ async fn compile_response(
 /// dropped, origin path) together with its weight and backup flag.
 fn raw_backend(line: &str) -> Result<RawBackend, String> {
     let trimmed = line.trim();
-    let normalized = if trimmed.is_empty()
-        || trimmed.contains("://")
-        || trimmed.contains(char::is_whitespace)
-    {
-        trimmed.to_owned()
-    } else {
-        format!("http://{trimmed}")
-    };
+    let normalized =
+        if trimmed.is_empty() || trimmed.contains("://") || trimmed.contains(char::is_whitespace) {
+            trimmed.to_owned()
+        } else {
+            format!("http://{trimmed}")
+        };
     let target = parse_target(&normalized).map_err(|error| error.to_string())?;
     let scheme = target.uri.scheme_str().unwrap_or("http");
     let authority = target

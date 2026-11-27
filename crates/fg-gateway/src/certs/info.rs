@@ -30,8 +30,8 @@ impl CertInfo {
     /// Parses the first certificate of a full-chain PEM.
     pub fn parse(cert_pem: &str) -> Result<Self, InfoError> {
         let certificate = first_certificate(cert_pem)?;
-        let (_, x509) = X509Certificate::from_der(certificate.as_ref())
-            .map_err(|_| InfoError::Unparseable)?;
+        let (_, x509) =
+            X509Certificate::from_der(certificate.as_ref()).map_err(|_| InfoError::Unparseable)?;
         let mut info = Self {
             issuer: issuer_name(&x509),
             not_before: unix_time(x509.validity().not_before.timestamp()),
@@ -42,7 +42,11 @@ impl CertInfo {
         let san = x509
             .subject_alternative_name()
             .map_err(|_| InfoError::Unparseable)?;
-        for name in san.map(|san| &san.value.general_names).into_iter().flatten() {
+        for name in san
+            .map(|san| &san.value.general_names)
+            .into_iter()
+            .flatten()
+        {
             match name {
                 GeneralName::DNSName(dns) => info.dns_names.push(dns.to_string()),
                 GeneralName::IPAddress(bytes) => {
@@ -191,7 +195,8 @@ mod tests {
         "8siQ2M2Y1IC6/WB4hBuE88aOdtFHoA60jujTsajKtQEEa+Il6LSrkKrp\n",
         "-----END PRIVATE KEY-----\n",
     );
-    const LEAF_FINGERPRINT: &str = "ef325ab974a8c16b0a04cba55c948d557e895950dc694bcaf71b3f61a6689f64";
+    const LEAF_FINGERPRINT: &str =
+        "ef325ab974a8c16b0a04cba55c948d557e895950dc694bcaf71b3f61a6689f64";
     const OTHER_FINGERPRINT: &str =
         "fed667990758be8f84de4fa97af02ad0523c378354585525c10aa3a159fbd363";
 
@@ -235,7 +240,10 @@ mod tests {
         let info = CertInfo::parse(&format!("{LEAF_CERT}\n{OTHER_CERT}")).unwrap();
         assert_eq!(info.fingerprint, LEAF_FINGERPRINT);
         assert_eq!(info.issuer, "Ferrumgate Test");
-        assert_eq!(info.dns_names.first().map(String::as_str), Some("example.com"));
+        assert_eq!(
+            info.dns_names.first().map(String::as_str),
+            Some("example.com")
+        );
     }
 
     #[test]
@@ -249,9 +257,15 @@ mod tests {
     #[test]
     fn info_rejects_unparseable_pem() {
         assert_eq!(CertInfo::parse("").unwrap_err(), InfoError::Unparseable);
-        assert_eq!(CertInfo::parse("garbage").unwrap_err(), InfoError::Unparseable);
+        assert_eq!(
+            CertInfo::parse("garbage").unwrap_err(),
+            InfoError::Unparseable
+        );
         // A private key is not a certificate.
-        assert_eq!(CertInfo::parse(LEAF_KEY).unwrap_err(), InfoError::Unparseable);
+        assert_eq!(
+            CertInfo::parse(LEAF_KEY).unwrap_err(),
+            InfoError::Unparseable
+        );
         assert_eq!(
             CertInfo::key_matches(LEAF_CERT, "").unwrap_err(),
             InfoError::Unparseable
@@ -265,9 +279,6 @@ mod tests {
             CertInfo::key_matches(LEAF_CERT, LEAF_CERT).unwrap_err(),
             InfoError::Unparseable
         );
-        assert_eq!(
-            InfoError::Unparseable.to_string(),
-            "证书内容无法解析"
-        );
+        assert_eq!(InfoError::Unparseable.to_string(), "证书内容无法解析");
     }
 }

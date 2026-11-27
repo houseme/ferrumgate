@@ -11,9 +11,9 @@ use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
     header::{
-        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, LOCATION, HeaderMap, HeaderName,
-        HeaderValue, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING,
-        UPGRADE, VIA,
+        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue,
+        LOCATION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
+        VIA,
     },
     http::uri::{Authority, PathAndQuery, Scheme},
 };
@@ -244,10 +244,9 @@ impl Proxy {
                     }
                 }
                 Outcome::Redirect { target, code } => {
-                    if let (Ok(status), Ok(location)) = (
-                        StatusCode::from_u16(code),
-                        HeaderValue::from_str(&target),
-                    ) {
+                    if let (Ok(status), Ok(location)) =
+                        (StatusCode::from_u16(code), HeaderValue::from_str(&target))
+                    {
                         let mut response = reply(status);
                         response.headers_mut().insert(LOCATION, location);
                         return response;
@@ -730,9 +729,9 @@ impl Body for RequestBody {
             Self::Data(inner) => Pin::new(inner).poll_frame(cx),
             Self::Replay(inner) => Pin::new(inner).poll_frame(cx),
             // `Empty` never fails: its infallible error coerces away.
-            Self::Empty(inner) => Pin::new(inner).poll_frame(cx).map(|frame| {
-                frame.map(|result| result.map_err(|never| match never {}))
-            }),
+            Self::Empty(inner) => Pin::new(inner)
+                .poll_frame(cx)
+                .map(|frame| frame.map(|result| result.map_err(|never| match never {}))),
         }
     }
 
@@ -763,10 +762,7 @@ pub(crate) struct ReplayBody {
 
 impl ReplayBody {
     fn new(bytes: Bytes) -> Self {
-        Self {
-            bytes,
-            sent: false,
-        }
+        Self { bytes, sent: false }
     }
 }
 

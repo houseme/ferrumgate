@@ -2,8 +2,8 @@
 //! entry is a `Key: Value` line; an empty value deletes the header.
 #![allow(dead_code)]
 
-use hyper::header::{HeaderName, HeaderValue};
 use hyper::HeaderMap;
+use hyper::header::{HeaderName, HeaderValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditError {
@@ -36,8 +36,8 @@ pub fn parse_edit(line: &str) -> Result<HeaderEdit, EditError> {
         return Err(EditError::BadLine(line.to_string()));
     };
     let key = key.trim();
-    let name = HeaderName::from_bytes(key.as_bytes())
-        .map_err(|_| EditError::BadName(key.to_string()))?;
+    let name =
+        HeaderName::from_bytes(key.as_bytes()).map_err(|_| EditError::BadName(key.to_string()))?;
     Ok(HeaderEdit {
         name,
         value: value.trim().to_string(),
@@ -68,10 +68,7 @@ mod tests {
     use super::*;
 
     fn edits(lines: &[&str]) -> Vec<HeaderEdit> {
-        lines
-            .iter()
-            .map(|line| parse_edit(line).unwrap())
-            .collect()
+        lines.iter().map(|line| parse_edit(line).unwrap()).collect()
     }
 
     #[test]

@@ -10,13 +10,13 @@ pub mod retry;
 pub mod select;
 pub mod target;
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64};
 use std::time::Duration;
 
 pub use pool::{Pool, PoolError};
-pub use retry::{is_dial_failure, Attempt};
-pub use target::{display_url, parse_target, Target, TargetError};
+pub use retry::{Attempt, is_dial_failure};
+pub use target::{Target, TargetError, display_url, parse_target};
 
 /// Backends per site (mirrors the legacy `MAX_PER_ROUTE`).
 pub const MAX_BACKENDS: usize = 32;
@@ -133,7 +133,11 @@ impl Backend {
         let uri = &self.target.uri;
         let port = uri
             .port_u16()
-            .unwrap_or(if uri.scheme_str() == Some("https") { 443 } else { 80 });
+            .unwrap_or(if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            });
         format!(
             "{}://{}:{}",
             uri.scheme_str().unwrap_or("http"),

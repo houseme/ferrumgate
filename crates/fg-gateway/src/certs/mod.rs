@@ -11,8 +11,8 @@ pub mod index;
 pub mod info;
 pub(crate) mod legacy;
 pub mod model;
-pub mod routes;
 pub mod provider;
+pub mod routes;
 pub mod source;
 pub mod validate;
 
@@ -77,16 +77,14 @@ async fn read_config(config_dir: &Path) -> anyhow::Result<FileConfig> {
             return Ok(FileConfig::default());
         }
         Err(error) => {
-            return Err(anyhow::Error::new(error).context(format!(
-                "读取 {} 失败",
-                path.display()
-            )));
+            return Err(anyhow::Error::new(error).context(format!("读取 {} 失败", path.display())));
         }
     };
-    let mut config: FileConfig = serde_json::from_slice(&bytes)
-        .with_context(|| format!("解析 {} 失败", path.display()))?;
-    normalize(&mut config)
-        .map_err(|error| anyhow::Error::new(error).context(format!("{} 校验失败", path.display())))?;
+    let mut config: FileConfig =
+        serde_json::from_slice(&bytes).with_context(|| format!("解析 {} 失败", path.display()))?;
+    normalize(&mut config).map_err(|error| {
+        anyhow::Error::new(error).context(format!("{} 校验失败", path.display()))
+    })?;
     Ok(config)
 }
 
@@ -94,9 +92,7 @@ async fn read_config(config_dir: &Path) -> anyhow::Result<FileConfig> {
 /// enabled entry's loaded certificate, and per-entry load failures. A
 /// failing entry is recorded and left out of the certificate set; it
 /// never blocks the other entries.
-async fn collect(
-    config_dir: &Path,
-) -> anyhow::Result<(Settings, Vec<Arc<LoadedCert>>, Failures)> {
+async fn collect(config_dir: &Path) -> anyhow::Result<(Settings, Vec<Arc<LoadedCert>>, Failures)> {
     let config = read_config(config_dir).await?;
     let mut loaded = Vec::new();
     let mut failures = Failures::default();
@@ -171,7 +167,8 @@ impl SslState {
     /// Replaces the published index (bumping the provider version) and
     /// the summary/metrics mirror, keeping both in step.
     fn publish(&self, loaded: Vec<Arc<LoadedCert>>) {
-        self.provider.publish(CertIndex::build(loaded.iter().cloned()));
+        self.provider
+            .publish(CertIndex::build(loaded.iter().cloned()));
         *self.loaded.lock().expect("loaded 锁") = loaded;
     }
 
@@ -184,7 +181,9 @@ impl SslState {
         let mut expiring = 0;
         let mut expired = 0;
         for cert in loaded.iter() {
-            let Some(not_after) = cert.not_after else { continue };
+            let Some(not_after) = cert.not_after else {
+                continue;
+            };
             if not_after < now {
                 expired += 1;
             } else if not_after
@@ -209,7 +208,9 @@ impl SslState {
         let loaded = self.loaded.lock().expect("loaded 锁");
         let mut samples = Vec::with_capacity(loaded.len() * 2);
         for cert in loaded.iter() {
-            let Some(not_after) = cert.not_after else { continue };
+            let Some(not_after) = cert.not_after else {
+                continue;
+            };
             let label = &*cert.entry;
             let remaining = match not_after.duration_since(now) {
                 Ok(remaining) => remaining.as_secs_f64(),
@@ -413,7 +414,10 @@ pub fn is_short_lived(cert: &Cert, _now: SystemTime) -> bool {
 
 /// The certificate's DNS SAN set, lowercased (order-insensitive).
 fn certificate_domains(info: &CertInfo) -> BTreeSet<String> {
-    info.dns_names.iter().map(|name| name.to_lowercase()).collect()
+    info.dns_names
+        .iter()
+        .map(|name| name.to_lowercase())
+        .collect()
 }
 
 /// The `acme.domains` set (missing → empty), lowercased.
@@ -503,10 +507,13 @@ mod tests {
     fn matched_cert(issued_profile: &str, acme_profile: Option<&str>) -> Cert {
         let mut cert = acme_cert(LEAF_CERT);
         cert.issued_profile = issued_profile.to_string();
-        cert.acme
-            .insert("domains".to_string(), serde_json::json!(["example.com", "*.example.com", "api.example.com"]));
+        cert.acme.insert(
+            "domains".to_string(),
+            serde_json::json!(["example.com", "*.example.com", "api.example.com"]),
+        );
         if let Some(profile) = acme_profile {
-            cert.acme.insert("profile".to_string(), serde_json::json!(profile));
+            cert.acme
+                .insert("profile".to_string(), serde_json::json!(profile));
         }
         cert
     }
@@ -526,10 +533,18 @@ mod tests {
         // 未签发：没有证书内容 → 续签。
         assert!(needs_renewal(&acme_cert(""), &settings, end));
         // 解析失败 → 续签。
-        assert!(needs_renewal(&acme_cert("definitely not a pem"), &settings, end));
+        assert!(needs_renewal(
+            &acme_cert("definitely not a pem"),
+            &settings,
+            end
+        ));
 
         // 基线：域名与 profile 一致、剩余 60 天 → 不续签。
-        assert!(!needs_renewal(&matched_cert("", None), &settings, end - 60 * DAY));
+        assert!(!needs_renewal(
+            &matched_cert("", None),
+            &settings,
+            end - 60 * DAY
+        ));
 
         // 域名变化 → 续签。
         let mut renamed = matched_cert("", None);
@@ -546,8 +561,16 @@ mod tests {
         assert!(!needs_renewal(&recased, &settings, end - 60 * DAY));
 
         // profile 变化 → 续签；一致 → 不续签。
-        assert!(needs_renewal(&matched_cert("default", None), &settings, end - 60 * DAY));
-        assert!(!needs_renewal(&matched_cert("default", Some("default")), &settings, end - 60 * DAY));
+        assert!(needs_renewal(
+            &matched_cert("default", None),
+            &settings,
+            end - 60 * DAY
+        ));
+        assert!(!needs_renewal(
+            &matched_cert("default", Some("default")),
+            &settings,
+            end - 60 * DAY
+        ));
 
         // 普通按天：剩余 31 天不续，29 天续；阈值随设置；已过期必续。
         let plain = matched_cert("", None);
@@ -714,10 +737,7 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str(), *value))
             .collect();
-        assert_eq!(
-            by_name["ferrumgate_cert_days_remaining{cert=\"ok\"}"],
-            60.0
-        );
+        assert_eq!(by_name["ferrumgate_cert_days_remaining{cert=\"ok\"}"], 60.0);
         assert_eq!(
             by_name["ferrumgate_cert_days_remaining{cert=\"soon\"}"],
             10.0

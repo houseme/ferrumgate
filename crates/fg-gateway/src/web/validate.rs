@@ -328,7 +328,9 @@ fn validate_proxy_fields(site: &Site, path: &str, problems: &mut Vec<Problem>) {
     }
 
     for (index, rule) in site.rewrites.iter().enumerate() {
-        let redirect = rule.redirect.then_some(if rule.code == 0 { 302 } else { rule.code });
+        let redirect = rule
+            .redirect
+            .then_some(if rule.code == 0 { 302 } else { rule.code });
         if let Err(error) = Rewrite::compile(&rule.pattern, &rule.to, redirect) {
             problems.push(Problem {
                 field: field(&format!("rewrites[{index}]")),
@@ -995,15 +997,18 @@ mod tests {
         // Empty users, empty targets, duplicate names and duplicate
         // third-party identities (case-normalized) all report.
         assert!(has(&format!("{base}.userRoutes[1].users")), "{problems:?}");
-        assert!(has(&format!("{base}.userRoutes[2].targets")), "{problems:?}");
+        assert!(
+            has(&format!("{base}.userRoutes[2].targets")),
+            "{problems:?}"
+        );
         assert!(has(&format!("{base}.userRoutes[2].users")), "{problems:?}");
         assert!(has(&format!("{base}.userRoutes[4].users")), "{problems:?}");
         // Routes 0 and 3 (a fresh third-party identity) stay clean.
         assert!(
-            !problems
-                .iter()
-                .any(|problem| problem.field.starts_with(&format!("{base}.userRoutes[0]"))
-                    || problem.field.starts_with(&format!("{base}.userRoutes[3]"))),
+            !problems.iter().any(|problem| problem
+                .field
+                .starts_with(&format!("{base}.userRoutes[0]"))
+                || problem.field.starts_with(&format!("{base}.userRoutes[3]"))),
             "{problems:?}"
         );
     }

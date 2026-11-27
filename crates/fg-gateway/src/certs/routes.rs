@@ -12,15 +12,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Router;
 use axum::extract::Path;
 use axum::routing::{get, post, put};
-use axum::Router;
-use hyper::{header::CONTENT_TYPE, StatusCode};
-use serde_json::{json, Value};
+use hyper::{StatusCode, header::CONTENT_TYPE};
+use serde_json::{Value, json};
 
-use crate::certs::model::{Cert, CertSource};
 use crate::certs::model::Settings as ModelSettings;
-use crate::certs::{validate, SslState};
+use crate::certs::model::{Cert, CertSource};
+use crate::certs::{SslState, validate};
 
 pub struct CertsRoutesState {
     pub config_dir: PathBuf,
@@ -39,7 +39,10 @@ fn read_config(dir: &std::path::Path) -> crate::certs::model::FileConfig {
 }
 
 /// Writes `ssl.json` with 0600 and reloads the live index.
-async fn persist_and_reload(state: &CertsRoutesState, config: &crate::certs::model::FileConfig) -> Result<(), String> {
+async fn persist_and_reload(
+    state: &CertsRoutesState,
+    config: &crate::certs::model::FileConfig,
+) -> Result<(), String> {
     let path = state.config_dir.join("ssl.json");
     let bytes = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
     if let Some(parent) = path.parent() {
@@ -77,9 +80,18 @@ fn view_cert(cert: &Cert) -> Value {
     let now = std::time::SystemTime::now();
     let info = crate::certs::info::CertInfo::parse(&cert.cert_pem).ok();
     let not_after = info.as_ref().and_then(|info| info.not_after);
-    let issuer = info.as_ref().map(|info| info.issuer.clone()).unwrap_or_default();
+    let issuer = info
+        .as_ref()
+        .map(|info| info.issuer.clone())
+        .unwrap_or_default();
     let domains = info.map(|info| info.dns_names).unwrap_or_default();
-    let masked = |pem: &str| if pem.is_empty() { Value::String(String::new()) } else { Value::String(MASK.to_owned()) };
+    let masked = |pem: &str| {
+        if pem.is_empty() {
+            Value::String(String::new())
+        } else {
+            Value::String(MASK.to_owned())
+        }
+    };
     json!({
         "key": cert.key,
         "remark": cert.remark,
@@ -201,10 +213,16 @@ use axum::body::Bytes;
 
 async fn certs_list(state: Arc<CertsRoutesState>) -> hyper::Response<axum::body::Body> {
     let config = read_config(&state.config_dir);
-    reply(StatusCode::OK, json!({ "certs": config.certs.iter().map(view_cert).collect::<Vec<_>>() }))
+    reply(
+        StatusCode::OK,
+        json!({ "certs": config.certs.iter().map(view_cert).collect::<Vec<_>>() }),
+    )
 }
 
-async fn certs_create(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_create(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(mut cert) = serde_json::from_slice::<Cert>(&body) else {
         return error(StatusCode::BAD_REQUEST, "证书条目格式无效");
     };
@@ -220,7 +238,11 @@ async fn certs_create(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Respo
     }
 }
 
-async fn certs_replace(state: Arc<CertsRoutesState>, path: Path<String>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_replace(
+    state: Arc<CertsRoutesState>,
+    path: Path<String>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(submitted) = serde_json::from_slice::<Cert>(&body) else {
         return error(StatusCode::BAD_REQUEST, "证书条目格式无效");
     };
@@ -240,7 +262,13 @@ async fn certs_replace(state: Arc<CertsRoutesState>, path: Path<String>, body: B
     );
     *existing = submitted;
     existing.key = path.as_str().to_owned();
-    if existing.cert_pem.is_empty() || existing.cert_pem == MASK || (is_acme && old_cert_pem != MASK && !old_cert_pem.is_empty() && existing.cert_pem == MASK) {
+    if existing.cert_pem.is_empty()
+        || existing.cert_pem == MASK
+        || (is_acme
+            && old_cert_pem != MASK
+            && !old_cert_pem.is_empty()
+            && existing.cert_pem == MASK)
+    {
         existing.cert_pem = old_cert_pem;
     }
     if existing.key_pem.is_empty() || existing.key_pem == MASK {
@@ -264,7 +292,10 @@ async fn certs_replace(state: Arc<CertsRoutesState>, path: Path<String>, body: B
     }
 }
 
-async fn certs_copy(state: Arc<CertsRoutesState>, path: Path<String>) -> hyper::Response<axum::body::Body> {
+async fn certs_copy(
+    state: Arc<CertsRoutesState>,
+    path: Path<String>,
+) -> hyper::Response<axum::body::Body> {
     let mut config = read_config(&state.config_dir);
     let Some(original) = config.certs.iter().find(|c| c.key == path.as_str()) else {
         return error(StatusCode::NOT_FOUND, "证书条目不存在");
@@ -301,7 +332,10 @@ async fn certs_copy(state: Arc<CertsRoutesState>, path: Path<String>) -> hyper::
     }
 }
 
-async fn certs_remove(state: Arc<CertsRoutesState>, path: Path<String>) -> hyper::Response<axum::body::Body> {
+async fn certs_remove(
+    state: Arc<CertsRoutesState>,
+    path: Path<String>,
+) -> hyper::Response<axum::body::Body> {
     let mut config = read_config(&state.config_dir);
     let before = config.certs.len();
     config.certs.retain(|c| c.key != path.as_str());
@@ -314,14 +348,20 @@ async fn certs_remove(state: Arc<CertsRoutesState>, path: Path<String>) -> hyper
     }
 }
 
-async fn certs_batch_delete(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_batch_delete(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return error(StatusCode::BAD_REQUEST, "请求体格式无效");
     };
     let Some(keys) = payload.get("keys").and_then(|k| k.as_array()) else {
         return error(StatusCode::BAD_REQUEST, "缺少 keys 数组");
     };
-    let keys: Vec<String> = keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+    let keys: Vec<String> = keys
+        .iter()
+        .filter_map(|k| k.as_str().map(str::to_owned))
+        .collect();
     let mut config = read_config(&state.config_dir);
     config.certs.retain(|c| !keys.contains(&c.key));
     match persist_and_reload(&state, &config).await {
@@ -330,7 +370,11 @@ async fn certs_batch_delete(state: Arc<CertsRoutesState>, body: Bytes) -> hyper:
     }
 }
 
-async fn certs_enable(state: Arc<CertsRoutesState>, path: Path<String>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_enable(
+    state: Arc<CertsRoutesState>,
+    path: Path<String>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return error(StatusCode::BAD_REQUEST, "请求体格式无效");
     };
@@ -348,7 +392,10 @@ async fn certs_enable(state: Arc<CertsRoutesState>, path: Path<String>, body: By
     }
 }
 
-async fn certs_batch_enable(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_batch_enable(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return error(StatusCode::BAD_REQUEST, "请求体格式无效");
     };
@@ -358,7 +405,10 @@ async fn certs_batch_enable(state: Arc<CertsRoutesState>, body: Bytes) -> hyper:
     ) else {
         return error(StatusCode::BAD_REQUEST, "缺少 keys 或 enable");
     };
-    let keys: Vec<String> = keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+    let keys: Vec<String> = keys
+        .iter()
+        .filter_map(|k| k.as_str().map(str::to_owned))
+        .collect();
     let mut config = read_config(&state.config_dir);
     for cert in &mut config.certs {
         if keys.contains(&cert.key) {
@@ -371,14 +421,20 @@ async fn certs_batch_enable(state: Arc<CertsRoutesState>, body: Bytes) -> hyper:
     }
 }
 
-async fn certs_order(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_order(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return error(StatusCode::BAD_REQUEST, "请求体格式无效");
     };
     let Some(keys) = payload.get("keys").and_then(|k| k.as_array()) else {
         return error(StatusCode::BAD_REQUEST, "缺少 keys 数组");
     };
-    let keys: Vec<String> = keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+    let keys: Vec<String> = keys
+        .iter()
+        .filter_map(|k| k.as_str().map(str::to_owned))
+        .collect();
     let mut config = read_config(&state.config_dir);
     let mut ordered = Vec::with_capacity(config.certs.len());
     for key in &keys {
@@ -394,7 +450,10 @@ async fn certs_order(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Respon
     }
 }
 
-async fn certs_group(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn certs_group(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(payload) = serde_json::from_slice::<Value>(&body) else {
         return error(StatusCode::BAD_REQUEST, "请求体格式无效");
     };
@@ -404,7 +463,10 @@ async fn certs_group(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Respon
     ) else {
         return error(StatusCode::BAD_REQUEST, "缺少 keys 或 group");
     };
-    let keys: Vec<String> = keys.iter().filter_map(|k| k.as_str().map(str::to_owned)).collect();
+    let keys: Vec<String> = keys
+        .iter()
+        .filter_map(|k| k.as_str().map(str::to_owned))
+        .collect();
     let mut config = read_config(&state.config_dir);
     for cert in &mut config.certs {
         if keys.contains(&cert.key) {
@@ -419,10 +481,16 @@ async fn certs_group(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Respon
 
 async fn settings_read(state: Arc<CertsRoutesState>) -> hyper::Response<axum::body::Body> {
     let settings = state.ssl.settings();
-    reply(StatusCode::OK, serde_json::to_value(&settings).unwrap_or_else(|_| json!({})))
+    reply(
+        StatusCode::OK,
+        serde_json::to_value(&settings).unwrap_or_else(|_| json!({})),
+    )
 }
 
-async fn settings_write(state: Arc<CertsRoutesState>, body: Bytes) -> hyper::Response<axum::body::Body> {
+async fn settings_write(
+    state: Arc<CertsRoutesState>,
+    body: Bytes,
+) -> hyper::Response<axum::body::Body> {
     let Ok(mut settings) = serde_json::from_slice::<ModelSettings>(&body) else {
         return error(StatusCode::BAD_REQUEST, "设置格式无效");
     };

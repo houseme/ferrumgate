@@ -38,7 +38,11 @@ fn default_change(report: &mut MigrateReport, field: &str, old: &str, new: &str)
 fn timeout_fields(config: &RawConfig, report: &mut MigrateReport) -> (u32, u32) {
     let server = &config.server;
     let connect = if server.connect_timeout_ms != 2_000 {
-        map("server.connect_timeout_ms", report, "sites[].timeoutsConnectSecs");
+        map(
+            "server.connect_timeout_ms",
+            report,
+            "sites[].timeoutsConnectSecs",
+        );
         ((server.connect_timeout_ms / 1000).max(1)) as u32
     } else {
         default_change(
@@ -139,7 +143,11 @@ fn convert_route(
         {
             line.push_str(&format!(" weight={weight}"));
         }
-        if value.get("backup").and_then(|b| b.as_bool()).unwrap_or(false) {
+        if value
+            .get("backup")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false)
+        {
             line.push_str(" backup");
         }
         site.targets.push(line);
@@ -174,13 +182,21 @@ fn convert_route(
                 .and_then(|p| p.as_str())
                 .unwrap_or("/")
                 .to_owned();
-            site.health_interval_secs =
-                value.get("interval_secs").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-            site.health_timeout_secs =
-                value.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
+            site.health_interval_secs = value
+                .get("interval_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(10) as u32;
+            site.health_timeout_secs = value
+                .get("timeout_secs")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(3) as u32;
             site.health_fails = value.get("fails").and_then(|v| v.as_u64()).unwrap_or(3) as u32;
             site.health_passes = value.get("passes").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
-            map("routes[].health", report, "sites[].health{mode,path,interval,timeout,fails,passes}");
+            map(
+                "routes[].health",
+                report,
+                "sites[].health{mode,path,interval,timeout,fails,passes}",
+            );
         }
     }
     if let Some(response) = &route.response {
@@ -257,7 +273,9 @@ pub fn convert(config: &RawConfig, report: &mut MigrateReport) -> Result<FileCon
     map("server.listen", report, "listeners[0].listenIp + port");
     server_drops(&config.server, report);
     for route in &config.routes {
-        listener.sites.push(convert_route(&route.host, route, timeouts, report)?);
+        listener
+            .sites
+            .push(convert_route(&route.host, route, timeouts, report)?);
     }
     file.listeners.push(listener);
     Ok(file)

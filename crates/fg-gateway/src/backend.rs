@@ -16,15 +16,14 @@ use serde::Deserialize;
 
 use crate::{
     config::{canonical_host, valid_authority},
-    web::upstream::{Policy, MAX_ATTEMPTS},
+    web::upstream::{MAX_ATTEMPTS, Policy},
 };
 
 const MAX_PER_ROUTE: usize = 32;
 const FAILURE_THRESHOLD: u64 = 3;
 const COOLDOWN_MS: u64 = 30_000;
 
-#[derive(Deserialize)]
-#[derive(serde::Serialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawBackend {
     upstream: String,
@@ -224,10 +223,7 @@ impl BackendPool {
         let mut order = Vec::with_capacity(MAX_ATTEMPTS);
         order.push(lead);
         for candidate in candidates {
-            if !order
-                .iter()
-                .any(|chosen| std::ptr::eq(*chosen, candidate))
-            {
+            if !order.iter().any(|chosen| std::ptr::eq(*chosen, candidate)) {
                 order.push(candidate);
             }
         }
@@ -267,8 +263,7 @@ impl BackendPool {
                 let mut best = candidates[0];
                 let mut best_score = f64::INFINITY;
                 for backend in candidates {
-                    let score =
-                        f64::from(backend.conns.load(Relaxed)) / f64::from(backend.weight);
+                    let score = f64::from(backend.conns.load(Relaxed)) / f64::from(backend.weight);
                     if score < best_score {
                         best_score = score;
                         best = backend;
@@ -286,9 +281,9 @@ impl BackendPool {
 
     /// Counts a finished attempt; the update guards the zero floor.
     pub fn leave(&self, backend: &Backend) {
-        let _ = backend.conns.try_update(Relaxed, Relaxed, |conns| {
-            (conns > 0).then(|| conns - 1)
-        });
+        let _ = backend
+            .conns
+            .try_update(Relaxed, Relaxed, |conns| (conns > 0).then(|| conns - 1));
     }
 
     pub fn connected(&self, backend: &Backend, active: bool) {
@@ -383,12 +378,18 @@ mod tests {
     }
 
     fn port(backend: &Backend) -> u16 {
-        backend.authority.port_u16().expect("test backends have ports")
+        backend
+            .authority
+            .port_u16()
+            .expect("test backends have ports")
     }
 
     #[test]
     fn cooldown_and_recovery_are_scoped_to_the_selected_backend() {
-        let pool = pool(vec![raw(8001, 1, false), raw(8002, 1, true)], Policy::default());
+        let pool = pool(
+            vec![raw(8001, 1, false), raw(8002, 1, true)],
+            Policy::default(),
+        );
         let primary = &pool.primary[0];
         let now = 100;
         for _ in 0..2 {
@@ -412,7 +413,11 @@ mod tests {
     #[test]
     fn attempts_never_exceed_three_and_deduplicate() {
         let pool = pool(
-            vec![raw(8001, 1, false), raw(8002, 1, false), raw(8003, 1, false)],
+            vec![
+                raw(8001, 1, false),
+                raw(8002, 1, false),
+                raw(8003, 1, false),
+            ],
             Policy::default(),
         );
         let order: Vec<u16> = pool
@@ -537,6 +542,10 @@ mod tests {
             assert_eq!(order.len(), 1);
             assert_eq!(port(order[0]), 8001);
         }
-        assert_eq!(pool.cursor.load(Relaxed), 0, "no ticket work for one backend");
+        assert_eq!(
+            pool.cursor.load(Relaxed),
+            0,
+            "no ticket work for one backend"
+        );
     }
 }

@@ -78,7 +78,10 @@ fn acme_entry(config: &RawConfig, report: &mut MigrateReport) -> Result<Cert, St
             report,
             "settings.renewBeforeDays（向上取整到天）",
         );
-        params.insert("renewBeforeDays".into(), serde_json::json!((hours / 24).max(1)));
+        params.insert(
+            "renewBeforeDays".into(),
+            serde_json::json!((hours / 24).max(1)),
+        );
     }
     drop_field(
         report,
@@ -120,7 +123,10 @@ pub fn convert(
         let Ok(value) = serde_json::to_value(entry) else {
             return Err("certificate 条目无法读取".to_owned());
         };
-        let host = value.get("host").and_then(|h| h.as_str()).unwrap_or_default();
+        let host = value
+            .get("host")
+            .and_then(|h| h.as_str())
+            .unwrap_or_default();
         let cert_file = value
             .get("cert_file")
             .and_then(|c| c.as_str())
@@ -139,10 +145,7 @@ pub fn convert(
     if let Some(acme_value) = acme_view {
         map("[acme]", report, "ssl.certs[] source=acme");
         let entry = acme_entry(config, report)?;
-        file.settings.default_email = acme_value["email"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
+        file.settings.default_email = acme_value["email"].as_str().unwrap_or_default().to_owned();
         file.certs.push(entry);
     }
     Ok(file)

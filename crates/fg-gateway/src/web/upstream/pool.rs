@@ -3,14 +3,14 @@
 //! failures pause a backend for 30s) and probe-driven recovery.
 #![allow(dead_code)]
 
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::time::SystemTime;
 
-use super::{ActiveCheck, Backend, Policy, UpstreamStatus};
-use super::{FAILURE_THRESHOLD, MAX_BACKENDS, PAUSE};
 use super::select;
 use super::target::{Target, TargetError, parse_target};
+use super::{ActiveCheck, Backend, Policy, UpstreamStatus};
+use super::{FAILURE_THRESHOLD, MAX_BACKENDS, PAUSE};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PoolError {
@@ -39,7 +39,10 @@ impl std::fmt::Display for PoolError {
                 write!(f, "第 {} 行后端地址无效：{source}", index + 1)
             }
             Self::BadPolicy(text) => {
-                write!(f, "lb_policy 必须是 round_robin/random/ip_hash/least_conn：{text}")
+                write!(
+                    f,
+                    "lb_policy 必须是 round_robin/random/ip_hash/least_conn：{text}"
+                )
             }
             Self::BadCheck(text) => write!(f, "{text}"),
         }
@@ -112,14 +115,12 @@ impl Pool {
         let mut targets = Vec::with_capacity(site.targets.len());
         for (index, line) in site.targets.iter().enumerate() {
             let line = line.trim();
-            let line = if line.is_empty()
-                || line.contains("://")
-                || line.contains(char::is_whitespace)
-            {
-                line.to_owned()
-            } else {
-                format!("http://{line}")
-            };
+            let line =
+                if line.is_empty() || line.contains("://") || line.contains(char::is_whitespace) {
+                    line.to_owned()
+                } else {
+                    format!("http://{line}")
+                };
             let target =
                 parse_target(&line).map_err(|source| PoolError::BadTarget { index, source })?;
             targets.push(target);
@@ -189,7 +190,11 @@ impl Pool {
                 .collect();
         }
         if candidates.is_empty() {
-            candidates = self.primary.iter().map(|index| &self.backends[*index]).collect();
+            candidates = self
+                .primary
+                .iter()
+                .map(|index| &self.backends[*index])
+                .collect();
         }
         candidates
     }
@@ -445,13 +450,19 @@ mod tests {
         let policy = Policy::RoundRobin;
         // Same origin twice (parameters aside) is rejected.
         let error = Pool::compile(
-            vec![target("http://127.0.0.1:9001"), target("http://127.0.0.1:9001 weight=2")],
+            vec![
+                target("http://127.0.0.1:9001"),
+                target("http://127.0.0.1:9001 weight=2"),
+            ],
             policy,
             None,
         )
         .err()
         .expect("duplicate origin rejected");
-        assert_eq!(error, PoolError::Duplicate("http://127.0.0.1:9001".to_string()));
+        assert_eq!(
+            error,
+            PoolError::Duplicate("http://127.0.0.1:9001".to_string())
+        );
 
         // More than MAX_BACKENDS is rejected.
         let targets: Vec<Target> = (0..=MAX_BACKENDS)
@@ -467,7 +478,12 @@ mod tests {
         let targets: Vec<Target> = (0..MAX_BACKENDS)
             .map(|port| target(&format!("http://127.0.0.1:{}", 9000 + port)))
             .collect();
-        assert_eq!(Pool::compile(targets, policy, None).expect("boundary ok").len(), MAX_BACKENDS);
+        assert_eq!(
+            Pool::compile(targets, policy, None)
+                .expect("boundary ok")
+                .len(),
+            MAX_BACKENDS
+        );
 
         // Empty and all-backup pools are both rejected.
         assert_eq!(
@@ -557,7 +573,10 @@ mod tests {
     fn status_fields() {
         let now = SystemTime::now();
         let pool = compile_pool(
-            &["http://127.0.0.1:9001 weight=3", "http://127.0.0.1:9002 backup"],
+            &[
+                "http://127.0.0.1:9001 weight=3",
+                "http://127.0.0.1:9002 backup",
+            ],
             None,
         );
         let backup = pool.get(1);

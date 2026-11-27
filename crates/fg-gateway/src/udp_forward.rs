@@ -30,8 +30,7 @@ thread_local! {
     static REPLY_BUFFER: Cell<Vec<u8>> = const { Cell::new(Vec::new()) };
 }
 
-#[derive(Deserialize)]
-#[derive(serde::Serialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RawUdpForward {
     listen: Option<String>,

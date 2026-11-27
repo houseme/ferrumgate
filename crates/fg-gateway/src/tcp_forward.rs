@@ -27,8 +27,7 @@ use crate::{
     source_quota::SourceQuota,
 };
 
-#[derive(Deserialize)]
-#[derive(serde::Serialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RawForward {
     listen: Option<String>,

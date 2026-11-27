@@ -15,8 +15,7 @@ use crate::{
     static_files::{LocalBody, RawStatic, StaticFiles},
 };
 
-#[derive(Deserialize)]
-#[derive(serde::Serialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum RawResponse {
     Static(RawStatic),

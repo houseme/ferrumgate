@@ -51,7 +51,8 @@ impl LoadedCert {
     pub fn parse(entry: &str, cert_pem: &str, key_pem: &str) -> Result<Self, LoadError> {
         let info = CertInfo::parse(cert_pem).map_err(|_| LoadError("证书无法解析".into()))?;
         let chain: Vec<CertificateDer<'static>> =
-            CertificateDer::pem_slice_iter(cert_pem.as_bytes()).collect::<Result<_, _>>()
+            CertificateDer::pem_slice_iter(cert_pem.as_bytes())
+                .collect::<Result<_, _>>()
                 .map_err(|_| LoadError("证书链无法解析".into()))?;
         if chain.is_empty() {
             return Err(LoadError("证书链为空".into()));
@@ -64,9 +65,14 @@ impl LoadedCert {
         if keys.next().is_some() {
             return Err(LoadError("期望只有一个 PEM 私钥".into()));
         }
-        let tls = CertifiedKey::from_der(chain.clone(), private_key.clone_key(), &rustls::crypto::ring::default_provider())
-            .map_err(|_| LoadError("证书与私钥无法装配".into()))?;
-        tls.keys_match().map_err(|_| LoadError("私钥与证书不匹配".into()))?;
+        let tls = CertifiedKey::from_der(
+            chain.clone(),
+            private_key.clone_key(),
+            &rustls::crypto::ring::default_provider(),
+        )
+        .map_err(|_| LoadError("证书与私钥无法装配".into()))?;
+        tls.keys_match()
+            .map_err(|_| LoadError("私钥与证书不匹配".into()))?;
         Ok(Self {
             entry: entry.into(),
             chain,
@@ -81,7 +87,11 @@ impl LoadedCert {
     /// chain, carrying the given facts. The index never signs, so the
     /// chain bytes do not matter — only that the key loads.
     #[cfg(test)]
-    pub(crate) fn fixture(dns: Vec<String>, ips: Vec<std::net::IpAddr>, not_after: Option<std::time::SystemTime>) -> LoadedCert {
+    pub(crate) fn fixture(
+        dns: Vec<String>,
+        ips: Vec<std::net::IpAddr>,
+        not_after: Option<std::time::SystemTime>,
+    ) -> LoadedCert {
         use rustls::pki_types::PrivatePkcs8KeyDer;
         use std::sync::OnceLock;
         static KEY_PEM: &str = include_str!("fixture_key.pem");
@@ -94,11 +104,7 @@ impl LoadedCert {
             let Some(Ok(key)) = PrivateKeyDer::pem_slice_iter(KEY_PEM.as_bytes()).next() else {
                 panic!("fixture key PEM does not parse");
             };
-            match CertifiedKey::from_der(
-                certs,
-                key,
-                &rustls::crypto::ring::default_provider(),
-            ) {
+            match CertifiedKey::from_der(certs, key, &rustls::crypto::ring::default_provider()) {
                 Ok(key) => Some(Arc::new(key)),
                 Err(error) => panic!("fixture key does not assemble: {error}"),
             }
@@ -135,7 +141,11 @@ pub trait CertificateSource: Send + Sync {
     /// SNI selection: exact → one-label wildcard → (no SNI) local address
     /// → IP default. `local` is the accepted connection's local address
     /// (None on transports without it).
-    fn select(&self, server_name: Option<&str>, local: Option<std::net::IpAddr>) -> Option<Arc<LoadedCert>>;
+    fn select(
+        &self,
+        server_name: Option<&str>,
+        local: Option<std::net::IpAddr>,
+    ) -> Option<Arc<LoadedCert>>;
     /// Self-check / UI coverage query; empty names are never covered.
     fn has_certificate(&self, name: &str) -> bool;
     fn has_ip_certificate(&self) -> bool;
@@ -170,7 +180,11 @@ impl Provider {
 }
 
 impl CertificateSource for Provider {
-    fn select(&self, server_name: Option<&str>, local: Option<std::net::IpAddr>) -> Option<Arc<LoadedCert>> {
+    fn select(
+        &self,
+        server_name: Option<&str>,
+        local: Option<std::net::IpAddr>,
+    ) -> Option<Arc<LoadedCert>> {
         match server_name {
             Some(name) => self.snapshot().select(name, local),
             None => self.snapshot().select("", local),
@@ -213,7 +227,10 @@ mod tests {
         let (cert_pem, key_pem) = FIXTURE_PEM
             .split_once("-----BEGIN PRIVATE KEY-----")
             .expect("fixture holds one certificate and one key");
-        (cert_pem.to_string(), format!("-----BEGIN PRIVATE KEY-----{key_pem}"))
+        (
+            cert_pem.to_string(),
+            format!("-----BEGIN PRIVATE KEY-----{key_pem}"),
+        )
     }
 
     #[test]
@@ -299,7 +316,9 @@ mod tests {
         provider.publish(CertIndex::build([Arc::clone(&cert)].into_iter()));
 
         // SNI 命中的就是索引里那份证书（同一个 Arc）。
-        let got = provider.select(Some("a.example.com"), None).expect("covered");
+        let got = provider
+            .select(Some("a.example.com"), None)
+            .expect("covered");
         assert!(Arc::ptr_eq(&got, &cert));
         assert!(provider.has_certificate("a.example.com"));
         // 大小写与结尾点被归一化。

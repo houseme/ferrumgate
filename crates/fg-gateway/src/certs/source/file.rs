@@ -100,7 +100,11 @@ mod tests {
         let loaded = load(&cert, dir.path()).await.unwrap().expect("loads");
         assert_eq!(&*loaded.entry, "file-entry");
         assert!(
-            loaded.info.dns_names.iter().any(|name| name == "example.com"),
+            loaded
+                .info
+                .dns_names
+                .iter()
+                .any(|name| name == "example.com"),
             "SANs must include example.com: {:?}",
             loaded.info.dns_names
         );
@@ -118,7 +122,11 @@ mod tests {
         let cert = file_cert("certs/example.pem", "keys/example.key");
         let loaded = load(&cert, dir.path()).await.unwrap().expect("loads");
         assert!(
-            loaded.info.dns_names.iter().any(|name| name == "example.com"),
+            loaded
+                .info
+                .dns_names
+                .iter()
+                .any(|name| name == "example.com"),
             "relative paths must resolve under config_dir: {:?}",
             loaded.info.dns_names
         );

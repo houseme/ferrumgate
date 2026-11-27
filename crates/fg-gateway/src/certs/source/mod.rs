@@ -13,10 +13,7 @@ use super::provider::LoadedCert;
 /// Loads one enabled entry from its source. `config_dir` anchors relative
 /// `certFile`/`keyFile` paths. `None` = nothing loadable yet (an ACME
 /// entry that never issued) — not an error.
-pub async fn load_entry(
-    cert: &Cert,
-    config_dir: &Path,
-) -> Result<Option<Arc<LoadedCert>>, String> {
+pub async fn load_entry(cert: &Cert, config_dir: &Path) -> Result<Option<Arc<LoadedCert>>, String> {
     match cert.source {
         CertSource::Acme | CertSource::Upload => super::source::stored::load(cert),
         CertSource::File => super::source::file::load(cert, config_dir).await,
@@ -30,6 +27,6 @@ pub fn fnos_registry_path() -> &'static Path {
     Path::new("/usr/trim/etc/network_cert_all.conf")
 }
 
-pub(crate) mod stored;
 pub mod file;
 pub mod fnos;
+pub(crate) mod stored;

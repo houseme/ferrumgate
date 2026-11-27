@@ -11,13 +11,8 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use crate::{
-    acme::RawAcme,
-    backend::RawBackend,
-    health::RawHealthCheck,
-    site::RawResponse,
-    tcp_forward::RawForward,
-    tls::CertificateFiles,
-    udp_forward::RawUdpForward,
+    acme::RawAcme, backend::RawBackend, health::RawHealthCheck, site::RawResponse,
+    tcp_forward::RawForward, tls::CertificateFiles, udp_forward::RawUdpForward,
 };
 
 #[derive(Deserialize)]

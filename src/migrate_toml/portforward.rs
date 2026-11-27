@@ -43,10 +43,7 @@ fn access_from(policy: &serde_json::Value) -> pf::RawAccess {
 /// TCP and UDP entries become rules with their protocol list; shared
 /// timeouts aggregate: dial = max(connect), UDP session timeout = max
 /// idle, UDP session budget = sum(max_sessions).
-pub fn convert(
-    config: &RawConfig,
-    report: &mut MigrateReport,
-) -> Result<pf::FileConfig, String> {
+pub fn convert(config: &RawConfig, report: &mut MigrateReport) -> Result<pf::FileConfig, String> {
     let mut file = pf::FileConfig::default();
     let mut dial_timeout = 0u32;
     let mut first_data = 0u32;
@@ -60,7 +57,10 @@ pub fn convert(
             return Err("tcp_forward 条目无法读取".to_owned());
         };
         rule_index += 1;
-        let listen = view.get("listen").and_then(|l| l.as_str()).map(str::to_owned);
+        let listen = view
+            .get("listen")
+            .and_then(|l| l.as_str())
+            .map(str::to_owned);
         let (address, port) = listen_parts(&listen);
         let targets: Vec<String> = view["targets"]
             .as_array()
@@ -99,8 +99,16 @@ pub fn convert(
             access: access_from(view.get("source").unwrap_or(&serde_json::json!({}))),
             remark: String::new(),
         };
-        map("tcp_forward.listen", report, "rules[].listenAddress + listenPorts");
-        map("tcp_forward.targets", report, "rules[].targetAddresses + targetPorts");
+        map(
+            "tcp_forward.listen",
+            report,
+            "rules[].listenAddress + listenPorts",
+        );
+        map(
+            "tcp_forward.targets",
+            report,
+            "rules[].targetAddresses + targetPorts",
+        );
         map(
             "tcp_forward.max_connections_per_source",
             report,
@@ -156,7 +164,10 @@ pub fn convert(
             return Err("udp_forward 条目无法读取".to_owned());
         };
         rule_index += 1;
-        let listen = view.get("listen").and_then(|l| l.as_str()).map(str::to_owned);
+        let listen = view
+            .get("listen")
+            .and_then(|l| l.as_str())
+            .map(str::to_owned);
         let (address, port) = listen_parts(&listen);
         let mut targets: Vec<String> = view["targets"]
             .as_array()
@@ -206,8 +217,16 @@ pub fn convert(
             access: access_from(view.get("source").unwrap_or(&serde_json::json!({}))),
             remark: String::new(),
         };
-        map("udp_forward.listen", report, "rules[].listenAddress + listenPorts");
-        map("udp_forward.target(s)", report, "rules[].targetAddresses + targetPorts");
+        map(
+            "udp_forward.listen",
+            report,
+            "rules[].listenAddress + listenPorts",
+        );
+        map(
+            "udp_forward.target(s)",
+            report,
+            "rules[].targetAddresses + targetPorts",
+        );
         map(
             "udp_forward.idle_timeout_ms",
             report,
