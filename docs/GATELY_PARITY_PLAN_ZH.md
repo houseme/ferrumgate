@@ -1386,7 +1386,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-34 | 端口转发对齐 | M | WP-01、WP-36 | 本地实现及回环验收（portforward.json 数据面已接入 serve/check/reload；Lucky 导入接线待后续），见 [验收记录](EXECUTION.md#wp-34-端口转发对齐模型与运行时基础) |
 | WP-35 | 协议分流 | L | WP-36、WP-54 | 未开始 |
 | WP-36 | L4 共用基础 | S | WP-01 | 已完成（端口转发已改用共用组件；协议分流与 STUN 随对应包接入），见 [验收记录](EXECUTION.md#wp-36-l4-共用基础) |
-| WP-37 | 自动放行防火墙 | M | WP-36 | 未开始 |
+| WP-37 | 自动放行防火墙 | M | WP-36 | 本地实现及回环验收（fg_net::fwopen 库与 nft/iptables 双后端；监听接线、Linux 真机验证随 WP-21/34/CI），见 [验收记录](EXECUTION.md#wp-37-自动放行防火墙库实现交付) |
 | WP-38 | 导入 Gately 配置目录 | M | 各模块配置模型 | 未开始 |
 | WP-39 | 迁移现有 TOML 配置 | M | WP-20、WP-31、WP-34 | 未开始 |
 | WP-40 | 动态域名任务 | M | WP-16、WP-41 | 未开始 |
@@ -1396,7 +1396,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-44 | frp | L | WP-43、WP-36 | 未开始 |
 | WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 未开始 |
 | WP-46 | Cloudflare Tunnel | M | WP-43 | 未开始 |
-| WP-50 | 统一封禁表 | M | WP-16 | 未开始 |
+| WP-50 | 统一封禁表 | M | WP-16 | 本地实现及回环验收（fg_net::banlist 核心与 fg-guard 模块；根进程接线与 WP-51/52/53 生产者随对应包），见 [验收记录](EXECUTION.md#wp-50-统一封禁表核心与-fg-guard-交付) |
 | WP-51 | 防火墙同步 | L | WP-50、WP-37 | 未开始 |
 | WP-52 | 日志规则与事件来源 | L | WP-50、WP-16、WP-28 | 未开始 |
 | WP-53 | 诱饵端口、端口扫描检测与 IPv6 严格模式 | M | WP-51 | 未开始 |
@@ -1405,7 +1405,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-56 | 内置 OIDC 单点登录提供方 | M | WP-24 | 未开始 |
 | WP-60 | Docker 管理 | XL | WP-61 | 未开始 |
 | WP-61 | Web 终端 | L | WP-09 | 未开始 |
-| WP-62 | 计划任务 | S | WP-01 | 未开始 |
+| WP-62 | 计划任务 | S | WP-01 | 本地实现及回环验收（fg-cron 完整模块；REGISTRY/bootstrap 接线与日志来源变体待接），见 [验收记录](EXECUTION.md#wp-62-计划任务完整模块交付) |
 | WP-63 | 文件服务共享用户与 WebDAV | M | WP-24 | 未开始 |
 | WP-64 | FTP 与 FTPS | M | WP-63、WP-31 | 未开始 |
 | WP-65 | SMB | XL（自研）或 M（托管 Samba） | WP-63 | 未开始 |
