@@ -1302,3 +1302,11 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 已通过本机 Pebble 验证 CNAME 跨区后根据 SOA 阴性响应中的权威记录发现委托子区。HTTPS API 模拟确认只查询和使用该子区，重启清理不重新发现区域，旧显式日志仍可恢复。
 - 本机 Pebble 通过 IPv4 与 IPv6 的真实 HTTP-01、短寿命 IP 证书签发、数值地址 HTTPS 握手及重启复用，同时覆盖 DNS 名与 IPv4 混合订单。公开 CA 的公网地址签发分开验收。
 - 本机 Pebble 验证本地部署拒绝覆盖外部 current 文件、仍可使用已签发证书、重启部署、修复缺失链文件、私钥 0600 及续期发布新一代。
+
+### WP-23 后端、负载均衡、健康检查与超时（大部分交付）
+
+- 2026-11-27 交付三个增量（101fd2a、a830ed0、290a73d）：`web/upstream/` 模块（地址行 weight/backup、候选主→备→全主回退、被动摘除 3 次/30 秒、探测驱动恢复、加权轮询/随机/ip_hash/least_conn、至多 3 后端仅建连失败重试、主动检查参数对齐 1–3600/1–60/1–20/1–20 与 PROXY 协议强制 TCP 降级）与 `web/proxy/` 特性模块（后端/访客超时、头增删改、正则重写与重定向、CORS、身份头、按用户分流），全部纯逻辑 + 单元/性质测试。
+- 管线接线：`Site` 新增 WP-23 全部字段，`ProxyRoute.options`（Box 聚合，TOML 路径 `Box::default()` 保持旧行为逐字节不变）承载按站点编译的身份头/重写/头改写/CORS/站点级响应头超时；`forward()` 先剥身份头（连字符/下划线双拼写防伪造），重写在转发前执行（重定向直答、内部重写保留 query），CORS 预检本地应答，Host 与转发头开关生效。9 组字段校验进入 `web/validate`。
+- 与旧实现的默认值差异（迁移时需提示，建议采用新默认值）：现有连接超时 2 秒/响应头 30 秒（设置级）对应新模型的连接 10 秒/握手 10 秒/响应头不限（站点级可覆盖）；转发头当前为始终写（新模型 `forwardedHeaders` 可关）；`Host` 当前恒为目标地址（新模型 `useTargetHost=false` 保留访客 Host）。
+- 测试：31 + 29 + 24 个新测试；fg-gateway 全量 188 lib + 3 集成；根 gateway e2e 68 通过（9 忽略）；Clippy 0 警告。
+- 尚余（3b 增量）：建连失败重试接入 `forward()`（需小体积精确长度请求体缓冲重放；hyper `Incoming` 被 client 消费后不可重放，`Attempt`/`body_read` 标记逻辑已单测就绪）；四种负载策略替换 legacy 池选择（`Pool::from_site` 编译入口已就绪，尚未被 bridge 消费）；per-site TLS 客户端（`insecureSkipVerify`/`upstreamSniFromHost` 需按站点客户端，`disableKeepAlives` 需空闲池归零客户端组）；`sendProxyProtocol` 发送；访客读写空闲超时进服务循环；身份头写入（等 WP-24 Visitor）与按用户分流分派进 `dispatch`。
