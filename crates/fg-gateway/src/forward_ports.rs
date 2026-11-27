@@ -61,3 +61,12 @@ mod tests {
         Ok(())
     }
 }
+
+/// Counts the expanded ports of a bare port list (no host) using the
+/// shared parser; used by validation before any socket exists.
+pub(crate) fn listen_count(ports: &str) -> Result<usize, String> {
+    match fg_net::ports::parse_ports(ports) {
+        Ok(list) => Ok(list.ports.len()),
+        Err(error) => Err(error.to_string()),
+    }
+}
