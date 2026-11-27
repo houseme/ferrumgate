@@ -1084,7 +1084,9 @@ dependencies = [
  "fg-auth",
  "fg-config",
  "fg-core",
+ "fg-cron",
  "fg-gateway",
+ "fg-guard",
  "fg-i18n",
  "fg-logging",
  "fg-net",
@@ -1226,6 +1228,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg-cron"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fg-config",
+ "fg-core",
+ "fg-logging",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "rcgen",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "fg-dns"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fg-dns",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fg-gateway"
 version = "0.1.0"
 dependencies = [
@@ -1266,6 +1310,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg-guard"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fg-config",
+ "fg-core",
+ "fg-logging",
+ "fg-net",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fg-i18n"
 version = "0.1.0"
 dependencies = [
@@ -1300,6 +1365,7 @@ dependencies = [
  "arc-swap",
  "ipnet",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4853,7 +4919,11 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde",
  "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
