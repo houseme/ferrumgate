@@ -1250,6 +1250,7 @@ dependencies = [
  "mime_guess",
  "pem",
  "percent-encoding",
+ "regex",
  "ring",
  "rustls",
  "serde",

@@ -7,11 +7,14 @@ pub(crate) mod legacy;
 pub(crate) use legacy::Web;
 
 pub mod domains;
+pub mod identity;
 pub mod model;
+pub mod proxy;
 pub mod routes;
 pub mod site;
 pub mod table;
 pub mod upstream;
+pub mod userroute;
 pub mod validate;
 
 // WP-20 step 5: bridges the model onto the legacy serving pipeline.
