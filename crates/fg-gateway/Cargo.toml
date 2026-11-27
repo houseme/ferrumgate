@@ -15,6 +15,7 @@ cap-std.workspace = true
 fg-core.workspace = true
 fg-net.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 hickory-resolver.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

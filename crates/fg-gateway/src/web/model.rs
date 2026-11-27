@@ -73,6 +73,8 @@ pub struct Site {
     pub site_type: String,
     /// Reverse-proxy fields (site_type = proxy).
     pub targets: Vec<String>,
+    /// Load policy: "" | round_robin | random | ip_hash | least_conn.
+    pub lb_policy: String,
     pub upstream_h2c: bool,
     /// Redirect fields (site_type = redirect).
     pub redirect_to: String,
@@ -342,6 +344,7 @@ mod tests {
                         domains: vec!["api.example.com".into()],
                         site_type: "proxy".into(),
                         targets: vec!["127.0.0.1:8080".into()],
+                        lb_policy: String::new(),
                         upstream_h2c: true,
                         redirect_to: String::new(),
                         redirect_code: 0,

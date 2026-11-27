@@ -1237,6 +1237,7 @@ dependencies = [
  "fg-core",
  "fg-net",
  "futures-util",
+ "getrandom 0.4.3",
  "hickory-resolver",
  "http-body-util",
  "hyper",

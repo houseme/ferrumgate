@@ -11,6 +11,7 @@ pub mod model;
 pub mod routes;
 pub mod site;
 pub mod table;
+pub mod upstream;
 pub mod validate;
 
 // WP-20 step 5: bridges the model onto the legacy serving pipeline.
