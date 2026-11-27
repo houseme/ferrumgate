@@ -4,6 +4,7 @@
 //! client-address resolution behind trusted proxies and the registry of
 //! vouched (trusted) sources.
 
+pub mod banlist;
 pub mod client_addr;
 pub mod fwopen;
 pub mod openports;

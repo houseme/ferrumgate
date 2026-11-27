@@ -1,0 +1,434 @@
+//! The guard module's service around the shared ban table (WP-50):
+//! opening and applying `guard.json` policy knobs, the automatic and
+//! manual ban entries, event publication on `guard.banned`, and the query
+//! surface other modules use (they receive [`GuardService::table`], the
+//! `fg_net::banlist::BanTable`, through their `Deps` — the same shared
+//! type the web service uses, per WP-50 §1).
+
+use std::{
+    net::IpAddr,
+    sync::{Arc, Mutex, RwLock},
+    time::{Duration, SystemTime},
+};
+
+use anyhow::{Context, Result};
+use fg_config::ConfigStore;
+use fg_core::events::{Event, EventBus, Kind};
+use fg_net::banlist::{
+    BanCounts, BanFilter, BanHooks, BanOutcome, BanPolicy, BanStats, BanTable, Entry, Source,
+    system_clock,
+};
+use ipnet::IpNet;
+
+use crate::model::Settings;
+use crate::validate;
+
+/// Where the bans file lives inside the config store
+/// (`<config dir>/guard/bans.json`, conventions §3.2).
+pub const DATA_DIR: &str = "guard";
+pub const BANS_FILE: &str = "bans.json";
+
+/// Why a service-level ban request failed. Display strings are stable
+/// message fragments the admin API turns into `{"error": …}` bodies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuardBanError {
+    InvalidTarget,
+    InvalidDuration,
+    Loopback,
+    AlreadyPermanent,
+    Full,
+}
+
+impl std::fmt::Display for GuardBanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::InvalidTarget => "target must be an IP address or CIDR network",
+            Self::InvalidDuration => "seconds must be -1 (permanent) or between 3600 and 2592000",
+            Self::Loopback => "target covers the loopback address",
+            Self::AlreadyPermanent => "already permanently banned",
+            Self::Full => "ban table is full",
+        };
+        f.write_str(text)
+    }
+}
+
+impl std::error::Error for GuardBanError {}
+
+impl From<fg_net::banlist::BanError> for GuardBanError {
+    fn from(error: fg_net::banlist::BanError) -> Self {
+        match error {
+            fg_net::banlist::BanError::Loopback => Self::Loopback,
+            fg_net::banlist::BanError::AlreadyPermanent => Self::AlreadyPermanent,
+            fg_net::banlist::BanError::Full => Self::Full,
+            fg_net::banlist::BanError::InvalidDuration => Self::InvalidDuration,
+        }
+    }
+}
+
+/// The module state shared between the runtime, the routes and other
+/// modules.
+pub struct GuardService {
+    table: Arc<BanTable>,
+    settings: RwLock<Settings>,
+    /// Local IPv6 networks, registered by the assembly layer; merged into
+    /// the whitelist on every settings application.
+    local_v6: Mutex<Vec<IpNet>>,
+    /// The module's event bus; `guard.banned` publications go through it
+    /// via the table hook, and future publishers (WP-51 firewall sync,
+    /// jails) reuse it.
+    events: EventBus,
+}
+
+impl GuardService {
+    /// The module's event bus, for publishers layered on top (WP-51+).
+    pub fn events(&self) -> EventBus {
+        self.events.clone()
+    }
+}
+
+impl GuardService {
+    /// Opens the bans file under the config store and applies the given
+    /// (already normalized) settings. The `guard.banned` event hook is
+    /// wired to the module's event bus.
+    pub fn open(store: &ConfigStore, settings: &Settings, events: EventBus) -> Result<Arc<Self>> {
+        let path = store.data_dir(DATA_DIR)?.join(BANS_FILE);
+        let hooks = BanHooks {
+            banned: Some(Arc::new({
+                let events = events.clone();
+                move |entry: &fg_net::banlist::Entry| {
+                    publish_banned(&events, entry);
+                }
+            })),
+            load_warning: Some(Arc::new(|warning: &str| {
+                tracing::warn!(module = "guard", "{warning}");
+            })),
+        };
+        let table = BanTable::open(
+            &path,
+            policy_from_settings(settings, &[]),
+            hooks,
+            system_clock(),
+        )
+        .with_context(|| format!("opening the bans file at {}", path.display()))?;
+        Ok(Arc::new(Self {
+            table,
+            settings: RwLock::new(settings.clone()),
+            local_v6: Mutex::new(Vec::new()),
+            events,
+        }))
+    }
+
+    /// An in-memory service (tests, standalone consumers).
+    pub fn open_memory(settings: &Settings, events: EventBus) -> Arc<Self> {
+        let hooks = BanHooks {
+            banned: Some(Arc::new({
+                let events = events.clone();
+                move |entry: &fg_net::banlist::Entry| {
+                    publish_banned(&events, entry);
+                }
+            })),
+            load_warning: None,
+        };
+        Arc::new(Self {
+            table: BanTable::open_memory(
+                policy_from_settings(settings, &[]),
+                hooks,
+                system_clock(),
+            ),
+            settings: RwLock::new(settings.clone()),
+            local_v6: Mutex::new(Vec::new()),
+            events,
+        })
+    }
+
+    /// The normalized settings currently in force.
+    pub fn settings(&self) -> Settings {
+        self.settings.read().expect("guard settings").clone()
+    }
+
+    /// Applies new (already normalized) settings to the table policy; the
+    /// whitelist combines `ignoreList` with the registered local IPv6
+    /// networks.
+    pub fn apply_settings(&self, settings: &Settings) {
+        *self.settings.write().expect("guard settings") = settings.clone();
+        let local = self.local_v6.lock().expect("guard local nets").clone();
+        let mut policy = policy_from_settings(settings, &local);
+        policy.clamp_max_duration();
+        self.table.set_policy(policy);
+    }
+
+    /// Registers the local IPv6 networks (each widened to its /64); the
+    /// assembly layer calls this once it knows the interfaces.
+    pub fn set_local_networks(&self, networks: Vec<IpNet>) {
+        *self.local_v6.lock().expect("guard local nets") = networks;
+        let settings = self.settings();
+        self.apply_settings(&settings);
+    }
+
+    /// Automatic ban entry (jails, decoy ports, scan detection, web
+    /// service auth failures — WP-52/53 call this with their own source
+    /// and reason).
+    pub fn ban_auto(
+        &self,
+        ip: IpAddr,
+        duration: Option<Duration>,
+        permanent: bool,
+        source: Source,
+        reason: String,
+        now: SystemTime,
+    ) -> BanOutcome {
+        self.table
+            .ban_auto(ip, duration, permanent, source, reason, now)
+    }
+
+    /// Manual ban from the admin API: `target` is an IP or CIDR,
+    /// `seconds` is `-1` for permanent or 1..=720 hours.
+    pub fn ban_manual(&self, target: &str, seconds: i64) -> Result<Entry, GuardBanError> {
+        let cidr = parse_target(target).ok_or(GuardBanError::InvalidTarget)?;
+        if !validate::valid_manual_seconds(seconds) {
+            return Err(GuardBanError::InvalidDuration);
+        }
+        let permanent = seconds == validate::MANUAL_PERMANENT;
+        let duration = if permanent {
+            None
+        } else {
+            Some(Duration::from_secs(seconds as u64))
+        };
+        self.table
+            .ban_manual(cidr, duration, permanent, SystemTime::now())
+            .map_err(GuardBanError::from)
+    }
+
+    /// Unban by IP or CIDR; returns how many entries went away.
+    pub fn unban(&self, target: &str) -> Result<usize, GuardBanError> {
+        let cidr = parse_target(target).ok_or(GuardBanError::InvalidTarget)?;
+        Ok(self.table.unban(&cidr, SystemTime::now()))
+    }
+
+    /// Filtered, paged listing for the admin API.
+    pub fn list(&self, filter: &BanFilter) -> Vec<Entry> {
+        self.table.list(SystemTime::now(), filter)
+    }
+
+    /// Number of entries matching the filter, ignoring pagination.
+    pub fn count(&self, filter: &BanFilter) -> usize {
+        self.table.count(SystemTime::now(), filter)
+    }
+
+    /// Lock-free hot path query for other modules (web service
+    /// accessCheck, L4 source rules, knock packet handling).
+    pub fn is_banned(&self, ip: IpAddr) -> bool {
+        self.table.is_banned(ip, SystemTime::now())
+    }
+
+    /// Called by the admin login flow (WP-12) after a successful login.
+    pub fn trust_login(&self, ip: IpAddr) {
+        self.table.trust_login(ip, SystemTime::now());
+    }
+
+    pub fn counts(&self) -> BanCounts {
+        self.table.counts(SystemTime::now())
+    }
+
+    pub fn stats(&self) -> BanStats {
+        self.table.stats()
+    }
+
+    /// The table limit (mirrors the policy; status pages).
+    pub fn limit(&self) -> usize {
+        fg_net::banlist::LIMIT
+    }
+
+    /// The shared table itself: hand this to other modules via their
+    /// `Deps` — every consumer reads the same entries lock-free.
+    pub fn table(&self) -> Arc<BanTable> {
+        Arc::clone(&self.table)
+    }
+
+    /// Writes pending changes now (shutdown path, tests).
+    pub fn flush(&self) -> Result<()> {
+        self.table.flush().context("flushing the bans file")
+    }
+}
+
+/// The policy implied by module settings. The whitelist is the built-in
+/// internal ranges plus the user's `ignoreList` (`local_v6` joins on
+/// apply); the escalation ceiling is clamped to its documented range.
+fn policy_from_settings(settings: &Settings, local_v6: &[IpNet]) -> BanPolicy {
+    let mut whitelist = fg_net::banlist::default_whitelist();
+    whitelist.extend(whitelist_from_settings(settings));
+    whitelist.extend(local_v6.iter().copied());
+    BanPolicy {
+        limit: fg_net::banlist::LIMIT,
+        default_duration: Duration::from_secs(u64::from(settings.ban_seconds.max(1))),
+        increment: settings.increment,
+        max_duration: Duration::from_secs(u64::from(settings.max_ban_seconds.max(1))),
+        ignore_private: settings.ignore_private,
+        whitelist,
+        save_delay: fg_net::banlist::SAVE_DELAY,
+    }
+}
+
+/// The user-provided whitelist; single IPv6 entries widen to their /64 in
+/// the table.
+fn whitelist_from_settings(settings: &Settings) -> Vec<IpNet> {
+    settings
+        .ignore_list
+        .iter()
+        .filter_map(|entry| validate::parse_net(entry))
+        .collect()
+}
+
+/// Parses a manual/unban target: an IP (normalized like the table does) or
+/// a CIDR.
+fn parse_target(target: &str) -> Option<IpNet> {
+    let target = target.trim();
+    if let Ok(net) = target.parse::<IpNet>() {
+        return Some(net);
+    }
+    let ip: IpAddr = target.parse().ok()?;
+    Some(match ip {
+        IpAddr::V4(v4) => IpNet::new(IpAddr::V4(v4), 32).ok()?,
+        IpAddr::V6(v6) => IpNet::new(IpAddr::V6(v6), 128).ok()?,
+    })
+}
+
+/// Publishes one `guard.banned` event for a landed ban; skipped entirely
+/// when nobody is subscribed or the queue is full (`publish_with`).
+fn publish_banned(events: &EventBus, entry: &Entry) {
+    events.publish_with(|| {
+        let mut event = Event::new(Kind::GuardBanned, "guard");
+        event.args = vec![
+            ("key", entry.key.to_string()),
+            ("source", entry.source.to_tag()),
+            ("reason", entry.reason.clone()),
+        ];
+        event.fields = vec![("count", entry.count.to_string())];
+        event
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Settings;
+
+    /// `EventBus::new` needs a Tokio runtime handle, so every test that
+    /// builds a service runs inside `#[tokio::test]`.
+    fn service() -> Arc<GuardService> {
+        GuardService::open_memory(&Settings::default(), EventBus::default())
+    }
+
+    #[tokio::test]
+    async fn ban_manual_validates_target_and_seconds() {
+        let guard = service();
+        let entry = guard
+            .ban_manual("198.51.100.7", validate::MANUAL_DEFAULT_SECONDS)
+            .unwrap();
+        assert_eq!(entry.key.to_string(), "198.51.100.7");
+        assert!(guard.is_banned("198.51.100.7".parse().unwrap()));
+        assert_eq!(
+            guard.ban_manual("bogus", validate::MANUAL_DEFAULT_SECONDS),
+            Err(GuardBanError::InvalidTarget)
+        );
+        assert_eq!(
+            guard.ban_manual("127.0.0.1", validate::MANUAL_DEFAULT_SECONDS),
+            Err(GuardBanError::Loopback)
+        );
+        assert_eq!(
+            guard.ban_manual("198.51.100.9", 60),
+            Err(GuardBanError::InvalidDuration)
+        );
+        assert_eq!(
+            guard
+                .ban_manual("198.51.100.9", validate::MANUAL_PERMANENT)
+                .unwrap()
+                .until,
+            None
+        );
+        assert_eq!(guard.unban("198.51.100.0/24").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn apply_settings_updates_policy() {
+        let guard = service();
+        let settings = validate::normalize(crate::model::FileConfig {
+            settings: Settings {
+                ban_seconds: 60,
+                max_ban_seconds: 0,
+                ..Settings::default()
+            },
+        })
+        .settings;
+        guard.apply_settings(&settings);
+        let now = SystemTime::now();
+        let outcome = guard.ban_auto(
+            "203.0.113.4".parse().unwrap(),
+            None,
+            false,
+            Source::Scan,
+            "r".to_owned(),
+            now,
+        );
+        let BanOutcome::Banned { entry, .. } = outcome else {
+            panic!("expected Banned, got {outcome:?}");
+        };
+        let until = entry.until.expect("temporary ban");
+        assert_eq!(
+            until.duration_since(now).unwrap().as_secs(),
+            60,
+            "the configured default duration applies"
+        );
+    }
+
+    #[tokio::test]
+    async fn whitelist_from_settings_and_local_networks_merge() {
+        let guard = service();
+        let settings = validate::normalize(crate::model::FileConfig {
+            settings: Settings {
+                ignore_list: vec!["9.9.9.0/24".to_owned()],
+                ..Settings::default()
+            },
+        })
+        .settings;
+        guard.apply_settings(&settings);
+        guard.set_local_networks(vec![parse_target("2001:db8:aa::/64").unwrap()]);
+        // Whitelisted user network.
+        assert_eq!(
+            guard.ban_auto(
+                "9.9.9.9".parse().unwrap(),
+                None,
+                false,
+                Source::Trap,
+                "r".to_owned(),
+                SystemTime::now(),
+            ),
+            BanOutcome::Rejected(fg_net::banlist::RejectReason::Whitelisted)
+        );
+        // Local IPv6 /64 is protected too.
+        assert_eq!(
+            guard.ban_auto(
+                "2001:db8:aa::1".parse().unwrap(),
+                None,
+                false,
+                Source::Scan,
+                "r".to_owned(),
+                SystemTime::now(),
+            ),
+            BanOutcome::Rejected(fg_net::banlist::RejectReason::Whitelisted)
+        );
+        // Applying settings again keeps the local networks.
+        guard.apply_settings(&settings);
+        assert_eq!(
+            guard.ban_auto(
+                "2001:db8:aa::2".parse().unwrap(),
+                None,
+                false,
+                Source::Trap,
+                "r".to_owned(),
+                SystemTime::now(),
+            ),
+            BanOutcome::Rejected(fg_net::banlist::RejectReason::Whitelisted)
+        );
+    }
+}
