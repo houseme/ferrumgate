@@ -5,6 +5,7 @@
 //! vouched (trusted) sources.
 
 pub mod client_addr;
+pub mod fwopen;
 pub mod openports;
 pub mod ports;
 pub mod quota;
