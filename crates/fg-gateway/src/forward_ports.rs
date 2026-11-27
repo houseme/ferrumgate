@@ -37,6 +37,15 @@ pub(crate) fn targets(address: &str, listener_count: usize) -> Result<Vec<Socket
     Ok(targets)
 }
 
+/// Counts the expanded ports of a bare port list (no host) using the
+/// shared parser; used by validation before any socket exists.
+pub(crate) fn listen_count(ports: &str) -> Result<usize, String> {
+    match fg_net::ports::parse_ports(ports) {
+        Ok(list) => Ok(list.ports.len()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,14 +68,5 @@ mod tests {
             assert!(parse(invalid).is_err(), "{invalid}");
         }
         Ok(())
-    }
-}
-
-/// Counts the expanded ports of a bare port list (no host) using the
-/// shared parser; used by validation before any socket exists.
-pub(crate) fn listen_count(ports: &str) -> Result<usize, String> {
-    match fg_net::ports::parse_ports(ports) {
-        Ok(list) => Ok(list.ports.len()),
-        Err(error) => Err(error.to_string()),
     }
 }

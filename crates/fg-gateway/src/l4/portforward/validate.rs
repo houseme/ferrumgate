@@ -67,7 +67,7 @@ pub fn validate(config: &FileConfig) -> Vec<Problem> {
     let mut problems = Vec::new();
     validate_settings(&config.settings, &mut problems);
     let default_first_data = config.settings.first_data_timeout;
-    for (index, rule) in config.rules.iter().enumerate() {
+    for rule in config.rules.iter() {
         validate_rule(rule, default_first_data, &mut problems);
     }
     // Duplicate keys are a structural problem: the collection API keys by
@@ -75,10 +75,7 @@ pub fn validate(config: &FileConfig) -> Vec<Problem> {
     let mut keys = std::collections::BTreeSet::new();
     for rule in &config.rules {
         if !rule.key.is_empty() && !keys.insert(rule.key.as_str()) {
-            problems.push(Problem::new(
-                "key",
-                format!("重复的规则 key {}", rule.key),
-            ));
+            problems.push(Problem::new("key", format!("重复的规则 key {}", rule.key)));
         }
     }
     problems
@@ -255,8 +252,14 @@ mod tests {
         config.rules.push(Rule::default());
         let problems = validate(&config);
         let fields: Vec<_> = problems.iter().map(|p| p.field.as_str()).collect();
-        assert!(fields.iter().any(|f| f.ends_with("protocols")), "{fields:?}");
-        assert!(fields.iter().any(|f| f.ends_with("listenPorts")), "{fields:?}");
+        assert!(
+            fields.iter().any(|f| f.ends_with("protocols")),
+            "{fields:?}"
+        );
+        assert!(
+            fields.iter().any(|f| f.ends_with("listenPorts")),
+            "{fields:?}"
+        );
         assert!(
             fields.iter().any(|f| f.ends_with("targetAddresses")),
             "{fields:?}"
