@@ -8,6 +8,37 @@ publish = false
 
 [features]
 schema = ["dep:schemars"]
+# Forwarded from the root crate's generated `mod-*` / `lang-*` features
+# (WP-90): `features.rs` derives the build constants from these. One
+# switch per optional module, whether or not the module crate exists yet,
+# so the cfg names are always declared.
+mod-guard = []
+mod-cron = []
+mod-protoroute = []
+mod-ddns = []
+mod-stun = []
+mod-tailscale = []
+mod-netbird = []
+mod-easytier = []
+mod-frp = []
+mod-cloudflared = []
+mod-waf = []
+mod-knock = []
+mod-wol = []
+mod-webterminal = []
+mod-docker = []
+mod-webdav = []
+mod-ftp = []
+mod-smb = []
+mod-filebrowser = []
+mod-storage = []
+mod-notify = []
+mod-perf = []
+mod-nettools = []
+mod-backup = []
+lang-all = []
+lang-cjk-en = []
+lang-zh-cn = []
 
 [dependencies]
 anyhow.workspace = true

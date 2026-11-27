@@ -4,6 +4,7 @@ pub mod access_path;
 pub mod apply_hold;
 pub mod check;
 pub mod events;
+pub mod features;
 pub mod fsperm;
 pub mod metrics;
 pub mod module;

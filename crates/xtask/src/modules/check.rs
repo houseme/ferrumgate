@@ -148,7 +148,10 @@ mod tests {
         let content = std::fs::read_to_string(&cargo).unwrap();
         std::fs::write(
             &cargo,
-            content.replace("lang-all = []", "lang-all = [\"stale\"]"),
+            content.replace(
+                "lang-all = [\"fg-core/lang-all\"]",
+                "lang-all = [\"fg-core/lang-all\", \"stale\"]",
+            ),
         )
         .unwrap();
         let report = check(&root).unwrap();
