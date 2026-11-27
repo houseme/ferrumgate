@@ -9,6 +9,7 @@ pub(crate) use legacy::Web;
 pub mod domains;
 pub mod model;
 pub mod routes;
+pub mod site;
 pub mod table;
 pub mod validate;
 

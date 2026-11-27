@@ -305,3 +305,101 @@ fn requested_range(headers: &HeaderMap, size: u64) -> Result<Option<(u64, u64)>,
     }
     Ok(Some((start, end)))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use tempfile::tempdir;
+
+    /// Compiles a `StaticFiles` rooted at `root` with a throwaway config
+    /// directory so the root/config separation check passes.
+    async fn compiled(root: &Path, clean_urls: bool, not_found: Option<&str>) -> StaticFiles {
+        let config = tempdir().expect("create temp config dir");
+        StaticFiles::compile(
+            RawStatic {
+                root: root.to_path_buf(),
+                clean_urls,
+                not_found: not_found.map(PathBuf::from),
+            },
+            config.path(),
+            &[],
+        )
+        .await
+        .expect("compile static files")
+    }
+
+    fn write(root: &Path, relative: &str, contents: &str) {
+        let target = root.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).expect("create parent directory");
+        }
+        std::fs::write(target, contents).expect("write test file");
+    }
+
+    async fn body_of(reply: Response<LocalBody>) -> Bytes {
+        BodyExt::collect(reply.into_body())
+            .await
+            .expect("collect body")
+            .to_bytes()
+    }
+
+    #[tokio::test]
+    async fn clean_urls_fallback_chain() {
+        let site = tempdir().expect("create temp site root");
+        write(site.path(), "about.html", "about via html");
+        write(site.path(), "about/index.html", "about via index");
+        let files = compiled(site.path(), true, None).await;
+        // `/about` itself misses; `$uri.html` must win over `$uri/index.html`.
+        let reply = files
+            .serve(&Method::GET, "/about", &HeaderMap::new())
+            .await
+            .expect("serve clean url");
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(body_of(reply).await, Bytes::from_static(b"about via html"));
+    }
+
+    #[tokio::test]
+    async fn clean_urls_index_fallback() {
+        let site = tempdir().expect("create temp site root");
+        write(site.path(), "about/index.html", "about via index");
+        let files = compiled(site.path(), true, None).await;
+        let reply = files
+            .serve(&Method::GET, "/about", &HeaderMap::new())
+            .await
+            .expect("serve clean url index fallback");
+        assert_eq!(reply.status(), StatusCode::OK);
+        assert_eq!(body_of(reply).await, Bytes::from_static(b"about via index"));
+    }
+
+    #[tokio::test]
+    async fn not_found_page_served_when_all_miss() {
+        let site = tempdir().expect("create temp site root");
+        write(site.path(), "404.html", "custom 404 page");
+        let files = compiled(site.path(), true, Some("404.html")).await;
+        let reply = files
+            .serve(&Method::GET, "/missing", &HeaderMap::new())
+            .await
+            .expect("serve not-found page");
+        assert_eq!(reply.status(), StatusCode::NOT_FOUND);
+        assert_eq!(reply.headers().get(CONTENT_TYPE).unwrap(), "text/html");
+        assert_eq!(body_of(reply).await, Bytes::from_static(b"custom 404 page"));
+    }
+
+    #[tokio::test]
+    async fn no_clean_urls_no_fallback() {
+        let site = tempdir().expect("create temp site root");
+        write(site.path(), "about.html", "about via html");
+        let files = compiled(site.path(), false, None).await;
+        // With clean URLs disabled `/about` must not consult `about.html`.
+        let missed = files.serve(&Method::GET, "/about", &HeaderMap::new()).await;
+        assert_eq!(missed.unwrap_err(), StatusCode::NOT_FOUND);
+        // The exact file still serves directly.
+        let direct = files
+            .serve(&Method::GET, "/about.html", &HeaderMap::new())
+            .await
+            .expect("serve exact path");
+        assert_eq!(direct.status(), StatusCode::OK);
+        assert_eq!(body_of(direct).await, Bytes::from_static(b"about via html"));
+    }
+}
