@@ -1271,6 +1271,8 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 
 随后续增量：数据面 serve 循环接入 l4 Module（bind/accept/来源判定/拨号/管道）、WP-39 同批的 TOML 迁移映射与既有 tcp/udp/metrics 测试改生成新模型、Lucky 导入的路由接线。
 
+数据面桥接与测试迁移（444 项工作区测试）：config::load 读取 TOML 旁的 portforward.json——parse FileConfig → 校验（问题以字段:原因清单失败）→ compile → 每条 CompiledRule 经其 serde 定义桥接为既有 TcpForward/UdpForward（监听主机+逗号端口表、逐监听目标行、上限与来源列表——既有 TOML 校验原样适用），追加到 TOML 转发之后并共用 MAX_LISTENERS/重复监听/UDP 会话数检查；serve、check 与 SIGHUP 重载同路径生效（重载仍拒绝监听/上限变更、放行来源策略更新）。tests/gateway/common.rs 增设 forwarding_json 助手（JSON 模型拒绝端口 0，:0 监听解析为预留的具体端口），tcp/udp/metrics 三套测试改由 portforward.json 构建转发、断言逐字节不变——唯二强制适配是秒级时间粒度（500ms → firstDataTimeout:1）与无 connection_lifetime 字段时主动 drop 客户端释放计数器；非法配置用例映射为 JSON 模型等价物（firstDataTimeout:4000、重复 key、目标端口命中自身监听、65 监听器超 64 上限）。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。
