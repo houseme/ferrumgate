@@ -1,6 +1,7 @@
 //! System-level routes: status, build information, module states and the
 //! public address lookup.
 
+mod diagnostics;
 mod info;
 pub mod metrics;
 pub mod onboarding;
@@ -68,6 +69,7 @@ impl SystemRoutes {
         let router = storage::mount(router);
         let router = onboarding::mount(router, onboarding_store.clone());
         let router = metrics::mount(router, self.started_at);
+        let router = diagnostics::mount(router, source.clone());
         let router = crate::changeset::mount(
             router,
             Arc::new(crate::changeset::ChangesetState {
