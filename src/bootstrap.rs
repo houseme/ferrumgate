@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use axum::{
+    Router,
     extract::{ConnectInfo, Request, State},
     http::{HeaderName, Method, StatusCode, header},
     middleware::{self, Next},
@@ -79,6 +80,13 @@ pub struct AdminOptions {
     /// Run in read-only demo mode for visitors.
     #[arg(long)]
     demo: bool,
+    /// Also serve the management router over this Unix socket for the fnOS
+    /// unified gateway.
+    #[arg(long, requires = "admin_dir")]
+    gateway_socket: Option<PathBuf>,
+    /// External path prefix the unified gateway strips before forwarding.
+    #[arg(long, default_value = "", requires = "gateway_socket")]
+    gateway_prefix: String,
 }
 
 impl AdminOptions {
@@ -352,9 +360,9 @@ impl ManagementService {
             .with_security_status(accounts.clone(), exposure)
             .with_token_management(tokens.clone())
             .with_managed_third_login(third_login.clone())
-            .with_settings(settings, accounts.clone())
+            .with_settings(settings.clone(), accounts.clone())
             .route(
-                axum::http::Method::POST,
+                Method::POST,
                 "/api/system/restart",
                 "Restart the service",
                 move || {
@@ -374,10 +382,40 @@ impl ManagementService {
         let hold = Arc::new(fg_core::apply_hold::ApplyHold::new());
         let hops = Arc::new(fg_core::access_path::HopRegistry::default());
         let admin_listen = listener.local_addr()?;
+        // fnOS unified-gateway prefix, normalized once and shared by the
+        // fnOS login route and the gateway middlewares below.
+        let gateway_prefix = match options.gateway_socket.as_ref() {
+            Some(_) => Some(
+                fg_admin::gateway::normalize_prefix(&options.gateway_prefix)
+                    .context("gateway socket prefix is invalid")?,
+            ),
+            None => None,
+        };
         // Path headers are signed with a fresh per-process key.
         let mut key = [0u8; 32];
         getrandom::fill(&mut key).context("generate path signing key")?;
         let signing_key = Arc::new(key.to_vec());
+        // fnOS unified gateway: mount the trusted-gateway login while the
+        // routes are still open. The route refuses requests without the
+        // gateway marker, so the TCP port is unaffected. Cookies carry the
+        // gateway prefix — the path the browser actually sees — and are
+        // Secure only for an HTTPS external origin; `gateway_sso` reads the
+        // live setting on every login, so toggling gatewaySSO needs no
+        // restart.
+        let router = match gateway_prefix.as_ref() {
+            Some(prefix) => {
+                let secure = options
+                    .admin_origin
+                    .as_ref()
+                    .is_some_and(|url| url.scheme() == "https");
+                let cookies = fg_admin::SessionCookies::new(prefix, secure)?;
+                let settings = Arc::clone(&settings);
+                let gateway_sso: Arc<dyn Fn() -> bool + Send + Sync> =
+                    Arc::new(move || settings.snapshot().gateway_sso);
+                fg_admin::mount_fnos_login(router, accounts.clone(), cookies, gateway_sso)
+            }
+            None => router,
+        };
         let admin = fg_admin::SystemRoutes {
             config_dir: directory.clone(),
             modules,
@@ -418,17 +456,14 @@ impl ManagementService {
         // Sanitize again at startup, independently of the settings API: a
         // page edited out-of-band must never reach clients with active
         // content. On any removal the page is discarded entirely.
-        let deny_page = match sanitize_deny_page(&started.deny_page) {
-            Ok(clean) => clean,
-            Err(removals) => {
-                tracing::warn!(
-                    target: "fgate::bootstrap",
-                    removals = ?removals,
-                    "custom deny page contained removable content; serving an empty deny page"
-                );
-                String::new()
-            }
-        };
+        let deny_page = sanitize_deny_page(&started.deny_page).unwrap_or_else(|removals| {
+            tracing::warn!(
+                target: "fgate::bootstrap",
+                removals = ?removals,
+                "custom deny page contained removable content; serving an empty deny page"
+            );
+            String::new()
+        });
         let access_config = AccessConfig {
             safe_path,
             lan_only: started.lan_only,
@@ -479,10 +514,9 @@ impl ManagementService {
         // everything because it is the access gate; client-address
         // resolution runs one step inside it so the guard reads the
         // resolved address.
-        // TODO(WP-14): accept-time close/drop requires a custom serve loop;
-        // Close/Drop currently render at the HTTP layer (access::render).
         let mut serving = admin
             .router
+            .clone()
             .layer(middleware::from_fn_with_state(
                 GuardConfig(access_config, marker_key),
                 fg_admin::access::guard,
@@ -494,18 +528,91 @@ impl ManagementService {
             // selection.
             serving = serving.layer(middleware::from_fn(force_https_layer));
         }
+        // fnOS unified-gateway socket (optional): the same router behind the
+        // gateway middlewares instead of the access gate. Gateway access
+        // skips the entry gate, LAN-only and force-HTTPS — the fnOS gateway
+        // has already authenticated the browser session and the origin guard
+        // takes their place. `restore` strips the path prefix, so it must
+        // wrap the whole router (a plain layer would run after route
+        // matching and never see the prefix); `origin_guard` runs one step
+        // inside it and `rewrite_response` rewrites exits (Location,
+        // Set-Cookie paths, the index page). Confirmed origins are loaded
+        // from the configuration store and shared with the guard.
+        let gateway_serving = match options.gateway_socket.as_ref() {
+            Some(path) => {
+                let normalized = gateway_prefix
+                    .clone()
+                    .context("gateway prefix missing with gateway socket set")?;
+                let confirmed = Arc::new(std::sync::Mutex::new(
+                    fg_admin::gateway::ConfirmedOrigins::load(&store),
+                ));
+                let guard_state = fg_admin::gateway::OriginGuardState {
+                    confirmed,
+                    store: store.clone(),
+                    accounts: accounts.clone(),
+                };
+                let inner = admin
+                    .router
+                    .clone()
+                    .layer(middleware::from_fn_with_state(
+                        Arc::new(normalized.clone()),
+                        fg_admin::gateway::rewrite_response,
+                    ))
+                    .layer(middleware::from_fn_with_state(
+                        guard_state,
+                        fg_admin::gateway::origin_guard,
+                    ));
+                let gateway =
+                    Router::new()
+                        .fallback_service(inner)
+                        .layer(middleware::from_fn_with_state(
+                            Arc::new(normalized.clone()),
+                            fg_admin::gateway::restore,
+                        ));
+                let socket = fg_admin::gateway::listen_unix(path)
+                    .await
+                    .with_context(|| format!("listen gateway socket {}", path.display()))?;
+                tracing::info!(
+                    socket = %path.display(),
+                    prefix = %normalized,
+                    "gateway socket ready"
+                );
+                Some((socket, gateway.into_make_service()))
+            }
+            None => None,
+        };
         tracing::info!(listen = %listener.local_addr()?, "management ready");
-        let mut drain = ready.drain;
+        let drain = ready.drain;
+        // The gateway socket needs no accept-time filtering: it is a
+        // root-group-only Unix socket behind an already-authenticated
+        // gateway. It drains with the same signal as the TCP loop.
+        let gateway_task = gateway_serving.map(|(socket, service)| {
+            let mut gateway_drain = drain.clone();
+            tokio::spawn(async move {
+                if let Err(error) = axum::serve(socket, service)
+                    .with_graceful_shutdown(async move {
+                        let _ = gateway_drain.wait_for(|&draining| draining).await;
+                    })
+                    .await
+                {
+                    tracing::warn!(%error, "gateway socket server stopped");
+                }
+            })
+        });
         let maintenance = poll_auth_maintenance(accounts.clone(), tokens, store, drain.clone());
-        let runtime = apply_settings_updates(updates, started, &accounts, logs, &directory);
-        let server = axum::serve(
+        let runtime = apply_settings_updates(updates, started.clone(), &accounts, logs, &directory);
+        // Accept-time access filtering happens in the custom loop below:
+        // Close/Drop deny modes never let a hostile connection reach the
+        // HTTP stack.
+        let server = crate::listen::serve_tcp(
             listener,
-            serving.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
-            let _ = drain.wait_for(|&draining| draining).await;
-        })
-        .into_future();
+            serving,
+            crate::listen::ServeOptions {
+                lan_only: started.lan_only,
+                deny_mode,
+            },
+            drain,
+        );
         tokio::pin!(server);
         let served = tokio::select! {
             result = &mut server => result.context("serve management"),
@@ -513,6 +620,9 @@ impl ManagementService {
             () = runtime => server.await.context("serve management after settings watcher closed"),
             () = third_login.run() => server.await.context("serve management after OAuth settings watcher closed"),
         };
+        if let Some(task) = gateway_task {
+            task.abort();
+        }
         audit.flush();
         served.map(|()| Outcome::Exit)
     }

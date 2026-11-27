@@ -29,7 +29,7 @@ use crate::{
 pub(super) const COOKIE_NAME: &str = "gately_token";
 const BUSY: ApiError = ApiError::new(StatusCode::TOO_MANY_REQUESTS, "login verification is busy");
 
-pub(super) struct SessionCookies {
+pub struct SessionCookies {
     attributes: String,
     expired: HeaderValue,
 }

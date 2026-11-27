@@ -2,6 +2,7 @@
 
 mod bootstrap;
 mod ctl;
+mod listen;
 mod logging;
 mod mcp;
 mod offline;

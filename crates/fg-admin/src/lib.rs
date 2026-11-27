@@ -34,6 +34,7 @@ pub use collection::{Collection, CollectionPaths, ItemChange, SECRET_MASK, keep_
 pub use fnos::mount_fnos_login;
 pub use http::{ApiError, ApiJson};
 pub use localize::{Localizer, RequestLanguage, Translation};
+pub use login::SessionCookies;
 pub use models::RouteModels;
 pub use oauth_routes::ManagedThirdLogin;
 pub use router::{Admin, ApiRouter, Principal, ReadOnly, StreamPolicy};
