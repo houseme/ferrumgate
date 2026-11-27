@@ -12,7 +12,7 @@ mod domains;
 mod forward_metrics;
 mod forward_ports;
 mod health;
-mod l4;
+pub mod l4;
 mod proxy;
 mod server;
 mod site;
