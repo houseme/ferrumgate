@@ -5,6 +5,10 @@
 //! vouched (trusted) sources.
 
 pub mod client_addr;
+pub mod openports;
+pub mod ports;
+pub mod quota;
+pub mod source_rule;
 pub mod trust_src;
 
 pub use client_addr::{ClientAddr, ProxyTrust};

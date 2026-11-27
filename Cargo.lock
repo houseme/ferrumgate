@@ -1293,6 +1293,7 @@ dependencies = [
 name = "fg-net"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "ipnet",
  "serde",
 ]
