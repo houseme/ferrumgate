@@ -34,9 +34,9 @@ static FILE_LOOKUPS: Semaphore = Semaphore::const_new(32);
 type FileChunks = MapOk<ReaderStream<Take<File>>, fn(Bytes) -> Frame<Bytes>>;
 pub(crate) type LocalBody = Either<Full<Bytes>, StreamBody<FileChunks>>;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawStatic {
+pub struct RawStatic {
     root: PathBuf,
     #[serde(default)]
     clean_urls: bool,

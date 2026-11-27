@@ -4,6 +4,7 @@ mod bootstrap;
 mod ctl;
 mod listen;
 mod logging;
+mod migrate_toml;
 mod mcp;
 mod offline;
 mod publicip;

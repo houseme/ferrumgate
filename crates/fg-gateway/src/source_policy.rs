@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 pub(crate) use fg_net::source_rule::compile_networks;
 
-#[derive(Default, Deserialize)]
+#[derive(Default, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct RawSourcePolicy {
     allow: Option<Vec<String>>,

@@ -57,7 +57,8 @@ const PROFILE_MARKER: &str = "# ferrumgate-acme-profile=";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawAcme {
+#[derive(serde::Serialize)]
+pub struct RawAcme {
     domains: Vec<String>,
     email: String,
     #[serde(default)]
@@ -76,7 +77,8 @@ pub(crate) struct RawAcme {
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct ExternalBinding {
+#[derive(serde::Serialize)]
+pub struct ExternalBinding {
     key_id: String,
     hmac_key_file: PathBuf,
 }

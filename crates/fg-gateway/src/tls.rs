@@ -27,9 +27,9 @@ use crate::{
     config::{canonical_host, read_file},
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CertificateFiles {
+pub struct CertificateFiles {
     host: String,
     pub(crate) cert_file: PathBuf,
     pub(crate) key_file: PathBuf,

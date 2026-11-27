@@ -28,8 +28,9 @@ use crate::{
 };
 
 #[derive(Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawForward {
+pub struct RawForward {
     listen: Option<String>,
     targets: Vec<String>,
     max_connections: usize,
@@ -42,9 +43,9 @@ pub(crate) struct RawForward {
     source_limit_exempt: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum ProxyProtocol {
+pub enum ProxyProtocol {
     V1,
     V2,
 }

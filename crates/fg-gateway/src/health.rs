@@ -19,7 +19,7 @@ use crate::{
 
 const MAX_CONCURRENT_PROBES: usize = 32;
 
-#[derive(Clone, Copy, Default, Deserialize)]
+#[derive(Clone, Copy, Default, Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 enum Mode {
     #[default]
@@ -28,8 +28,9 @@ enum Mode {
 }
 
 #[derive(Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawHealthCheck {
+pub struct RawHealthCheck {
     mode: Mode,
     path: Option<String>,
     interval_secs: u64,

@@ -16,8 +16,9 @@ use crate::{
 };
 
 #[derive(Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum RawResponse {
+pub enum RawResponse {
     Static(RawStatic),
     Redirect {
         target: String,

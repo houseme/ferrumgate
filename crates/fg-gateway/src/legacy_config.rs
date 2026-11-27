@@ -22,7 +22,7 @@ use crate::{
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawConfig {
+pub struct RawConfig {
     pub schema_version: u32,
     #[serde(default)]
     pub disabled_modules: Vec<String>,
@@ -45,7 +45,7 @@ pub(crate) struct RawConfig {
 /// report's `mapped` / `defaults_changed` / `dropped` tables).
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct Settings {
+pub struct Settings {
     pub listen: SocketAddr,
     pub metrics_listen: Option<SocketAddr>,
     pub http_enabled: bool,
@@ -79,7 +79,7 @@ impl Default for Settings {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawRoute {
+pub struct RawRoute {
     pub host: String,
     pub path_prefix: Option<String>,
     pub upstream: Option<String>,

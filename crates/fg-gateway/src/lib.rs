@@ -5,7 +5,7 @@
 mod acme;
 mod backend;
 mod cert_deploy;
-mod certs;
+pub mod certs;
 mod config;
 mod dns01;
 mod domains;
@@ -13,7 +13,7 @@ mod forward_metrics;
 mod forward_ports;
 mod health;
 pub mod l4;
-mod legacy_config;
+pub mod legacy_config;
 mod proxy;
 mod server;
 mod site;

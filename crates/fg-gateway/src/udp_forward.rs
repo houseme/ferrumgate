@@ -31,8 +31,9 @@ thread_local! {
 }
 
 #[derive(Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct RawUdpForward {
+pub struct RawUdpForward {
     listen: Option<String>,
     target: Option<String>,
     targets: Option<Vec<String>>,

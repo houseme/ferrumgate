@@ -5,7 +5,8 @@ use serde::Deserialize;
 
 #[derive(Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeployTarget {
+#[derive(serde::Serialize)]
+pub struct DeployTarget {
     pub directory: PathBuf,
     #[serde(default = "default_chain")]
     fullchain_name: String,

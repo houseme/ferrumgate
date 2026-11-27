@@ -44,7 +44,8 @@ const API_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawDns01 {
+#[derive(serde::Serialize)]
+pub struct RawDns01 {
     zone: Option<String>,
     zone_id: Option<String>,
     token_file: PathBuf,

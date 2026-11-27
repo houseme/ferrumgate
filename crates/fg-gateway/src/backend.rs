@@ -24,8 +24,9 @@ const FAILURE_THRESHOLD: u64 = 3;
 const COOLDOWN_MS: u64 = 30_000;
 
 #[derive(Deserialize)]
+#[derive(serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawBackend {
+pub struct RawBackend {
     upstream: String,
     #[serde(default = "default_weight")]
     weight: u16,
