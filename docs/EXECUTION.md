@@ -1257,6 +1257,20 @@ macOS arm64、Rust stable 1.100.0 上通过 409 项工作区测试和 9 项本�
 
 步骤 7 纯重构：tcp_forward 的私有故障转移循环、PROXY 头写入、CountWrites 与首数据 peek 全部替换为共用组件（stats 计数映射 bytes_out/bytes_in、FirstData::None 保持双侧等待语义、日志文案逐条复现）；forward_ports 的展开循环改为委托 `fg_net::ports::parse_ports`（SocketAddr 形 API 与 64 上限不变，既有单测不改地通过）；source_policy 删除 29 行重复的 `compile_networks` 改为重导出 `fg_net::source_rule::compile_networks`。三个消费文件净减 125 行，`tests/gateway/tcp` 12 项、`udp` 10 项、`fg-gateway` lib 18 项一个不改地通过。splice 式零拷贝记录为后续优化；订阅列表由 Web 服务写入 `fg_net` 注册表的句柄随 WP-26 接入。
 
+### WP-34 端口转发对齐（模型与运行时基础）
+
+```bash
+RUSTUP_TOOLCHAIN=stable cargo test --locked --offline -p fg-gateway --lib portforward
+RUSTUP_TOOLCHAIN=stable cargo test --workspace --locked --offline
+RUSTUP_TOOLCHAIN=stable cargo clippy --workspace --locked --offline --all-targets -- -D warnings
+RUSTUP_TOOLCHAIN=stable cargo fmt --all --check
+git diff --check
+```
+
+macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本机 Pebble ACME 测试。模型七例：零值设置规范化为上游默认（256/60/1024/5/60）、首数据超时 3600 钳制、缺失协议/监听/目标一次收集、目标端口数「1 复用或按位对应」、每来源默认零的契约、PROXY 拒绝 UDP 规则、重复 key 收集。编译五例：每来源默认推导链（规则 → 设置 → 一半下限 1）、跨规则错误一次收集、禁用规则跳过、按位目标映射（裸 IP 附加映射端口、固定 address:port 忽略）、空监听地址通配与空目标端口恒等映射。运行时两例：UDP 预算获取/释放、规则快照原子替换。routes 二十四例（完整 HTTP）：创建（客户端键保留、重复重生成）、无效创建 400 带问题清单且不持久化、复制后源插入、更新整体校验、单项与批量删除（缺失 404、空键 400）、排序（恒等跳过持久化）、启停计数、分组截断与 65 字符拒绝、设置 PUT 应用默认并钳制、未知字段 400、无效 JSON 400；提交顺序为 fg-admin 集合契约的镜像（持久化先行、内存快照随后、on_change 最后）。lucky 六例：三种安全模式的名单映射、自建规则按动作并入、不可导入项告警、键唯一性、camelCase 解析。
+
+随后续增量：数据面 serve 循环接入 l4 Module（bind/accept/来源判定/拨号/管道）、WP-39 同批的 TOML 迁移映射与既有 tcp/udp/metrics 测试改生成新模型、Lucky 导入的路由接线。
+
 ### 工作包状态核查与第三方登录评审
 
 主方案和本地细化目录的状态已按运行入口及已有验收同步。运行日志、管理认证、令牌和全局设置有本地证据。进程装配、Web 数据面、证书和端口转发按现有实现标为部分实现或前置。上游配置模型、生产服务验收与跨包联调按各包记录跟踪。

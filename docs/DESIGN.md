@@ -452,3 +452,13 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 `fg_net::ports` 是端口列表的纯函数层：`parse_ports` 接受单个端口、逗号列表（含全角逗号与空格分隔）、连字符范围及其混合，保留书写顺序，拒绝空输入、空项、端口 0、越界与逆序范围，展开上限 64（对齐现有 `MAX_LISTENERS`）；`map_targets` 把目标端口表映射到监听端口——单目标全复用，否则必须与监听端口等长按位对应；`collapse` 去重排序并合并连续区间，供防火墙放行使用。`fg_net::quota` 携带每端口（CAS 计数、drop 释放）与每来源两类配额：来源按 IPv4 地址或 IPv6 /64 分组（::ffff: 映射地址先规范化），默认上限为所在端口最大连接数的一半，回环与内网地址（复用 WP-14 的 `is_internal`，CGNAT/ULA 口径一致）与操作者豁免网段不受限；计数表上限 4096 组、满时淘汰零计数项；超限告警节流为每 10 秒一条。`fg_net::openports` 是按属主登记的开放端口快照表（ArcSwap 发布、读侧无锁）：监听成功立即 `set`，空表即撤销；入侵防护据此判定开放端口。`fg_net::source_rule` 承载规则级来源访问控制：deny-first 的 allow/deny 编译（1024 项上限、单 IP 归并、::ffff: 映射前缀缩减、聚合），`AccessFilter` 按封禁 → 拒绝名单 → 白名单/黑名单 → 敲门的顺序判定，封禁与敲门是可选钩子（实时查询，不随编译失效），空过滤器在入口不做任何判断。
 
 `fg-gateway::l4::shared` 是 TCP 管道与拨号：`pipe::relay` 双向复制保留半关闭（copy_bidirectional 语义），首次数据超时支持 None/Client/Upstream 三种预期（EOF 算作数据；首个字节缓冲后前置，零丢失），取消闭包用于排空；`relay_counted` 双向字节计数喂给转发指标。`failover::dial_targets` 顺序拨号——单个目标拒绝、不可达或超时即在转发任何字节之前切换下一个，全部失败返回最后一个错误。`proxy_proto::write_header` 按字节精确输出 PROTOCOL v1 文本行与 v2 二进制头（v4 28 字节、v6 52 字节布局）。accept 时的 `close`/`drop` 判定与 `HoldSlots` 挂起池在管理入口的 accept 循环中（WP-14），端口转发的 TCP 入口复用同一套判定函数。
+
+## 27. 端口转发对齐（WP-34）
+
+`portforward.json` 是 settings + rules 的 FileConfig。settings 规范化把零值升级为上游默认（每 TCP 端口 256 连接、UDP 会话 60 秒、全局预算 1024、拨号 5 秒、首数据 60 秒）并把首数据超时钳制到 3600 秒；`defaultMaxConnsPerSource` 保持 0 的语义——编译期推导为所在端口最大连接数的一半（下限 1）。规则含 protocols（tcp/udp 可同时）、监听地址与端口表、按序目标地址（至多 8 个）、目标端口表（1 个复用或按位对应）、规则级上限与 UDP 超时（0 → 全局默认）、PROXY 协议（仅 TCP，校验拒绝 UDP 规则携带）与 WP-36 来源列表的扁平嵌入。校验一次收集全部问题：缺失协议/端口/目标、监听数量越界、目标端口数不匹配、重复 key、UDP 规则携带 PROXY。
+
+编译（`portforward::compile`）把启用规则展开为 CompiledRule：监听 SocketAddr（空地址 → 0.0.0.0，裸 IPv6 加方括号）、目标地址表（裸 IP 附加映射端口，完整 address:port 固定端口）、推导后的 Limits 与 WP-36 的 AccessFilter；错误跨规则收集后一次返回。runtime.rs 持有 ArcSwap 规则快照（原子替换支持分级行为更新）与全局 UDP 会话预算（CAS 获取、Drop 释放）。accept 时的 close/drop 判定复用 WP-14 的 accept 循环。
+
+routes.rs 挂载管理面：规则集合（创建/列表/复制/更新/删除/单项与批量启停/排序/分组）与设置 GET/PUT，镜像 fg-admin 集合契约——12 位十六进制键、复制后源后插入、1–500 批量键去重、无部分删除、无操作变更跳过持久化并返回 changed:0；每次变更走 normalize → validate → apply → persist → publish → on_change 的提交顺序，校验失败以 400 返回完整问题清单，持久化失败不推进内存快照。设置 PUT 应用上游默认并钳制首数据超时。会话/令牌认证由挂载点的 ApiRouter 层强制。
+
+`lucky.rs` 把 Lucky 导出映射为 portforward 规则：白名单模式填 allow、黑名单模式合并 blacklist 与 globalBlacklist 到 deny、关闭模式名单为空且 autoFirewall=false；自建过滤规则按动作并入对应名单（allow 留 None 当为空——空 Some 在 WP-36 语义下是拒绝所有人）；无法导入的条目进入告警；键由 ring 系统随机源生成。数据面 serve 循环（bind/accept/来源判定/拨号/管道）接入 l4 Module 与 WP-39 的 TOML 迁移同批落地；既有 TCP/UDP 语义（UDP 多目标轮询、每规则 8 目标、64 监听器等自有保护）保持不变并在文档中说明与上游的差异。
