@@ -13,6 +13,7 @@ pub mod model;
 pub mod proxy;
 pub mod routes;
 pub mod site;
+pub mod access;
 pub mod table;
 pub mod upstream;
 pub mod userroute;

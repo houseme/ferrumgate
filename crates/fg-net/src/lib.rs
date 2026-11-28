@@ -7,6 +7,7 @@
 pub mod banlist;
 pub mod client_addr;
 pub mod fwopen;
+pub mod ip_list;
 pub mod openports;
 pub mod ports;
 pub mod quota;
