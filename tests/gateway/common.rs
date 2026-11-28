@@ -285,9 +285,82 @@ impl Gateway {
         Self::with_dir(config, tempfile::tempdir()?).await
     }
 
+    /// Legacy-path opt-out: serves the TOML directly for scenarios whose
+    /// semantics only the legacy runtime expresses (config `replace` +
+    /// reload flows, the websocket=false reject, connection-lifetime
+    /// deadlines, forwarding disabled switches).
+    pub async fn spawn_toml(config: &str) -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("live.toml");
+        std::fs::write(&path, config)?;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--log-level", "info", "--config"])
+            .arg(path)
+            .env("TOKIO_WORKER_THREADS", "2")
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let logs = BufReader::new(child.stderr.take().context("gateway stderr")?).lines();
+        let mut gateway = Self {
+            addr: "127.0.0.1:0".parse()?,
+            metrics_addr: None,
+            dir,
+            child,
+            logs,
+        };
+        let line = gateway.wait_log("gateway ready").await?;
+        gateway.addr = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("listen="))
+            .context("listen address")?
+            .parse()?;
+        gateway.metrics_addr = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("metrics_listen="))
+            .map(str::parse)
+            .transpose()?;
+        Ok(gateway)
+    }
+
     /// Spawns the gateway with a portforward.json sibling of the TOML.
     pub async fn spawn_forwarding(config: &str, forwarding: &str) -> Result<Self> {
         Self::with_forwarding(config, tempfile::tempdir()?, forwarding).await
+    }
+
+    /// Legacy-path `with_dir`: serves the TOML file itself (certificate
+    /// rotation flows re-read files on SIGHUP through the TOML loader).
+    pub async fn with_dir_toml(config: &str, dir: TempDir) -> Result<Self> {
+        let path = dir.path().join("live.toml");
+        std::fs::write(&path, config)?;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
+            .args(["serve", "--log-level", "info", "--config"])
+            .arg(path)
+            .env("TOKIO_WORKER_THREADS", "2")
+            .stdin(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()?;
+        let logs = BufReader::new(child.stderr.take().context("gateway stderr")?).lines();
+        let mut gateway = Self {
+            addr: "127.0.0.1:0".parse()?,
+            metrics_addr: None,
+            dir,
+            child,
+            logs,
+        };
+        let line = gateway.wait_log("gateway ready").await?;
+        gateway.addr = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("listen="))
+            .context("listen address")?
+            .parse()?;
+        gateway.metrics_addr = line
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("metrics_listen="))
+            .map(str::parse)
+            .transpose()?;
+        Ok(gateway)
     }
 
     pub async fn with_dir(config: &str, dir: TempDir) -> Result<Self> {

@@ -60,7 +60,7 @@ pub struct Listener {
     pub remark: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct Site {
     pub key: String,
@@ -119,6 +119,8 @@ pub struct Site {
     /// Fixed-text fields (site_type = text).
     pub text_body: String,
     pub text_content_type: String,
+    /// 0 = the default 200 (upstream statusCode).
+    pub text_status_code: u16,
     /// Health check (proxy sites): mode "" | http | tcp.
     pub health_mode: String,
     pub health_path: String,
@@ -130,6 +132,59 @@ pub struct Site {
     pub access_allow: Vec<String>,
     pub access_deny: Vec<String>,
     pub remark: String,
+}
+
+impl Default for Site {
+    /// The upstream semantics the serde defaults express: sites start
+    /// enabled with forwarding headers on. A manual impl keeps the Rust
+    /// `Site::default()` (used by the migration and the UI) consistent
+    /// with what a JSON document without those fields deserializes to.
+    fn default() -> Self {
+        Self {
+            enable: true,
+            forwarded_headers: true,
+            key: String::new(),
+            name: String::new(),
+            group: String::new(),
+            domains: Vec::new(),
+            site_type: String::new(),
+            targets: Vec::new(),
+            lb_policy: String::new(),
+            upstream_h2c: false,
+            use_target_host: false,
+            insecure_skip_verify: false,
+            disable_keep_alives: false,
+            send_proxy_protocol: false,
+            upstream_sni_from_host: false,
+            pass_auth_cookies: false,
+            timeouts_connect_secs: 0,
+            timeouts_tls_secs: 0,
+            timeouts_response_secs: 0,
+            client_idle_read_secs: 0,
+            client_idle_write_secs: 0,
+            rewrites: Vec::new(),
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            cors: Default::default(),
+            identity_headers: Vec::new(),
+            user_routes: Vec::new(),
+            redirect_to: String::new(),
+            redirect_code: 0,
+            root: String::new(),
+            text_body: String::new(),
+            text_content_type: String::new(),
+            text_status_code: 0,
+            health_mode: String::new(),
+            health_path: String::new(),
+            health_interval_secs: 0,
+            health_timeout_secs: 0,
+            health_fails: 0,
+            health_passes: 0,
+            access_allow: Vec::new(),
+            access_deny: Vec::new(),
+            remark: String::new(),
+        }
+    }
 }
 
 impl Site {

@@ -31,6 +31,44 @@ pub struct MigrateOptions {
 /// Mirrors the assembler's duplicate-domain rejection (bridge compile
 /// rule) so callers can fall back to the legacy path for scenarios the
 /// new model cannot express yet — prefix routing needs `locations`.
+/// Serving-parity gate for the test harness: scenarios the new model
+/// cannot express yet fall back to the legacy TOML path. The CLI
+/// migration does NOT use this gate — it migrates with documented drops
+/// (`metrics_listen`, `path_prefix`, protection-only fields).
+fn ensure_serving_parity(
+    config: &RawConfig,
+    converted: &Converted,
+) -> anyhow::Result<()> {
+    if config.server.metrics_listen.is_some() {
+        anyhow::bail!(
+            "metrics_listen 依赖旧版回环指标端点（目录形态改用 GET /api/metrics），暂走旧路径"
+        );
+    }
+    let mut seen = std::collections::HashSet::new();
+    for route in &config.routes {
+        if route
+            .path_prefix
+            .as_ref()
+            .is_some_and(|prefix| prefix != "/")
+        {
+            anyhow::bail!("routes[].path_prefix 需要 locations（暂走旧路径）");
+        }
+        if !seen.insert(route.host.clone()) {
+            // Second route for the same host: distinct prefixes in valid
+            // TOML, and prefix routing is not expressible yet.
+            anyhow::bail!("routes[{}] 重复域名（前缀路由需要 locations，暂走旧路径）", route.host);
+        }
+        if !route.websocket {
+            // The legacy "reject upgrades" switch has no new-model
+            // equivalent (WP-23 drops it); its semantics live on the
+            // legacy path only.
+            anyhow::bail!("routes[].websocket = false（拒绝升级语义暂走旧路径）");
+        }
+    }
+    ensure_no_duplicate_domains(converted)?;
+    Ok(())
+}
+
 fn ensure_no_duplicate_domains(converted: &Converted) -> anyhow::Result<()> {
     let mut seen = std::collections::HashSet::new();
     for listener in &converted.webservice.listeners {
@@ -55,14 +93,14 @@ pub fn convert_to_dir(config_path: &Path, dir: &Path) -> anyhow::Result<()> {
     let raw: RawConfig = toml::from_str(&text)
         .map_err(|error| anyhow::anyhow!("旧配置 schema 校验失败：{error}"))?;
     let converted = convert(&raw).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    ensure_no_duplicate_domains(&converted)?;
+    ensure_serving_parity(&raw, &converted)?;
     std::fs::create_dir_all(dir)?;
     // Only the webservice document is unconditional; ssl/portforward keep
     // any pre-existing sibling file when the TOML has no such section —
     // in TOML mode those files coexist with absent sections, and test
     // harnesses may have written them already.
     let mut documents: Vec<(&str, serde_json::Value)> = vec![
-        ("ferrumgate.json", serde_json::json!({})),
+        ("ferrumgate.json", converted.management.clone()),
         ("webservice.json", serde_json::to_value(&converted.webservice)?),
     ];
     if !raw.certificates.is_empty() || raw.acme.is_some() {
@@ -232,10 +270,28 @@ pub fn convert(config: &RawConfig) -> Result<Converted, MigrateError> {
         ("ssl.json".to_owned(), ssl.certs.len()),
         ("portforward.json".to_owned(), portforward.rules.len()),
     ];
+    // The legacy globals carry over into ferrumgate.json (null when the
+    // option was unset; the settings schema handles both).
+    let mut management = serde_json::Map::new();
+    management.insert(
+        "disabledModules".to_owned(),
+        serde_json::json!(config.disabled_modules),
+    );
+    management.insert(
+        "shutdownTimeoutMs".to_owned(),
+        serde_json::json!(config.server.shutdown_timeout_ms as i64),
+    );
+    if let Some(ca_file) = &config.upstream_ca_file {
+        management.insert(
+            "upstreamCaFile".to_owned(),
+            serde_json::json!(ca_file.display().to_string()),
+        );
+    }
     Ok(Converted {
         webservice,
         ssl,
         portforward,
+        management: serde_json::Value::Object(management),
         report,
     })
 }

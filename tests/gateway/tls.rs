@@ -69,8 +69,10 @@ async fn rotates_leaf_and_rejects_mismatched_key() -> Result<()> {
     let backend = Origin::http("ok").await?;
     let route = route("app.test", backend.addr, "/");
     let settings = |certificate: String| config(&(route.clone() + &certificate), "tls = true", "");
+    // Legacy runtime: certificate rotation re-reads files on SIGHUP via
+    // the TOML loader.
     let mut gateway =
-        Gateway::with_dir(&settings(certificate("app.test", "original")), dir).await?;
+        Gateway::with_dir_toml(&settings(certificate("app.test", "original")), dir).await?;
     let before = ca.connect(gateway.addr, "app.test", b"http/1.1").await?;
     assert_eq!(
         before.get_ref().1.peer_certificates().unwrap()[0],

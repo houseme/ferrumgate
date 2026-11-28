@@ -148,7 +148,9 @@ async fn validates_upgrades_and_relays_text_binary_ping_and_close() -> Result<()
         + &route("app.test", bad.addr, "/bad")
         + "websocket = true\n";
     #[allow(unused_mut)]
-    let mut gateway = Gateway::spawn(&config(&routes, "", "")).await?;
+    // Legacy runtime: the replace+reload flow toggles websocket = false,
+    // whose reject semantics only the TOML path expresses.
+    let mut gateway = Gateway::spawn_toml(&config(&routes, "", "")).await?;
     for (path, malformed, code) in [
         ("/", false, 501),
         ("/ws", true, 400),

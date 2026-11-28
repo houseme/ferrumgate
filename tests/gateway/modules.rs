@@ -13,7 +13,8 @@ async fn disabled_forwarding_leaves_its_listener_unused_and_web_serves() -> Resu
     ) + &forwarding(&occupied.local_addr()?.to_string(), &[upstream.addr], "");
     let switches = "disabled_modules = ['portforward', 'waf']";
     let manifest = config(&routes, "", switches);
-    let gateway = Gateway::spawn(&manifest).await?;
+    // Legacy runtime: module disable switches boot the TOML path.
+    let gateway = Gateway::spawn_toml(&manifest).await?;
     let mut client = http_client(connect(gateway.addr).await?).await?;
     assert_eq!(
         get(&mut client, "app.test", "/").await?.1,
@@ -87,7 +88,8 @@ async fn sigint_enforces_one_deadline_for_in_flight_connections() -> Result<()> 
     })
     .await?;
     let rule = forwarding("127.0.0.1:0", &[upstream.addr], "");
-    let mut gateway = Gateway::spawn(&config(
+    // Legacy runtime: SIGINT drain deadline semantics live on the TOML path.
+    let mut gateway = Gateway::spawn_toml(&config(
         &rule,
         "http_enabled = false\nshutdown_timeout_ms = 150",
         "",

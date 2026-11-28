@@ -74,7 +74,7 @@ pub async fn compile_site_handler(site: &Site) -> Result<CompiledSiteHandler, Ve
         "text" => {
             let response = RawResponse::Text {
                 body: site.text_body.clone(),
-                status: None,
+                status: (site.text_status_code != 0).then_some(site.text_status_code),
                 content_type: (!site.text_content_type.is_empty())
                     .then_some(site.text_content_type.clone()),
             };
@@ -315,9 +315,10 @@ fn compile_proxy_site(site: &Site, label: &str) -> Result<CompiledSiteHandler, V
     Ok(CompiledSiteHandler::Proxy(ProxyRoute {
         // Checked non-empty above, so the pool compiled.
         backends: pool.expect("backend pool compiled"),
-        // The webservice model has no websocket switch; upgrades stay
-        // disabled like a TOML route without `websocket = true`.
-        websocket: false,
+        // The new model has no websocket switch: upgrades are always
+        // allowed (WP-23; the legacy `websocket = false` reject semantics
+        // was dropped by the migration mapping).
+        websocket: true,
         upstream_h2c: site.upstream_h2c,
         health,
         options: Box::new(options),
@@ -449,7 +450,8 @@ mod tests {
         };
         assert_eq!(route.backends.len(), 2);
         assert!(route.upstream_h2c);
-        assert!(!route.websocket);
+        // The new model always allows upgrades (WP-23 dropped the switch).
+        assert!(route.websocket);
         assert!(route.health.is_some());
         let ports: Vec<_> = route
             .backends

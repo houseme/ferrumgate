@@ -209,8 +209,14 @@ pub(crate) async fn load<'a>(
     managed: Option<(Vec<String>, Arc<Managed>)>,
     certs: Option<Arc<crate::certs::provider::Provider>>,
 ) -> Result<Tls> {
+    // The directory form (WP-39) keeps certificates in ssl.json: the
+    // provider is the certificate source, so the TOML-list contract does
+    // not apply there.
+    let certificates_from_directory = certs.is_some();
     ensure!(
-        enabled == (!certificates.is_empty() || managed.is_some()) && certificates.len() <= 1024,
+        certificates_from_directory
+            || (enabled == (!certificates.is_empty() || managed.is_some())
+                && certificates.len() <= 1024),
         "server.tls requires manual or managed certificates; HTTP requires an empty certificate list"
     );
     let provider = Arc::new(ring::default_provider());

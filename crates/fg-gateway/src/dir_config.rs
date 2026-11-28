@@ -52,11 +52,13 @@ pub(crate) async fn load(dir: &Path, _managed: Arc<Managed>) -> Result<Config> {
     let ssl_state = crate::certs::load(dir)
         .await
         .context("准备证书（ssl.json）失败")?;
+    let upstream_ca = (!management.upstream_ca_file.is_empty())
+        .then(|| std::path::PathBuf::from(&management.upstream_ca_file));
     let tls = crate::tls::load(
         dir,
         listener.tls,
         Vec::new(),
-        management.upstream_ca_file.is_empty().then_some(()).and(Option::None),
+        upstream_ca.as_deref(),
         std::iter::empty(),
         None,
         Some(ssl_state.provider()),

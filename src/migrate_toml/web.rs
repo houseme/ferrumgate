@@ -240,6 +240,11 @@ fn convert_route(
                 .and_then(|c| c.as_str())
                 .unwrap_or_default()
                 .to_owned();
+            site.text_status_code = value
+                .get("status")
+                .and_then(|s| s.as_u64())
+                .map(|s| s as u16)
+                .unwrap_or(0);
         } else if kind == "static" {
             site.site_type = "static".to_owned();
             site.root = value
