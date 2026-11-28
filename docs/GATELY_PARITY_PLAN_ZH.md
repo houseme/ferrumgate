@@ -1393,12 +1393,12 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-41 | DNS 提供商适配 | L（分三批） | — | 本地实现及回环验收（步骤 1-9 已交付：fg-dns 核心机制、五套签名工具与全量 36 家提供商带契约测试；步骤 10 联调随根进程接线），见 [验收记录](EXECUTION.md#wp-41-dns-提供商适配步骤-9-交付全量-36-项) |
 | WP-42 | STUN 穿透 | L | WP-36、WP-16 | 本地实现及回环验收（RFC 5389 + UPnP IGD + NAT-PMP + 通知 + selfcheck；内置转发待 L4 数据面，真实 NAT 穿透待 LAN 验证），见 [验收记录](EXECUTION.md#wp-42-stun-穿透后续梯队交付模块收尾) |
 | WP-43 | 托管程序基础设施 | M | WP-09 | 本地实现及回环验收（fg-proc 安装校验与监督；各托管模块 WP-44+ 接入时复核发布源），见 [验收记录](EXECUTION.md#wp-43-托管程序基础设施核心交付) |
-| WP-44 | frp | L | WP-43、WP-36 | 未开始 |
+| WP-44 | frp | L | WP-43、WP-36 | 本地实现及回环验收（frpc/frps 托管、登录检查端点与黑白名单；真实 frp 联调与根进程接线待接），见 [验收记录](EXECUTION.md#wp-44-frp完整模块交付) |
 | WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 本地实现及回环验收（三模块结构对照交付；密钥全走环境变量；真实二进制联调待实机），见 [验收记录](EXECUTION.md#wp-45-tailscale-netbird-与-easytier完整交付) |
 | WP-46 | Cloudflare Tunnel | M | WP-43 | 本地实现及回环验收（token/quick 隧道托管、ingress 远端编辑与 DNS 同步；crate 零网络直连，出站经注入通道；真实 trycloudflare 未验证），见 [验收记录](EXECUTION.md#wp-46-cloudflare-tunnel完整模块交付) |
 | WP-50 | 统一封禁表 | M | WP-16 | 本地实现及回环验收（fg_net::banlist 核心与 fg-guard 模块；根进程接线与 WP-51/52/53 生产者随对应包），见 [验收记录](EXECUTION.md#wp-50-统一封禁表核心与-fg-guard-交付) |
 | WP-51 | 防火墙同步 | L | WP-50、WP-37 | 本地实现及回环验收（nftables/ipset 双后端镜像封禁表；未在真实防火墙验证，WP-53/54 扩展同一张表），见 [验收记录](EXECUTION.md#wp-51-防火墙同步核心交付) |
-| WP-52 | 日志规则与事件来源 | L | WP-50、WP-16、WP-28 | 未开始 |
+| WP-52 | 日志规则与事件来源 | L | WP-50、WP-16、WP-28 | 本地实现及回环验收（七类来源 × 17 预设、滑窗计数直入封禁与防火墙镜像；web/TLS 探测随 WP-21/28 接 ProbeSink），见 [验收记录](EXECUTION.md#wp-52-日志规则与-jails完整交付) |
 | WP-53 | 诱饵端口、端口扫描检测与 IPv6 严格模式 | M | WP-51 | 未开始 |
 | WP-54 | 单包授权与放行 | L | WP-50、WP-51 | 本地实现及回环验收（fwknop 兼容 SPA + OpenSSL 向量锚定；防火墙拦截与网页授权随 WP-51/26 扩展），见 [验收记录](EXECUTION.md#wp-54-单包授权与放行核心交付) |
 | WP-55 | WAF 实例与站点集成 | XL（引擎层） | WP-23 | 部分实现（fg-waf-engine 规则编译与快照求值器；SecLang/CRS、异常评分与站点集成随后续梯队），见 [验收记录](EXECUTION.md#wp-55-waf-实例与站点集成引擎层第一梯队交付) |
@@ -1409,7 +1409,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-63 | 文件服务共享用户与 WebDAV | M | WP-24 | 未开始 |
 | WP-64 | FTP 与 FTPS | M | WP-63、WP-31 | 未开始 |
 | WP-65 | SMB | XL（自研）或 M（托管 Samba） | WP-63 | 未开始 |
-| WP-66 | File Browser | S | WP-43 | 未开始 |
+| WP-66 | File Browser | S | WP-43 | 本地实现及回环验收（Quantum 托管、密码只走环境变量、配置 schema 对照上游源码核实；真实联调未验证），见 [验收记录](EXECUTION.md#wp-66-file-browser完整模块交付) |
 | WP-67 | 存储挂载 | M | WP-65 | 未开始 |
 | WP-68 | 通知中心 | M | WP-16 | 本地实现及回环验收（14 渠道 + 补推队列；渠道格式待上游快照核对，根进程接线待接），见 [验收记录](EXECUTION.md#wp-68-通知中心完整模块交付) |
 | WP-69 | 性能监控 | M | WP-17、WP-28 | 未开始 |
