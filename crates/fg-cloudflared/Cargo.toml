@@ -1,0 +1,31 @@
+[package]
+name = "fg-cloudflared"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["json"] }
+base64.workspace = true
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+# fg-net is intentionally NOT a dependency: the Cloudflare outbound goes
+# through the injected `Deps.cf_http` channel (cf_api::FetchFn); the
+# assembler wraps `fg_net::http::OutboundHttp` at the wiring layer.
+fg-proc.workspace = true
+getrandom.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
