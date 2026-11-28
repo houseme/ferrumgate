@@ -1,0 +1,28 @@
+[package]
+name = "fg-files"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+bcrypt.workspace = true
+cap-std.workspace = true
+fg-config.workspace = true
+fg-core.workspace = true
+fg-net.workspace = true
+getrandom.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
