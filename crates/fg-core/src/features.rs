@@ -59,6 +59,8 @@ pub const OPTIONAL_MODULES: &[&str] = &["protoroute", "ddns", "stun", "tailscale
 /// root crate, see the generated root `[features]` section).
 pub fn built(id: &str) -> bool {
     matches!(id, "portforward" | "ssl" | "webservice")
+        || (matches!(id, "ddns") && cfg!(feature = "mod-ddns"))
+        || (matches!(id, "stun") && cfg!(feature = "mod-stun"))
         || (matches!(id, "guard") && cfg!(feature = "mod-guard"))
         || (matches!(id, "cron") && cfg!(feature = "mod-cron"))
 }

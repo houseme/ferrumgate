@@ -1,0 +1,42 @@
+[package]
+name = "fg-ddns"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["json"] }
+fg-config.workspace = true
+fg-core.workspace = true
+fg-dns.workspace = true
+fg-logging.workspace = true
+fg-net.workspace = true
+getrandom.workspace = true
+if-addrs.workspace = true
+percent-encoding.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["formatting", "parsing", "macros"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+# 构建测试时启用部分提供商 feature（`cargo test -p fg-ddns` 需要
+# registry 里有真实的 `Meta` 供校验与路由测试使用）。
+fg-dns = { path = "../fg-dns", features = [
+    "dns-callback",
+    "dns-cloudflare",
+    "dns-dnspod",
+    "dns-duckdns",
+] }
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tempfile.workspace = true

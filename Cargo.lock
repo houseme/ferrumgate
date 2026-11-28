@@ -1261,16 +1261,28 @@ name = "fg-ddns"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "fg-config",
  "fg-core",
  "fg-dns",
  "fg-logging",
  "fg-net",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "if-addrs",
+ "percent-encoding",
+ "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1278,13 +1290,19 @@ name = "fg-dns"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "fg-dns",
+ "getrandom 0.4.3",
+ "hex",
+ "hmac 0.12.1",
  "http-body-util",
  "hyper",
  "hyper-rustls",
  "hyper-util",
  "serde",
  "serde_json",
+ "sha1 0.10.7",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]
@@ -1393,13 +1411,24 @@ name = "fg-stun"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
+ "axum",
  "fg-config",
  "fg-core",
  "fg-logging",
  "fg-net",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "if-addrs",
+ "regex",
  "serde",
  "serde_json",
+ "tempfile",
+ "time",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -2021,6 +2050,16 @@ checksum = "cb68373c0d6620ef8105e855e7745e18b0d00d3bdb07fb532e434244cdb9a714"
 dependencies = [
  "icu_normalizer",
  "icu_properties",
+]
+
+[[package]]
+name = "if-addrs"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69b2eeee38fef3aa9b4cc5f1beea8a2444fc00e7377cafae396de3f5c2065e24"
+dependencies = [
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
