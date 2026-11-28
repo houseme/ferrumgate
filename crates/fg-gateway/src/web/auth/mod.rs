@@ -9,8 +9,12 @@
 
 pub mod basic;
 pub mod login_page;
+pub mod oauth;
 pub mod password;
+pub mod forward_auth;
 pub mod reserve;
+pub mod scope;
+pub mod trust;
 pub mod session;
 pub mod shared;
 pub mod totp_step;
