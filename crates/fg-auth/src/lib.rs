@@ -9,7 +9,7 @@ mod reset;
 mod session;
 pub mod third_login;
 pub mod token;
-mod totp;
+pub mod totp;
 
 pub use account::SecurityFacts;
 pub use account::{AccountManager, CredentialChangeRejected, MAX_SESSION_HOURS};

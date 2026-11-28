@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
+fg-auth.workspace = true
 axum = { workspace = true, features = ["json"] }
 base64.workspace = true
 bcrypt.workspace = true

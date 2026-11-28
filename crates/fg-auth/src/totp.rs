@@ -8,7 +8,7 @@ use subtle::ConstantTimeEq;
 const PERIOD: u64 = 30;
 const SETUP_TTL: Duration = Duration::from_secs(300);
 
-pub(super) struct Totp(hmac::Key);
+pub struct Totp(hmac::Key);
 
 impl Totp {
     pub fn parse(secret: &str) -> Option<Self> {
