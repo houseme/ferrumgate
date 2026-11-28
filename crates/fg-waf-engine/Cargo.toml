@@ -1,0 +1,17 @@
+[package]
+name = "fg-waf-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+fg-core.workspace = true
+ipnet.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
