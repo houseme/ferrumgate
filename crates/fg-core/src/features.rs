@@ -61,9 +61,17 @@ pub fn built(id: &str) -> bool {
     matches!(id, "portforward" | "ssl" | "webservice")
         || (matches!(id, "ddns") && cfg!(feature = "mod-ddns"))
         || (matches!(id, "stun") && cfg!(feature = "mod-stun"))
+        || (matches!(id, "tailscale") && cfg!(feature = "mod-tailscale"))
+        || (matches!(id, "netbird") && cfg!(feature = "mod-netbird"))
+        || (matches!(id, "easytier") && cfg!(feature = "mod-easytier"))
+        || (matches!(id, "frp") && cfg!(feature = "mod-frp"))
+        || (matches!(id, "cloudflared") && cfg!(feature = "mod-cloudflared"))
         || (matches!(id, "guard") && cfg!(feature = "mod-guard"))
+        || (matches!(id, "knock") && cfg!(feature = "mod-knock"))
         || (matches!(id, "cron") && cfg!(feature = "mod-cron"))
+        || (matches!(id, "filebrowser") && cfg!(feature = "mod-filebrowser"))
         || (matches!(id, "notify") && cfg!(feature = "mod-notify"))
+        || (matches!(id, "nettools") && cfg!(feature = "mod-nettools"))
 }
 
 /// All module ids compiled into this build, in display order.

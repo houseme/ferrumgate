@@ -1,0 +1,36 @@
+[package]
+name = "fg-nettools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["json"] }
+base64.workspace = true
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+fg-net.workspace = true
+getrandom.workspace = true
+hickory-proto.workspace = true
+hickory-resolver.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls = { workspace = true, features = ["webpki-roots"] }
+hyper-util.workspace = true
+if-addrs.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+socket2.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio-util.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }

@@ -1129,6 +1129,7 @@ dependencies = [
  "fg-cron",
  "fg-ddns",
  "fg-easytier",
+ "fg-filebrowser",
  "fg-frp",
  "fg-gateway",
  "fg-guard",
@@ -1137,6 +1138,7 @@ dependencies = [
  "fg-logging",
  "fg-net",
  "fg-netbird",
+ "fg-nettools",
  "fg-notify",
  "fg-stun",
  "fg-tailscale",
@@ -1401,6 +1403,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg-filebrowser"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "fg-config",
+ "fg-core",
+ "fg-logging",
+ "fg-proc",
+ "getrandom 0.4.3",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fg-frp"
 version = "0.1.0"
 dependencies = [
@@ -1476,15 +1500,18 @@ name = "fg-guard"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "axum",
  "fg-config",
  "fg-core",
  "fg-logging",
  "fg-net",
+ "getrandom 0.4.3",
  "http-body-util",
  "hyper",
  "hyper-util",
  "ipnet",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
@@ -1580,6 +1607,36 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "fg-nettools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.23.1",
+ "fg-config",
+ "fg-core",
+ "fg-logging",
+ "fg-net",
+ "getrandom 0.4.3",
+ "hickory-proto",
+ "hickory-resolver",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "if-addrs",
+ "ipnet",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1694,6 +1751,20 @@ name = "fg-testkit"
 version = "0.1.0"
 dependencies = [
  "tempfile",
+]
+
+[[package]]
+name = "fg-waf-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arc-swap",
+ "fg-core",
+ "ipnet",
+ "regex",
+ "serde",
+ "serde_json",
+ "tracing",
 ]
 
 [[package]]
