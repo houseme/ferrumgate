@@ -1369,3 +1369,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-40 动态域名（完整模块交付）
 
 - 2026-11-28 交付 bf7a5ad（根注册与 lock 随对方会话的 WP-39 提交先行入库）。fg-ddns：ddns.json 模型、IP 来源（URL 按请求地址族钉住拨号、网卡地址、命令来源带超时与截断、停用地址替换表）、`{ipv4Addr}/{ipv6Addr}/{STUN_规则_IP|PORT|ADDR}` 变量展开、webhook 通知（URL 位置变量编码、successContent）、远端记录映射（Cloudflare proxied TTL 1、备注长度上限、删除语义复用 fg-dns pick_targets）、调度器（300 秒检查 / 3600 秒强推 / 失败退避封顶任务周期、RateLimited 取 Retry-After、stun.changed 即时同步）、批量添加解析（按行号报错、去重）、21 个管理操作、match/mismatch/unresolved 自检。66 项测试走本地假服务器与假提供商。根进程接线、指标与 OutboundHttp 迁移（ip_source/webhook 获得自定义 DNS 与更新代理）随后续接线批次；`Deps::delete_remote` 建议由 fg-dns 暴露顶层便捷函数后简化。
+
+### WP-51 防火墙同步（核心交付）
+
+- 2026-11-28 交付 cc19fa0。fg-guard/src/firewall 把 BanTable 镜像进系统防火墙：nftables `table inet gately`（ban4/ban6 带内核超时集合，IPv6 自动封禁按 /64 网络地址入集并以掩码 saddr 匹配；deny4/deny6 interval 集合吸收重叠手动网段；prerouting 链按文档顺序放行 lo/回复流量后注释计数 drop）+ 内核无 nf_tables 时的 iptables legacy + ipset 回退（mangle GATELY_PRE 链、hash:ip/net 集合、restore -exist 批量写）。引擎增量对账：banned 钩子毫秒级唤醒、10 秒轮询、到期前 10 分钟重推、结构检查缺失即全量重写并折叠计数器基线、连续 3 次写失败降级为应用层封禁并 300 秒退避重试、停机有界等待内先清空集合。状态经 `/api/guard/status#firewallSync` 与 `GET /api/guard/firewall/rules` 暴露，自检增 guard.firewall 项。40 项新增测试（fg-guard+fg-net 全量 142 无回归）；clippy -D warnings、fmt 干净。**未在真实防火墙验证**（按 §7 要求标注）：建议在带 NET_ADMIN 的网络命名空间按 §8 顺序验证并先确认带外恢复手段。WP-53 的 redir/trap 集与 WP-54 的 knock 表随后续包扩展同一张表。

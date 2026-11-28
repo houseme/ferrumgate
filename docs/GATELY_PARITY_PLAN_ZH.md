@@ -1397,7 +1397,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 未开始 |
 | WP-46 | Cloudflare Tunnel | M | WP-43 | 未开始 |
 | WP-50 | 统一封禁表 | M | WP-16 | 本地实现及回环验收（fg_net::banlist 核心与 fg-guard 模块；根进程接线与 WP-51/52/53 生产者随对应包），见 [验收记录](EXECUTION.md#wp-50-统一封禁表核心与-fg-guard-交付) |
-| WP-51 | 防火墙同步 | L | WP-50、WP-37 | 未开始 |
+| WP-51 | 防火墙同步 | L | WP-50、WP-37 | 本地实现及回环验收（nftables/ipset 双后端镜像封禁表；未在真实防火墙验证，WP-53/54 扩展同一张表），见 [验收记录](EXECUTION.md#wp-51-防火墙同步核心交付) |
 | WP-52 | 日志规则与事件来源 | L | WP-50、WP-16、WP-28 | 未开始 |
 | WP-53 | 诱饵端口、端口扫描检测与 IPv6 严格模式 | M | WP-51 | 未开始 |
 | WP-54 | 单包授权与放行 | L | WP-50、WP-51 | 未开始 |
