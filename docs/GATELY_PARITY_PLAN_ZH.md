@@ -1394,7 +1394,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-42 | STUN 穿透 | L | WP-36、WP-16 | 本地实现及回环验收（RFC 5389 + UPnP IGD + NAT-PMP + 通知 + selfcheck；内置转发待 L4 数据面，真实 NAT 穿透待 LAN 验证），见 [验收记录](EXECUTION.md#wp-42-stun-穿透后续梯队交付模块收尾) |
 | WP-43 | 托管程序基础设施 | M | WP-09 | 本地实现及回环验收（fg-proc 安装校验与监督；各托管模块 WP-44+ 接入时复核发布源），见 [验收记录](EXECUTION.md#wp-43-托管程序基础设施核心交付) |
 | WP-44 | frp | L | WP-43、WP-36 | 未开始 |
-| WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 未开始 |
+| WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 本地实现及回环验收（三模块结构对照交付；密钥全走环境变量；真实二进制联调待实机），见 [验收记录](EXECUTION.md#wp-45-tailscale-netbird-与-easytier完整交付) |
 | WP-46 | Cloudflare Tunnel | M | WP-43 | 本地实现及回环验收（token/quick 隧道托管、ingress 远端编辑与 DNS 同步；crate 零网络直连，出站经注入通道；真实 trycloudflare 未验证），见 [验收记录](EXECUTION.md#wp-46-cloudflare-tunnel完整模块交付) |
 | WP-50 | 统一封禁表 | M | WP-16 | 本地实现及回环验收（fg_net::banlist 核心与 fg-guard 模块；根进程接线与 WP-51/52/53 生产者随对应包），见 [验收记录](EXECUTION.md#wp-50-统一封禁表核心与-fg-guard-交付) |
 | WP-51 | 防火墙同步 | L | WP-50、WP-37 | 本地实现及回环验收（nftables/ipset 双后端镜像封禁表；未在真实防火墙验证，WP-53/54 扩展同一张表），见 [验收记录](EXECUTION.md#wp-51-防火墙同步核心交付) |
