@@ -12,7 +12,8 @@
 //! | DELETE | `/api/guard/bans` | query: `target` (IP or CIDR) | `{"removed":N}` |
 //! | GET | `/api/guard/settings` | — | normalized `Settings` |
 //! | PUT | `/api/guard/settings` | `Settings` | normalized `Settings` |
-//! | GET | `/api/guard/status` | — | `{"enable","firewall","bans","offenses","loginTrusted","limit"}` |
+//! | GET | `/api/guard/status` | — | `{"enable","firewall","firewallSync","bans","offenses","loginTrusted","limit"}` |
+//! | GET | `/api/guard/firewall/rules` | — | `{"backend":…,"rules":…}` (WP-51 §4 "查看规则") |
 //!
 //! Manual bans and unbans are written through to the shared table
 //! immediately (the delayed saver persists them); the settings PUT follows
@@ -59,7 +60,8 @@ pub struct RoutesState {
 /// Adds the guard ban list and settings routes to `router`.
 pub fn mount(router: axum::Router, state: Arc<RoutesState>) -> axum::Router {
     let (list, create, remove) = (state.clone(), state.clone(), state.clone());
-    let (settings_get, settings_put, status) = (state.clone(), state.clone(), state);
+    let (settings_get, settings_put, status) = (state.clone(), state.clone(), state.clone());
+    let rules = state;
     router
         .route(
             "/api/guard/bans",
@@ -83,6 +85,10 @@ pub fn mount(router: axum::Router, state: Arc<RoutesState>) -> axum::Router {
         .route(
             "/api/guard/status",
             get(move || async move { status_view(status).await }),
+        )
+        .route(
+            "/api/guard/firewall/rules",
+            get(move || async move { firewall_rules_view(rules).await }),
         )
 }
 
@@ -231,13 +237,42 @@ async fn status_view(state: Arc<RoutesState>) -> Response {
     let service = &state.service;
     let counts = service.counts();
     let settings = service.settings();
+    // The firewall sync lives inside the module status (WP-51 §4: backend,
+    // unavailable reason, statistics). Firewall problems never fail the
+    // endpoint — the application layer keeps answering.
+    let firewall_status = service
+        .firewall()
+        .map(|sync| sync.status())
+        .unwrap_or_else(|| crate::firewall::FwStatus {
+            enabled: settings.firewall,
+            ..crate::firewall::FwStatus::default()
+        });
+    let mut firewall = serde_json::to_value(&firewall_status)
+        .unwrap_or_else(|_| json!({ "enabled": settings.firewall }));
+    firewall["text"] = json!(crate::firewall::status_text(&firewall_status));
     Json(json!({
         "enable": settings.enable,
         "firewall": settings.firewall,
+        "firewallSync": firewall,
         "bans": counts.bans,
         "offenses": counts.offenses,
         "loginTrusted": counts.login_trusted,
         "limit": service.limit(),
+    }))
+    .into_response()
+}
+
+/// The full rule text the sync last wrote ("view rules", WP-51 §4).
+async fn firewall_rules_view(state: Arc<RoutesState>) -> Response {
+    let sync = state.service.firewall();
+    let status = sync.as_ref().map(|sync| sync.status());
+    let rules = sync.as_ref().and_then(|sync| sync.rules_text());
+    Json(json!({
+        "backend": status
+            .as_ref()
+            .and_then(|status| status.backend)
+            .map(|backend| backend.as_str()),
+        "rules": rules,
     }))
     .into_response()
 }

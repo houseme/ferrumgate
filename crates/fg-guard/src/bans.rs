@@ -3,7 +3,10 @@
 //! manual ban entries, event publication on `guard.banned`, and the query
 //! surface other modules use (they receive [`GuardService::table`], the
 //! `fg_net::banlist::BanTable`, through their `Deps` — the same shared
-//! type the web service uses, per WP-50 §1).
+//! type the web service uses, per WP-50 §1). With `settings.firewall` on
+//! it also owns the WP-51 firewall sync (WP-51 §3.3 consume pattern: the
+//! table's `banned` hook nudges the sync, the 10 s reconcile diffs, the
+//! first tick after a successful probe rebuilds the whole table).
 
 use std::{
     net::IpAddr,
@@ -20,6 +23,7 @@ use fg_net::banlist::{
 };
 use ipnet::IpNet;
 
+use crate::firewall::FirewallSync;
 use crate::model::Settings;
 use crate::validate;
 
@@ -65,6 +69,11 @@ impl From<fg_net::banlist::BanError> for GuardBanError {
     }
 }
 
+/// Holds the firewall sync while it runs (`None` = disabled or not yet
+/// started). The ban hook reads it; the assembly layer may inject a
+/// substitute with [`GuardService::set_firewall`].
+pub type FirewallSlot = Arc<Mutex<Option<Arc<FirewallSync>>>>;
+
 /// The module state shared between the runtime, the routes and other
 /// modules.
 pub struct GuardService {
@@ -74,9 +83,9 @@ pub struct GuardService {
     /// the whitelist on every settings application.
     local_v6: Mutex<Vec<IpNet>>,
     /// The module's event bus; `guard.banned` publications go through it
-    /// via the table hook, and future publishers (WP-51 firewall sync,
-    /// jails) reuse it.
+    /// via the table hook, and future publishers (jails) reuse it.
     events: EventBus,
+    firewall: FirewallSlot,
 }
 
 impl GuardService {
@@ -89,14 +98,21 @@ impl GuardService {
 impl GuardService {
     /// Opens the bans file under the config store and applies the given
     /// (already normalized) settings. The `guard.banned` event hook is
-    /// wired to the module's event bus.
+    /// wired to the module's event bus and nudges the firewall sync; when
+    /// `settings.firewall` is on the sync (and its worker thread) starts
+    /// here — every firewall failure stays non-fatal.
     pub fn open(store: &ConfigStore, settings: &Settings, events: EventBus) -> Result<Arc<Self>> {
         let path = store.data_dir(DATA_DIR)?.join(BANS_FILE);
+        let firewall: FirewallSlot = Arc::new(Mutex::new(None));
         let hooks = BanHooks {
             banned: Some(Arc::new({
                 let events = events.clone();
+                let firewall = Arc::clone(&firewall);
                 move |entry: &fg_net::banlist::Entry| {
                     publish_banned(&events, entry);
+                    if let Some(sync) = firewall.lock().expect("guard firewall slot").as_ref() {
+                        sync.note_banned(entry);
+                    }
                 }
             })),
             load_warning: Some(Arc::new(|warning: &str| {
@@ -110,21 +126,33 @@ impl GuardService {
             system_clock(),
         )
         .with_context(|| format!("opening the bans file at {}", path.display()))?;
+        if settings.firewall {
+            *firewall.lock().expect("guard firewall slot") =
+                Some(FirewallSync::start(Arc::clone(&table), system_clock()));
+        }
         Ok(Arc::new(Self {
             table,
             settings: RwLock::new(settings.clone()),
             local_v6: Mutex::new(Vec::new()),
             events,
+            firewall,
         }))
     }
 
-    /// An in-memory service (tests, standalone consumers).
+    /// An in-memory service (tests, standalone consumers). Never starts
+    /// the firewall sync on its own; inject one with [`set_firewall`]
+    /// ([`GuardService::set_firewall`]) if needed.
     pub fn open_memory(settings: &Settings, events: EventBus) -> Arc<Self> {
+        let firewall: FirewallSlot = Arc::new(Mutex::new(None));
         let hooks = BanHooks {
             banned: Some(Arc::new({
                 let events = events.clone();
+                let firewall = Arc::clone(&firewall);
                 move |entry: &fg_net::banlist::Entry| {
                     publish_banned(&events, entry);
+                    if let Some(sync) = firewall.lock().expect("guard firewall slot").as_ref() {
+                        sync.note_banned(entry);
+                    }
                 }
             })),
             load_warning: None,
@@ -138,6 +166,7 @@ impl GuardService {
             settings: RwLock::new(settings.clone()),
             local_v6: Mutex::new(Vec::new()),
             events,
+            firewall,
         })
     }
 
@@ -146,11 +175,50 @@ impl GuardService {
         self.settings.read().expect("guard settings").clone()
     }
 
-    /// Applies new (already normalized) settings to the table policy; the
-    /// whitelist combines `ignoreList` with the registered local IPv6
-    /// networks.
+    /// Applies new (already normalized) settings: the table policy follows
+    /// immediately, and the firewall sync starts, stops (its worker removes
+    /// the table before exiting) or re-probes to match `settings.firewall`
+    /// — a settings save is also the documented re-probe trigger (WP-51
+    /// §4).
     pub fn apply_settings(&self, settings: &Settings) {
         *self.settings.write().expect("guard settings") = settings.clone();
+        self.apply_policy(settings);
+        let mut slot = self.firewall.lock().expect("guard firewall slot");
+        match (&*slot, settings.firewall) {
+            (Some(previous), false) => {
+                previous.stop();
+                *slot = None;
+            }
+            (Some(previous), true) => previous.reprobe(),
+            (None, true) => {
+                *slot = Some(FirewallSync::start(Arc::clone(&self.table), system_clock()));
+            }
+            (None, false) => {}
+        }
+    }
+
+    /// Replaces the firewall sync (assembly injection, tests). The
+    /// previous sync is stopped; its worker removes the table before
+    /// exiting, off this thread.
+    pub fn set_firewall(&self, sync: Option<Arc<FirewallSync>>) {
+        let mut slot = self.firewall.lock().expect("guard firewall slot");
+        match (&*slot, &sync) {
+            (Some(previous), Some(next)) if Arc::ptr_eq(previous, next) => {}
+            (Some(previous), _) => previous.stop(),
+            _ => {}
+        }
+        *slot = sync;
+    }
+
+    /// The running firewall sync, if any.
+    pub fn firewall(&self) -> Option<Arc<FirewallSync>> {
+        self.firewall.lock().expect("guard firewall slot").clone()
+    }
+
+    /// Applies the settings to the table policy only (no firewall side
+    /// effects); the whitelist combines `ignoreList` with the registered
+    /// local IPv6 networks.
+    fn apply_policy(&self, settings: &Settings) {
         let local = self.local_v6.lock().expect("guard local nets").clone();
         let mut policy = policy_from_settings(settings, &local);
         policy.clamp_max_duration();
@@ -161,8 +229,7 @@ impl GuardService {
     /// assembly layer calls this once it knows the interfaces.
     pub fn set_local_networks(&self, networks: Vec<IpNet>) {
         *self.local_v6.lock().expect("guard local nets") = networks;
-        let settings = self.settings();
-        self.apply_settings(&settings);
+        self.apply_policy(&self.settings());
     }
 
     /// Automatic ban entry (jails, decoy ports, scan detection, web
@@ -310,13 +377,64 @@ fn publish_banned(events: &EventBus, entry: &Entry) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
+    use crate::firewall::{FirewallSync, FwUnavailable};
     use crate::model::Settings;
+    use fg_net::banlist::{BanPolicy, BanTable, system_clock};
+    use std::sync::Arc as StdArc;
 
     /// `EventBus::new` needs a Tokio runtime handle, so every test that
     /// builds a service runs inside `#[tokio::test]`.
     fn service() -> Arc<GuardService> {
         GuardService::open_memory(&Settings::default(), EventBus::default())
+    }
+
+    /// A thread-less sync whose probe reports the platform limitation:
+    /// exercises the wiring without touching any system firewall.
+    fn manual_sync() -> StdArc<FirewallSync> {
+        FirewallSync::with_factory(
+            BanTable::open_memory(BanPolicy::default(), Default::default(), system_clock()),
+            system_clock(),
+            StdArc::new(|| Err(FwUnavailable::not_linux())),
+        )
+    }
+
+    #[tokio::test]
+    async fn firewall_slot_follows_settings_and_stops_on_toggle_off() {
+        let guard = service();
+        assert!(guard.firewall().is_none(), "off by default");
+        // Injecting and enabling keeps the injected sync (no production
+        // detection is spawned); a settings save re-probes it.
+        let sync = manual_sync();
+        guard.set_firewall(Some(StdArc::clone(&sync)));
+        let enabled = crate::validate::normalize(crate::model::FileConfig {
+            settings: Settings {
+                firewall: true,
+                ..Settings::default()
+            },
+        })
+        .settings;
+        guard.apply_settings(&enabled);
+        assert!(guard.firewall().is_some());
+        assert!(
+            StdArc::ptr_eq(&guard.firewall().unwrap(), &sync),
+            "a running sync is re-probed, not replaced"
+        );
+        assert!(sync.status().enabled);
+        // Toggling off clears the slot and stops the worker.
+        guard.apply_settings(&Settings::default());
+        assert!(guard.firewall().is_none());
+        // The hook never panics without a running sync.
+        guard.ban_auto(
+            "203.0.113.7".parse().unwrap(),
+            None,
+            false,
+            Source::Scan,
+            "r".to_owned(),
+            SystemTime::now(),
+        );
     }
 
     #[tokio::test]
