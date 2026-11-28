@@ -128,6 +128,12 @@ pub struct Settings {
     pub third_login: ThirdLoginSettings,
     #[serde(deserialize_with = "null_to_default")]
     pub disabled_modules: Vec<String>,
+    /// WP-39 migration: graceful shutdown deadline in milliseconds
+    /// (legacy `server.shutdown_timeout_ms`, default 10 s).
+    pub shutdown_timeout_ms: i64,
+    /// WP-39 migration: CA bundle for outbound HTTPS connections
+    /// (legacy `upstream_ca_file`).
+    pub upstream_ca_file: String,
     #[serde(rename = "gcPercent", deserialize_with = "ignore", skip_serializing)]
     _gc_percent: (),
     #[serde(rename = "maxProcs", deserialize_with = "ignore", skip_serializing)]
@@ -456,6 +462,11 @@ impl Settings {
             "logLevel": log_level, "logLines": log_lines, "disableLogPersist": disable_log_persist,
             "logFileMB": log_file_mb, "accessLogDays": access_log_days, "accessLogMB": access_log_mb,
             "logDir": log_dir, "thirdLogin": third_login;
+        BootOnly =>
+            // WP-39 migrations: the shutdown deadline re-arms with the
+            // process; the outbound CA bundle feeds the TLS connectors
+            // built at startup.
+            "shutdownTimeoutMs": shutdown_timeout_ms, "upstreamCaFile": upstream_ca_file;
         BootOnly => "apiToken": legacy_api_token;
     }
 }
