@@ -1410,3 +1410,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-45 Tailscale、NetBird 与 EasyTier（完整交付）
 
 - 2026-11-28 交付 5f07085。三个结构对照的托管模块（各 lib/model/validate/args/status/runtime/routes）：实例按指纹（分组/备注/enable 不参与）只重启受影响者、冲突实例「排后者不启动并显示原因」、drain 15 秒有界停止、reset 停全部→注销→恢复默认配置（保留已装程序）；**密钥一律走环境变量**（TS_AUTHKEY/NB_SETUP_KEY/ET_NETWORK_SECRET，快照断言）；状态解析字段白名单（nodekey/网络密钥不读不转发，有「输出不含密钥」断言）。NetBird 附加外部内核实例检查、<0.75 的 SOCKS5 告警与登录链接刷新；Tailscale 内核模式遇 nf_tables 主机注入 TS_DEBUG_FIREWALL_MODE=nftables；EasyTier rpc portal 钉在回环 + 白名单、拒绝 extra args 里的网络密钥。操作数对齐上游（28/28/27 含通用日志）；安装接 fg-proc Installer，装毕经 on_installed 自动重启运行中实例。79 项测试（rustc 现场编译的多调用替身二进制，auth 标记/状态 canned JSON 内含密钥样串验证不泄露）；clippy -D warnings、fmt 干净。**移交项**：settings 的 session-only 由 fg-admin authorize 层落实；真实二进制联调（记录版本与结果）待实机；字段名对照上游 config.go 无快照可读，按文档形态 + 官方程序接口设计。
+
+### WP-91 持续集成（步骤 5 交付：supply-chain job）
+
+- 2026-11-28 交付 3780eae。deny.toml 按实测许可证清单逐项列出（每条注明覆盖的 crate 族）：Apache-2.0/MIT/ISC/BSD 三档/BSL-1.0/0BSD/Unlicense/Zlib/Unicode-3.0，另加 webpki-roots 的 CDLA-Permissive-2.0、webauthn 族的 MPL-2.0、UEFI 目标 r-efi 的 LGPL-2.1-or-later、cap-std Windows 栈的 Apache-2.0 WITH LLVM-exception；来源限定 crates.io；重复依赖保持信息性（与 `cargo tree --duplicates` 并行）；yanked 直接拒绝。xtask supply-chain job 依次跑 cargo-deny（--locked 为全局旗标）与 cargo-audit，工具缺失时说明跳过（CI 固定安装 cargo-deny 0.22.2 与 cargo-audit 0.23.0 并缓存 advisory 数据库）。licenses/bans/sources 三项已用真实工具本地验证通过；advisories 因本机 GitHub 不可达留待 CI 首跑验证。41 项 xtask 测试（新增工作流内容断言）。剩余 job：msrv（仓库未声明最低工具链）、matrix/each-feature 的 CI 接线、cross/x86/ui/e2e/pebble/openwrt（分别随 WP-92/65/80/32）。
