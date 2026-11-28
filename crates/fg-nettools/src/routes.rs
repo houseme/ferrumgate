@@ -128,18 +128,29 @@ fn decode_error() -> Response {
 /// Starts one tool run. The deny list comes from the current settings; the
 /// future is spawned immediately and the view returned while running.
 async fn run_tool(state: Arc<RoutesState>, body: Bytes) -> Response {
-    // fg-admin enables serde_json's `arbitrary_precision`, which feature
-    // unification shares with this crate; under it, numbers inside a
-    // `serde_json::Value` deserialize through the private Content path and
-    // break both internally-tagged enums and `from_value` of float fields.
-    // The `tool` tag is therefore read from a `Value` peek and each params
-    // struct is deserialized typed from the raw bytes, which
-    // arbitrary_precision handles correctly.
-    let peek: serde_json::Value = match serde_json::from_slice(&body) {
+    // Two serde pitfalls shape this handler: fg-admin enables
+    // serde_json's `arbitrary_precision`, which feature unification shares
+    // with this crate, and under it numbers inside a `serde_json::Value`
+    // deserialize through the private Content path — breaking both
+    // internally-tagged enums and `from_value` of float fields. The params
+    // structs also deny unknown fields, so the raw bytes cannot be fed to
+    // a variant directly. Dispatch therefore peeks the `tool` tag from a
+    // `Value`, removes it, re-serializes, and deserializes each params
+    // struct typed from those bytes (numbers round-trip as raw text under
+    // arbitrary_precision, so this path is exact in both feature worlds).
+    let mut peek: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(peek) => peek,
         Err(_) => return decode_error(),
     };
-    let parsed = match peek.get("tool").and_then(|tool| tool.as_str()) {
+    let tool = peek
+        .as_object_mut()
+        .and_then(|object| object.remove("tool"))
+        .and_then(|tool| tool.as_str().map(str::to_owned));
+    let body = match serde_json::to_vec(&peek) {
+        Ok(bytes) => Bytes::from(bytes),
+        Err(_) => return decode_error(),
+    };
+    let parsed = match tool.as_deref() {
         Some("ping") => serde_json::from_slice::<PingParams>(&body).map(RunRequest::Ping),
         Some("traceroute") => {
             serde_json::from_slice::<TracerouteParams>(&body).map(RunRequest::Traceroute)
