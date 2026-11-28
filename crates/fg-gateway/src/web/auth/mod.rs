@@ -8,16 +8,16 @@
 #![allow(dead_code)]
 
 pub mod basic;
+pub mod forward_auth;
 pub mod login_page;
 pub mod oauth;
 pub mod password;
-pub mod forward_auth;
 pub mod reserve;
 pub mod scope;
-pub mod trust;
 pub mod session;
 pub mod shared;
 pub mod totp_step;
+pub mod trust;
 pub mod users;
 
 /// The authentication reserve path every auth interaction lives under.

@@ -52,7 +52,12 @@ impl Default for Pkce {
 
 /// The provider's authorization endpoint with every query parameter
 /// attached (PKCE everywhere but QQ, scopes per provider).
-pub fn authorize_url(provider: &OAuthProvider, state: &str, redirect_uri: &str, pkce: &Pkce) -> String {
+pub fn authorize_url(
+    provider: &OAuthProvider,
+    state: &str,
+    redirect_uri: &str,
+    pkce: &Pkce,
+) -> String {
     let mut params = vec![
         ("client_id", provider.client_id.as_str()),
         ("state", state),
@@ -94,7 +99,10 @@ fn encode_pairs(params: &[(&str, &str)]) -> String {
     params
         .iter()
         .map(|(name, value)| {
-            format!("{name}={}", percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC))
+            format!(
+                "{name}={}",
+                percent_encoding::utf8_percent_encode(value, percent_encoding::NON_ALPHANUMERIC)
+            )
         })
         .collect::<Vec<_>>()
         .join("&")
@@ -162,7 +170,10 @@ pub async fn exchange_token(
         params.push(("code_verifier", verifier.to_owned()));
     }
     let (endpoint, accept_json) = match provider.kind {
-        ProviderKind::Github => ("https://github.com/login/oauth/access_token".to_owned(), true),
+        ProviderKind::Github => (
+            "https://github.com/login/oauth/access_token".to_owned(),
+            true,
+        ),
         ProviderKind::Google => ("https://oauth2.googleapis.com/token".to_owned(), true),
         ProviderKind::Qq => ("https://graph.qq.com/oauth2.0/token".to_owned(), false),
         ProviderKind::Oidc => {
@@ -179,13 +190,23 @@ pub async fn exchange_token(
         .method(hyper::Method::POST)
         .uri(endpoint)
         .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", if accept_json { "application/json" } else { "*/*" })
+        .header(
+            "Accept",
+            if accept_json {
+                "application/json"
+            } else {
+                "*/*"
+            },
+        )
         .body(http_body_util::Empty::<Bytes>::new())
         .map_err(|error| error.to_string())?;
     // The body cannot ride the builder's typed body; rebuild with the
     // form payload.
     let request = request.map(|_| http_body_util::Full::new(Bytes::from(body)));
-    let response = oauth_client().request(request).await.map_err(|e| e.to_string())?;
+    let response = oauth_client()
+        .request(request)
+        .await
+        .map_err(|e| e.to_string())?;
     let bytes = http_body_util::BodyExt::collect(response.into_body())
         .await
         .map_err(|e| e.to_string())?
@@ -219,37 +240,45 @@ pub async fn fetch_identity(
     token: &str,
 ) -> Result<(String, Vec<String>), String> {
     type IdentityParse = fn(&serde_json::Value) -> Result<(String, Vec<String>), String>;
-    let (endpoint, parse): (&str, IdentityParse) =
-        match provider.kind {
-            ProviderKind::Github => (
-                "https://api.github.com/user",
-                |value: &serde_json::Value| {
-                    let login = value["login"].as_str().unwrap_or_default().to_owned();
-                    let id = value["id"].as_u64().map(|id| id.to_string()).unwrap_or_default();
-                    Ok((login, vec![id]))
-                },
-            ),
-            ProviderKind::Google | ProviderKind::Oidc => (
-                if provider.kind == ProviderKind::Google {
-                    "https://openidconnect.googleapis.com/v1/userinfo".to_owned()
-                } else {
-                    format!("{}/userinfo", provider.issuer.trim_end_matches('/'))
-                }
-                .leak(),
-                |value: &serde_json::Value| {
-                    let sub = value["sub"].as_str().unwrap_or_default().to_owned();
-                    let email = value["email"].as_str().unwrap_or_default().to_owned();
-                    Ok((sub, Vec::from([email]).into_iter().filter(|e| !e.is_empty()).collect()))
-                },
-            ),
-            ProviderKind::Qq => (
-                "https://graph.qq.com/oauth2.0/me",
-                |value: &serde_json::Value| {
-                    let openid = value["openid"].as_str().unwrap_or_default().to_owned();
-                    Ok((openid, Vec::new()))
-                },
-            ),
-        };
+    let (endpoint, parse): (&str, IdentityParse) = match provider.kind {
+        ProviderKind::Github => (
+            "https://api.github.com/user",
+            |value: &serde_json::Value| {
+                let login = value["login"].as_str().unwrap_or_default().to_owned();
+                let id = value["id"]
+                    .as_u64()
+                    .map(|id| id.to_string())
+                    .unwrap_or_default();
+                Ok((login, vec![id]))
+            },
+        ),
+        ProviderKind::Google | ProviderKind::Oidc => (
+            if provider.kind == ProviderKind::Google {
+                "https://openidconnect.googleapis.com/v1/userinfo".to_owned()
+            } else {
+                format!("{}/userinfo", provider.issuer.trim_end_matches('/'))
+            }
+            .leak(),
+            |value: &serde_json::Value| {
+                let sub = value["sub"].as_str().unwrap_or_default().to_owned();
+                let email = value["email"].as_str().unwrap_or_default().to_owned();
+                Ok((
+                    sub,
+                    Vec::from([email])
+                        .into_iter()
+                        .filter(|e| !e.is_empty())
+                        .collect(),
+                ))
+            },
+        ),
+        ProviderKind::Qq => (
+            "https://graph.qq.com/oauth2.0/me",
+            |value: &serde_json::Value| {
+                let openid = value["openid"].as_str().unwrap_or_default().to_owned();
+                Ok((openid, Vec::new()))
+            },
+        ),
+    };
     let request = hyper::Request::builder()
         .uri(endpoint)
         .header("Authorization", format!("Bearer {token}"))
@@ -257,7 +286,10 @@ pub async fn fetch_identity(
         .header("Accept", "application/json")
         .body(http_body_util::Full::new(Bytes::from_static(b"")))
         .map_err(|error| error.to_string())?;
-    let response = oauth_client().request(request).await.map_err(|e| e.to_string())?;
+    let response = oauth_client()
+        .request(request)
+        .await
+        .map_err(|e| e.to_string())?;
     let bytes = http_body_util::BodyExt::collect(response.into_body())
         .await
         .map_err(|e| e.to_string())?
@@ -366,8 +398,16 @@ mod tests {
             .iter()
             .filter_map(|line| parse_allow_entry(line))
             .collect();
-        assert!(identity_matches(&allow, "github", &["octocat".to_owned(), "1".to_owned()]));
+        assert!(identity_matches(
+            &allow,
+            "github",
+            &["octocat".to_owned(), "1".to_owned()]
+        ));
         assert!(identity_matches(&allow, "google", &["anyone".to_owned()]));
-        assert!(!identity_matches(&allow, "github", &["someoneelse".to_owned()]));
+        assert!(!identity_matches(
+            &allow,
+            "github",
+            &["someoneelse".to_owned()]
+        ));
     }
 }

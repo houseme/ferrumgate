@@ -173,7 +173,11 @@ mod tests {
         // JSON with the wrong shape (missing fields).
         let wrong_shape = URL_SAFE_NO_PAD.encode(br#"{"provider":"github"}"#);
         assert!(
-            verify_state(SECRET, &format!("{wrong_shape}.{}", sign_payload(&wrong_shape))).is_none()
+            verify_state(
+                SECRET,
+                &format!("{wrong_shape}.{}", sign_payload(&wrong_shape))
+            )
+            .is_none()
         );
     }
 

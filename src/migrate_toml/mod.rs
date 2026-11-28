@@ -35,10 +35,7 @@ pub struct MigrateOptions {
 /// cannot express yet fall back to the legacy TOML path. The CLI
 /// migration does NOT use this gate — it migrates with documented drops
 /// (`metrics_listen`, `path_prefix`, protection-only fields).
-fn ensure_serving_parity(
-    config: &RawConfig,
-    converted: &Converted,
-) -> anyhow::Result<()> {
+fn ensure_serving_parity(config: &RawConfig, converted: &Converted) -> anyhow::Result<()> {
     if config.server.metrics_listen.is_some() {
         anyhow::bail!(
             "metrics_listen 依赖旧版回环指标端点（目录形态改用 GET /api/metrics），暂走旧路径"
@@ -56,7 +53,10 @@ fn ensure_serving_parity(
         if !seen.insert(route.host.clone()) {
             // Second route for the same host: distinct prefixes in valid
             // TOML, and prefix routing is not expressible yet.
-            anyhow::bail!("routes[{}] 重复域名（前缀路由需要 locations，暂走旧路径）", route.host);
+            anyhow::bail!(
+                "routes[{}] 重复域名（前缀路由需要 locations，暂走旧路径）",
+                route.host
+            );
         }
         if !route.websocket {
             // The legacy "reject upgrades" switch has no new-model
@@ -101,7 +101,10 @@ pub fn convert_to_dir(config_path: &Path, dir: &Path) -> anyhow::Result<()> {
     // harnesses may have written them already.
     let mut documents: Vec<(&str, serde_json::Value)> = vec![
         ("ferrumgate.json", converted.management.clone()),
-        ("webservice.json", serde_json::to_value(&converted.webservice)?),
+        (
+            "webservice.json",
+            serde_json::to_value(&converted.webservice)?,
+        ),
     ];
     if !raw.certificates.is_empty() || raw.acme.is_some() {
         documents.push(("ssl.json", serde_json::to_value(&converted.ssl)?));
@@ -166,9 +169,8 @@ pub fn run(options: &MigrateOptions) -> anyhow::Result<()> {
             for name in ["webservice.json", "ssl.json", "portforward.json"] {
                 let from = dir.join(name);
                 if from.exists() {
-                    std::fs::rename(&from, target.join(name)).with_context(|| {
-                        format!("备份 {} 失败", from.display())
-                    })?;
+                    std::fs::rename(&from, target.join(name))
+                        .with_context(|| format!("备份 {} 失败", from.display()))?;
                 }
             }
             backup = Some(target);
@@ -194,7 +196,8 @@ pub fn run(options: &MigrateOptions) -> anyhow::Result<()> {
     for (name, value) in &documents {
         let path = dir.join(name);
         let body = serde_json::to_string_pretty(value)?;
-        match std::fs::write(&path, body).with_context(|| format!("写入 {} 失败", path.display())) {
+        match std::fs::write(&path, body).with_context(|| format!("写入 {} 失败", path.display()))
+        {
             Ok(()) => written.push(path),
             Err(error) => {
                 write_error = Some(error);
@@ -206,10 +209,8 @@ pub fn run(options: &MigrateOptions) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            dir.join("ssl.json"),
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ =
+            std::fs::set_permissions(dir.join("ssl.json"), std::fs::Permissions::from_mode(0o600));
     }
 
     let outcome = if let Some(error) = &write_error {
@@ -230,10 +231,7 @@ pub fn run(options: &MigrateOptions) -> anyhow::Result<()> {
                 }
             }
         }
-        anyhow::bail!(
-            "自检失败，本次写入已回滚：{}",
-            problems.join("；")
-        );
+        anyhow::bail!("自检失败，本次写入已回滚：{}", problems.join("；"));
     }
 
     let report_json = serde_json::to_string_pretty(&converted.report)?;
@@ -260,12 +258,14 @@ pub fn convert(config: &RawConfig) -> Result<Converted, MigrateError> {
     let mut report = MigrateReport::default();
     let webservice = web::convert(config, &mut report).map_err(MigrateError::Invalid)?;
     let ssl = certs::convert(config, &mut report).map_err(MigrateError::Invalid)?;
-    let portforward =
-        portforward::convert(config, &mut report).map_err(MigrateError::Invalid)?;
+    let portforward = portforward::convert(config, &mut report).map_err(MigrateError::Invalid)?;
     report.summary.files = vec![
         ("webservice.json".to_owned(), {
             let listeners = &webservice.listeners;
-            listeners.iter().map(|listener| listener.sites.len()).sum::<usize>()
+            listeners
+                .iter()
+                .map(|listener| listener.sites.len())
+                .sum::<usize>()
         }),
         ("ssl.json".to_owned(), ssl.certs.len()),
         ("portforward.json".to_owned(), portforward.rules.len()),
@@ -306,8 +306,7 @@ pub fn verify_written(dir: &Path) -> Result<(), Vec<String>> {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     };
     if let Some(value) = read("webservice.json")
-        && let Ok(config) =
-            serde_json::from_value::<fg_gateway::web::model::FileConfig>(value)
+        && let Ok(config) = serde_json::from_value::<fg_gateway::web::model::FileConfig>(value)
     {
         let normalized = fg_gateway::web::validate::normalize(config);
         let _ = normalized;
@@ -315,7 +314,8 @@ pub fn verify_written(dir: &Path) -> Result<(), Vec<String>> {
         problems.push("webservice.json 无法读取或解析".to_owned());
     }
     if let Some(value) = read("ssl.json")
-        && let Ok(mut config) = serde_json::from_value::<fg_gateway::certs::model::FileConfig>(value)
+        && let Ok(mut config) =
+            serde_json::from_value::<fg_gateway::certs::model::FileConfig>(value)
     {
         if let Err(error) = fg_gateway::certs::validate::normalize(&mut config) {
             problems.push(error.to_string());

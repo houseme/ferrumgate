@@ -300,7 +300,6 @@ pub fn convert(config: &RawConfig, report: &mut MigrateReport) -> Result<FileCon
 mod tests {
     use super::*;
 
-
     fn config(toml_text: &str) -> RawConfig {
         toml::from_str::<RawConfig>(toml_text).expect("fixture parses")
     }
@@ -316,18 +315,23 @@ mod tests {
         assert_eq!(listener.port, 8080);
         let site = &listener.sites[0];
         assert_eq!(site.domains, vec!["app.test".to_owned()]);
-        assert_eq!(site.targets, vec![
-            "http://10.0.0.2:8080 weight=3".to_owned(),
-            "http://10.0.0.3:8081 backup".to_owned(),
-        ]);
+        assert_eq!(
+            site.targets,
+            vec![
+                "http://10.0.0.2:8080 weight=3".to_owned(),
+                "http://10.0.0.3:8081 backup".to_owned(),
+            ]
+        );
         // connect_timeout_ms = 3000 was explicit → kept per site in seconds.
         assert_eq!(site.timeouts_connect_secs, 3);
         // response header was not configured → conservative 30s kept.
         assert_eq!(site.timeouts_response_secs, 30);
-        assert!(report
-            .mapped
-            .iter()
-            .any(|m| m.from == "server.listen" && m.to == "listeners[0].listenIp + port"));
+        assert!(
+            report
+                .mapped
+                .iter()
+                .any(|m| m.from == "server.listen" && m.to == "listeners[0].listenIp + port")
+        );
     }
 
     #[test]
@@ -345,11 +349,11 @@ mod tests {
         assert_eq!(site.timeouts_connect_secs, 0);
         assert_eq!(site.timeouts_response_secs, 30);
         assert!(report.defaults_changed.iter().any(|change| {
-            change.field == "server.connect_timeout_ms"
-                && change.new_effective.contains("10 秒")
+            change.field == "server.connect_timeout_ms" && change.new_effective.contains("10 秒")
         }));
         assert!(report.defaults_changed.iter().any(|change| {
-            change.field == "server.response_header_timeout_ms" && change.old_effective.contains("30")
+            change.field == "server.response_header_timeout_ms"
+                && change.old_effective.contains("30")
         }));
     }
 
@@ -372,7 +376,10 @@ mod tests {
             "server.metrics_listen",
         ] {
             assert!(
-                report.dropped.iter().any(|d| d.field == field && !d.hint_key.is_empty()),
+                report
+                    .dropped
+                    .iter()
+                    .any(|d| d.field == field && !d.hint_key.is_empty()),
                 "{field} should be dropped with a hint"
             );
         }
@@ -407,5 +414,4 @@ mod tests {
         convert(&config(text), &mut report).expect("converts");
         assert!(report.dropped.iter().any(|d| d.field.contains("websocket")));
     }
-
 }

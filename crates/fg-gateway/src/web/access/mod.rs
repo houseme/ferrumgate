@@ -189,17 +189,19 @@ mod tests {
     #[test]
     fn whitelist_and_blacklist_directions() {
         let whitelist = decision(vec!["feeds"], true);
-        assert!(decide(
-            ip("203.0.113.9"),
-            false,
-            &whitelist,
-            &rules(),
-            "/",
-            true,
-            &no_country,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("203.0.113.9"),
+                false,
+                &whitelist,
+                &rules(),
+                "/",
+                true,
+                &no_country,
+                &contains
+            )
+            .is_ok()
+        );
         assert_eq!(
             decide(
                 ip("198.51.100.1"),
@@ -227,17 +229,19 @@ mod tests {
             ),
             Err(DenyReason::IpList)
         );
-        assert!(decide(
-            ip("198.51.100.1"),
-            false,
-            &blacklist,
-            &rules(),
-            "/",
-            true,
-            &no_country,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("198.51.100.1"),
+                false,
+                &blacklist,
+                &rules(),
+                "/",
+                true,
+                &no_country,
+                &contains
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -257,17 +261,19 @@ mod tests {
             Err(DenyReason::Knock)
         );
         // A private source needs no knock admission.
-        assert!(decide(
-            ip("192.168.1.5"),
-            false,
-            &d,
-            &rules(),
-            "/",
-            false,
-            &no_country,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("192.168.1.5"),
+                false,
+                &d,
+                &rules(),
+                "/",
+                false,
+                &no_country,
+                &contains
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -280,17 +286,19 @@ mod tests {
             auth: path_rules::AuthRule::Inherit,
             ip_list: vec!["feeds".to_owned()],
         }];
-        assert!(decide(
-            ip("203.0.113.9"),
-            false,
-            &d,
-            &overrides,
-            "/",
-            true,
-            &no_country,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("203.0.113.9"),
+                false,
+                &d,
+                &overrides,
+                "/",
+                true,
+                &no_country,
+                &contains
+            )
+            .is_ok()
+        );
         assert_eq!(
             decide(
                 ip("203.0.113.9"),
@@ -331,9 +339,7 @@ mod tests {
         let mut d = decision(vec![], false);
         d.country_mode = Some(CountryMode::Allow);
         d.countries = vec!["CN".to_owned()];
-        let country_of = |ip: IpAddr| {
-            (ip.to_string().starts_with("203.")).then(|| "US".to_owned())
-        };
+        let country_of = |ip: IpAddr| (ip.to_string().starts_with("203.")).then(|| "US".to_owned());
         // Allow mode rejects a US source.
         assert_eq!(
             decide(
@@ -349,30 +355,34 @@ mod tests {
             Err(DenyReason::Country)
         );
         // A private address passes regardless of its country.
-        assert!(decide(
-            ip("192.168.1.5"),
-            false,
-            &d,
-            &rules(),
-            "/",
-            true,
-            &country_of,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("192.168.1.5"),
+                false,
+                &d,
+                &rules(),
+                "/",
+                true,
+                &country_of,
+                &contains
+            )
+            .is_ok()
+        );
         // Deny mode admits unknown-country addresses.
         d.country_mode = Some(CountryMode::Deny);
-        assert!(decide(
-            ip("198.51.100.1"),
-            false,
-            &d,
-            &rules(),
-            "/",
-            true,
-            &no_country,
-            &contains
-        )
-        .is_ok());
+        assert!(
+            decide(
+                ip("198.51.100.1"),
+                false,
+                &d,
+                &rules(),
+                "/",
+                true,
+                &no_country,
+                &contains
+            )
+            .is_ok()
+        );
         // Deny mode rejects listed countries: switch the list to the US.
         d.countries = vec!["US".to_owned()];
         assert_eq!(

@@ -190,7 +190,12 @@ mod tests {
         assert_eq!(entry.acme["profile"], "shortlived");
         assert_eq!(entry.acme["renewBeforeDays"], 2); // integer division 50/24 = 2
         assert!(file.settings.default_email.contains("@"));
-        assert!(report.dropped.iter().any(|d| d.field == "acme.accept_terms"));
+        assert!(
+            report
+                .dropped
+                .iter()
+                .any(|d| d.field == "acme.accept_terms")
+        );
         assert!(report.dropped.iter().any(|d| d.field == "acme.state_dir"));
     }
 

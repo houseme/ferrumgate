@@ -214,7 +214,9 @@ fn compile_forward_auth(
     };
     let url = raw.url.trim().to_owned();
     if url.is_empty() {
-        errors.push(format!("site {label}: forwardAuth.url 必须是 http(s) 绝对地址"));
+        errors.push(format!(
+            "site {label}: forwardAuth.url 必须是 http(s) 绝对地址"
+        ));
         return None;
     }
     let mut copy_headers = Vec::new();

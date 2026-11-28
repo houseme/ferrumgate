@@ -172,9 +172,12 @@ mod tests {
             }
             _ => panic!("expected updated, got {outcome:?}"),
         }
-        assert!(registry.get("feeds").expect("stored").contains(
-            "1.2.3.4".parse().expect("ip")
-        ));
+        assert!(
+            registry
+                .get("feeds")
+                .expect("stored")
+                .contains("1.2.3.4".parse().expect("ip"))
+        );
         // The cache file exists for the next restart.
         assert!(dir.join("iplist-feeds.cache").exists());
     }
@@ -192,9 +195,12 @@ mod tests {
         let outcome = refresh_once(&feed("http://feed.test/list"), &dir, &fetch, &store);
         assert!(matches!(outcome, RefreshOutcome::Failed { .. }));
         // The cached list landed in the registry despite the failure.
-        assert!(registry.get("feeds").expect("from cache").contains(
-            "1.2.3.4".parse().expect("ip")
-        ));
+        assert!(
+            registry
+                .get("feeds")
+                .expect("from cache")
+                .contains("1.2.3.4".parse().expect("ip"))
+        );
         // The next wake is the retry backoff, not the full interval.
         assert_eq!(next_wake(&outcome, &feed("x")), RETRY_BACKOFF);
     }
@@ -227,7 +233,10 @@ mod tests {
         short.refresh = Duration::from_secs(30);
         assert_eq!(short.refresh_clamped(), MIN_REFRESH);
         // Success wakes on the clamped interval.
-        let outcome = RefreshOutcome::Updated { entries: 1, skipped: 0 };
+        let outcome = RefreshOutcome::Updated {
+            entries: 1,
+            skipped: 0,
+        };
         assert_eq!(next_wake(&outcome, &feed("x")), DEFAULT_REFRESH);
     }
 }

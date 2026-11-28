@@ -37,7 +37,9 @@ mod tests {
 
     #[test]
     fn with_auth_optional_only_marked_rules_require_auth() {
-        let scope = AuthScope { auth_optional: true };
+        let scope = AuthScope {
+            auth_optional: true,
+        };
         // No rule, or a public rule: the path is open.
         assert!(!scope.requires_auth(None));
         assert!(!scope.requires_auth(Some(false)));

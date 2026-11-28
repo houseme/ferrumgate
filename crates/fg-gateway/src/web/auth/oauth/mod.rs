@@ -6,7 +6,7 @@
 pub mod flow;
 pub mod state;
 
-pub use state::{sign_state, verify_state, OAuthState};
+pub use state::{OAuthState, sign_state, verify_state};
 
 /// One configured provider. `key` doubles as the identity prefix
 /// (`github:octocat`).
@@ -163,7 +163,11 @@ mod tests {
         // 精确命中。
         assert!(identity_matches(&allow, "github", &ids(&["octocat"])));
         // 别名（数字 ID）同样命中。
-        assert!(identity_matches(&allow, "github", &ids(&["other-login", "12345"])));
+        assert!(identity_matches(
+            &allow,
+            "github",
+            &ids(&["other-login", "12345"])
+        ));
         // 列表中的标识都不匹配。
         assert!(!identity_matches(&allow, "github", &ids(&["someone-else"])));
         // 没有任何标识。
@@ -173,9 +177,17 @@ mod tests {
     #[test]
     fn identity_matches_wildcard_and_provider_gate() {
         let wildcard = [allow_entry("google", "*")];
-        assert!(identity_matches(&wildcard, "google", &ids(&["anyone@gmail.com"])));
+        assert!(identity_matches(
+            &wildcard,
+            "google",
+            &ids(&["anyone@gmail.com"])
+        ));
         // 通配也不跨提供方。
-        assert!(!identity_matches(&wildcard, "github", &ids(&["anyone@gmail.com"])));
+        assert!(!identity_matches(
+            &wildcard,
+            "github",
+            &ids(&["anyone@gmail.com"])
+        ));
 
         // 精确条目对不同的提供方不命中，即使标识相同。
         let exact = [allow_entry("github", "octocat")];

@@ -162,7 +162,10 @@ fn parse_entry(field: &str) -> Option<Span> {
         };
     }
     if let Some((start, end)) = field.split_once('-') {
-        let (start, end) = (IpAddr::from_str(start.trim()).ok()?, IpAddr::from_str(end.trim()).ok()?);
+        let (start, end) = (
+            IpAddr::from_str(start.trim()).ok()?,
+            IpAddr::from_str(end.trim()).ok()?,
+        );
         return match (start, end) {
             (IpAddr::V4(start), IpAddr::V4(end)) if start <= end => Some(Span::V4(start, end)),
             (IpAddr::V6(start), IpAddr::V6(end)) if start <= end => Some(Span::V6(start, end)),
@@ -192,16 +195,16 @@ fn broadcast_end6(net: &ipnet::Ipv6Net) -> std::net::Ipv6Addr {
 }
 
 /// Sorts and merges overlapping or adjacent spans.
-fn merge_v4(mut spans: Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)>) -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
+fn merge_v4(
+    mut spans: Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)>,
+) -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
     spans.sort();
     let mut merged: Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> = Vec::with_capacity(spans.len());
     for (start, end) in spans {
         match merged.last_mut() {
             // Overlapping or adjacent (end + 1 == next start) merge; the
             // u32 arithmetic sidesteps the last-address overflow.
-            Some((_, last_end))
-                if start.to_bits() <= last_end.to_bits().saturating_add(1) =>
-            {
+            Some((_, last_end)) if start.to_bits() <= last_end.to_bits().saturating_add(1) => {
                 if end.to_bits() > last_end.to_bits() {
                     *last_end = end;
                 }
@@ -212,14 +215,14 @@ fn merge_v4(mut spans: Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)>) -> Vec<(st
     merged
 }
 
-fn merge_v6(mut spans: Vec<(std::net::Ipv6Addr, std::net::Ipv6Addr)>) -> Vec<(std::net::Ipv6Addr, std::net::Ipv6Addr)> {
+fn merge_v6(
+    mut spans: Vec<(std::net::Ipv6Addr, std::net::Ipv6Addr)>,
+) -> Vec<(std::net::Ipv6Addr, std::net::Ipv6Addr)> {
     spans.sort();
     let mut merged: Vec<(std::net::Ipv6Addr, std::net::Ipv6Addr)> = Vec::with_capacity(spans.len());
     for (start, end) in spans {
         match merged.last_mut() {
-            Some((_, last_end))
-                if start <= next_after(*last_end) =>
-            {
+            Some((_, last_end)) if start <= next_after(*last_end) => {
                 if end > *last_end {
                     *last_end = end;
                 }
@@ -292,7 +295,10 @@ mod tests {
     #[test]
     fn parses_entries_comments_and_counts_skipped() {
         let parsed = IpSet::parse(SAMPLE.as_bytes()).expect("parses");
-        assert_eq!(parsed.entries, 5, "5 recognized entries: ip, cidr, annotated cidr, range, v6 net");
+        assert_eq!(
+            parsed.entries, 5,
+            "5 recognized entries: ip, cidr, annotated cidr, range, v6 net"
+        );
         assert_eq!(parsed.skipped, vec!["not-an-address".to_owned()]);
         let set = &parsed.set;
         assert!(set.contains(ip("1.2.3.4")));
@@ -334,7 +340,12 @@ mod tests {
         let registry = Registry::new();
         let parsed = IpSet::parse(b"1.2.3.4\n").expect("parses");
         registry.store("feed", Some(Arc::new(parsed.set)));
-        assert!(registry.get("feed").expect("stored").contains(ip("1.2.3.4")));
+        assert!(
+            registry
+                .get("feed")
+                .expect("stored")
+                .contains(ip("1.2.3.4"))
+        );
         registry.store("feed", None);
         assert!(registry.get("feed").is_none());
     }

@@ -19,7 +19,9 @@ pub enum TrustedCred {
     SiteSession,
     SsoCookie,
     /// Recently verified basic credentials carry an expiry.
-    Basic { exp: Instant },
+    Basic {
+        exp: Instant,
+    },
     BackendMarker,
     AdminBridge,
 }
@@ -115,8 +117,14 @@ mod tests {
             base,
             BasicTrustCache::key(SECRET, "other.example.com", "alice", "pw")
         );
-        assert_ne!(base, BasicTrustCache::key(SECRET, "site.example.com", "bob", "pw"));
-        assert_ne!(base, BasicTrustCache::key(SECRET, "site.example.com", "alice", "pw2"));
+        assert_ne!(
+            base,
+            BasicTrustCache::key(SECRET, "site.example.com", "bob", "pw")
+        );
+        assert_ne!(
+            base,
+            BasicTrustCache::key(SECRET, "site.example.com", "alice", "pw2")
+        );
         assert_ne!(
             base,
             BasicTrustCache::key(SECRET, "site.example.com", "alic", "e pw")
@@ -135,7 +143,10 @@ mod tests {
         assert_eq!(a, b);
         // SHA-256 output size as lowercase hex.
         assert_eq!(a.len(), 64);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]

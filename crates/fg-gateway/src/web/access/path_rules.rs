@@ -100,8 +100,7 @@ mod tests {
             },
         ];
         assert_eq!(
-            select(&rules, &normalize("/admin/secret/keys"))
-                .map(|rule| rule.prefix.as_str()),
+            select(&rules, &normalize("/admin/secret/keys")).map(|rule| rule.prefix.as_str()),
             Some("/admin/secret")
         );
         assert_eq!(

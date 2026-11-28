@@ -10,10 +10,9 @@ use std::time::Duration;
 
 use http_body_util::Empty;
 use hyper::{
-    HeaderMap,
+    HeaderMap, Method, Request, StatusCode,
     body::Bytes,
-    header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE, HeaderName, HeaderValue},
-    Method, Request, StatusCode,
+    header::{AUTHORIZATION, COOKIE, HeaderName, HeaderValue, LOCATION, SET_COOKIE},
 };
 use tokio::time::timeout;
 
@@ -99,8 +98,7 @@ impl Default for ForwardAuth {
 /// `Remote-*` or one of [`KNOWN_IDENTITY_HEADERS`]; a [`HeaderName`] is
 /// always lowercase, so plain string checks suffice.
 fn is_known_identity_header(name: &HeaderName) -> bool {
-    name.as_str().starts_with("remote-")
-        || KNOWN_IDENTITY_HEADERS.contains(&name.as_str())
+    name.as_str().starts_with("remote-") || KNOWN_IDENTITY_HEADERS.contains(&name.as_str())
 }
 
 impl ForwardAuth {
@@ -324,8 +322,7 @@ pub async fn sub_request(
                     .iter()
                     .filter_map(|value| value.to_str().ok())
                     .collect();
-                (!values.is_empty())
-                    .then(|| (name.clone(), values.join(", ")))
+                (!values.is_empty()).then(|| (name.clone(), values.join(", ")))
             })
             .collect();
         return SubRequestOutcome::Allowed {
@@ -416,7 +413,10 @@ mod tests {
             "",
         ];
         for url in bad {
-            let fa = ForwardAuth { url: url.to_string(), ..ForwardAuth::default() };
+            let fa = ForwardAuth {
+                url: url.to_string(),
+                ..ForwardAuth::default()
+            };
             let problems = fa.validate();
             assert_eq!(problems.len(), 1, "url {url:?} → {problems:?}");
             assert!(
@@ -493,7 +493,10 @@ mod tests {
         let fa = good();
         assert_eq!(fa.login_redirect("https://site.example.com/x", "GET"), None);
         // login_from_location is the caller's signal, not a login_url.
-        let fa = ForwardAuth { login_from_location: true, ..good() };
+        let fa = ForwardAuth {
+            login_from_location: true,
+            ..good()
+        };
         assert_eq!(fa.login_redirect("https://site.example.com/x", "GET"), None);
     }
 

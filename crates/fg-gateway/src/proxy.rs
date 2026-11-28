@@ -322,15 +322,12 @@ impl Proxy {
                             // dropped. hyper has no nginx-444, so the
                             // answer is a bare 422 with an empty body
                             // and no content type.
-                            let mut response: Reply = Response::new(Either::Right(
-                                Either::Left(Full::new(Bytes::new())),
-                            ));
+                            let mut response: Reply =
+                                Response::new(Either::Right(Either::Left(Full::new(Bytes::new()))));
                             *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
                             response
                         }
-                        crate::web::access::DenyMode::Forbid403 => {
-                            reply(StatusCode::FORBIDDEN)
-                        }
+                        crate::web::access::DenyMode::Forbid403 => reply(StatusCode::FORBIDDEN),
                     };
                 }
             }
@@ -339,16 +336,16 @@ impl Proxy {
             // bridge validates): the sub-request decides allow/redirect/
             // status before anything else touches the request.
             if let Some(forward) = &options.forward_auth {
-                let scheme = if tls_identity.is_some() { "https" } else { "http" };
+                let scheme = if tls_identity.is_some() {
+                    "https"
+                } else {
+                    "http"
+                };
                 let full_url = format!("{scheme}://{host}{}", target.as_str());
                 let outcome = auth::forward_auth::sub_request(
                     forward,
                     request.headers(),
-                    (
-                        request.method().as_str(),
-                        &full_url,
-                        target.as_str(),
-                    ),
+                    (request.method().as_str(), &full_url, target.as_str()),
                     peer.ip(),
                 )
                 .await;
@@ -881,7 +878,10 @@ fn basic_challenge(status: StatusCode) -> Reply {
 /// verbatim, and an unreachable auth service is a 502.
 fn forward_auth_reply(outcome: auth::forward_auth::SubRequestOutcome) -> Reply {
     match outcome {
-        auth::forward_auth::SubRequestOutcome::Redirect { location, set_cookies } => {
+        auth::forward_auth::SubRequestOutcome::Redirect {
+            location,
+            set_cookies,
+        } => {
             // Raw Set-Cookie values from the auth service pass through:
             // shape them as bare cookie pairs for the reply builder.
             let cookies = set_cookies

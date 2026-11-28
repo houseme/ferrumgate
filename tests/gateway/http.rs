@@ -291,7 +291,8 @@ async fn keeps_last_config_and_drains_inflight_requests() -> Result<()> {
     })
     .await?;
     // Legacy runtime: the replace+SIGHUP reload parity lives on the TOML path.
-    let mut gateway = Gateway::spawn_toml(&config(&route("app.test", old.addr, "/"), "", "")).await?;
+    let mut gateway =
+        Gateway::spawn_toml(&config(&route("app.test", old.addr, "/"), "", "")).await?;
     let mut client = http_client(connect(gateway.addr).await?).await?;
     assert_eq!(get(&mut client, "app.test", "/").await?.1, "old");
     gateway.replace("malformed data")?;
