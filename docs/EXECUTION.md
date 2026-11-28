@@ -1426,3 +1426,19 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-55 WAF 实例与站点集成（引擎层第一梯队交付）
 
 - 2026-11-28 交付 9909249。fg-waf-engine（纯引擎，无 tokio、全借用零拷贝）：请求模型（headers 切片引用 + 主体摘要，默认送检 12.5 MiB 可钳制）、规则集 JSON（camelCase、四种互斥匹配形态：单条件〔negate/大小写不敏感〕与 all/any/not 嵌套）、8 字段 × 6 运算符（regex/contains/equals/prefix/suffix/ipIn〔仅 clientIp，IP/CIDR 列表〕）、allow/deny/count 动作（首 deny 生效、allow 短路、count 继续计数）。compile() 校验全部启用规则并收集所有错误（停用规则整体跳过便于 UI 保存）、预编译正则与 IP 集、上限集中（512 规则/深度 8/4096 字符/1 MiB 编译体积/1024 条目）；不可变 Compiled 经 ArcSwap 发布，每请求一次快照、命中前零分配；热重载失败保留旧快照。事件复用既有 `waf.blocked` Kind（fg-core 零改动），经集成层钩子发布；`ferrumgate_waf_*` 指标含总量/每规则命中/编译错误。63 项测试（UTF-8 截断不 panic、Unicode 折叠、IPv6 前缀等）；clippy -D warnings、fmt 干净。**后续梯队**：SecLang/CRS 解析、五阶段事务与异常评分、请求体解析器、libinjection、正则预过滤（E1-E11）；站点管道接线与管理接口（fg-waf 模块 crate）随集成层交付。
+
+### WP-52 日志规则与 jails（完整交付）
+
+- 2026-11-28 交付 7d99852。fg-guard 的 jail 引擎：七类来源（文件 tail 带轮转/copytruncate/删除重建处理、journalctl -f、命令带退避重启、docker 留 DockerFollow trait 待 WP-60、事件总线订阅、web 路径、TLS 握手失败）× 17 个预设模板（全部可编译并过校验）；`<HOST>` 命名捕获（IPv4/方括号 IPv6/裸 IPv6/::ffff: 映射形）；滑窗计数按 /32 与 /64 聚合、50000 上限按活跃序淘汰；达阈值即 `ban_auto`（来源 `jail:<key>`）→ 经既有钩子直入 WP-51 防火墙镜像；白名单/ignorePrivate/已封禁不计。web 探测（正则或分段通配、默认 404/403/444、trusted_user 不计）与 TLS 八类失败经 ProbeSink 供 WP-21/28 在请求结束/握手失败时调用。12 个管理操作 + jails 汇总进 /api/guard/status。122 项测试（67 新增、零回归）；clippy -D warnings、fmt 干净。**已核实偏差**：预设数量文档三处矛盾（16/18/17），按 §3.3 表 17 个实现并断言 ≥17；8 个非 Gately 预设的 filter 按 fail2ban 惯例 RE2 写成，待上游快照核对。**接线点**：`ProbeHub::new(engine)` 交 WP-21/28；docker 源保存即 400 直到 WP-60 调 `engine.set_docker`。
+
+### WP-44 frp（完整模块交付）
+
+- 2026-11-28 交付 772cfc0。fg-frp：frpc/frps 实例经 fg-proc 监督运行，配置渲染为 frp 0.52+ TOML（字段逐项对照 frp 源码 pkg/config/v1；QUIC 调优默认与上限集中）；reconcile 只重启渲染配置变化的实例、drain 15 秒有界停止、0600 配置落盘、密钥输出脱敏。frps 登录检查端点实现 frp server-plugin 协议（拒绝名单 → 常量时间 token → 黑白名单含订阅 IP 集），已登录 frpc 来源登记为 10 分钟可信并学习远端端口为开放端口（4096 上限）；代理地址按类型映射（http/https 回退 frps vhost）。INI 与 TOML 导入上报被忽略字段、新实例默认停用。45 个操作按集合契约；自检报告冲突与重复。51 项测试（rustc 编译的 frpc/frps 夹具 + 假上游安装）；clippy -D warnings、fmt 干净。fg-proc 的 FRPC/FRPS 规格与上游命名核对无差异。真实 frp 联调与根进程接线（fwopen Group、OpenPorts、可信来源消费）随后续。
+
+### WP-55 WAF 引擎层第一梯队交付
+
+（见前文 9909249 条目。）
+
+### WP-66 File Browser（完整模块交付）
+
+- 2026-11-28 主会话接手交付 e99968a（原 agent 三次模型流拥堵）。fg-filebrowser 托管 FileBrowser **Quantum**（gtsteffaniak/filebrowser；fg-proc 的 FILEBROWSER 规格一并修正为该分支，资产模式对照 v2.1.0-stable 发布核实——裸二进制 `{os}-{arch}-filebrowser`，Windows 裸 `filebrowser.exe` 单模式无法表达、显式不匹配并注明待 WP-92 扩展；校验取 GitHub 资产摘要）。Quantum 配置 schema 直接对照其 v2.1.0-stable 的 settings 结构体核实后渲染：http.listen/port/baseURL/externalUrl/disableWebDAV/trustProxyHeaders、auth.tokenExpirationHours + methods.{proxy.header,noauth}、server.sources[].config.readOnly。管理员密码只走环境变量（配置文件写 `${FILEBROWSER_ADMIN_PASSWORD}` 引用，Quantum 的 admin-password 启动重置语义每次启动同步 Gately 设置）；配置文件 0600 落实例数据目录；共享目录必须绝对路径且与配置目录三种重叠（相等/在内/包含）全部拒绝；proxy 认证非回环监听出警告；缺失来源或程序不启动并在卡片显示原因。21 个操作（实例集合 + secrets 明文 + 安装 check/rollback/backups + reset 保程序；安装完成自动重启启用实例）。19 项测试（rustc 编译夹具绑定所配端口）；clippy -D warnings、fmt 干净。真实 Quantum 联调按文档标注未验证。
