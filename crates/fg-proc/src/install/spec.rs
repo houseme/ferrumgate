@@ -121,14 +121,18 @@ pub static EASYTIER: ProgramSpec = ProgramSpec {
     version_args: &["--version"],
 };
 
-/// File Browser（WP-66）。
+/// File Browser（WP-66）：托管的是仍在维护的 FileBrowser **Quantum** 分支
+/// （原版 filebrowser/filebrowser 已归档）。资产为裸二进制
+/// `linux-amd64-filebrowser`，无打包后缀，Windows 资产是裸
+/// `filebrowser.exe`（单模式无法同时表达，Windows 安装待 WP-92 扩展）。
+/// 校验值取 GitHub 资产自带的摘要。2026-11-28 对照 v2.1.0-stable 复核。
 pub static FILEBROWSER: ProgramSpec = ProgramSpec {
     name: "filebrowser",
     files: &["filebrowser"],
     source: &ReleaseSource::Github {
-        repo: "filebrowser/filebrowser",
-        asset_pattern: "{os}-{arch}-filebrowser.{pkg}",
-        checksum: ChecksumSource::None,
+        repo: "gtsteffaniak/filebrowser",
+        asset_pattern: "{os}-{arch}-filebrowser",
+        checksum: ChecksumSource::AssetDigest,
     },
     version_args: &["version"],
 };
@@ -253,7 +257,7 @@ mod tests {
         assert!(TAILSCALE.asset_pattern().is_none());
         assert_eq!(
             FILEBROWSER.asset_pattern(),
-            Some("{os}-{arch}-filebrowser.{pkg}")
+            Some("{os}-{arch}-filebrowser")
         );
     }
 }
