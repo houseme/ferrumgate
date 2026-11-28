@@ -1,0 +1,29 @@
+[package]
+name = "fg-easytier"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["json"] }
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+fg-net.workspace = true
+fg-proc.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }
