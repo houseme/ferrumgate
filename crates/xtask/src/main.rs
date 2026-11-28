@@ -1,10 +1,12 @@
-//! Repository maintenance tasks: `xtask i18n-extract`, `xtask i18n-check`
-//! and the WP-90 module manifest commands under `xtask modules`.
+//! Repository maintenance tasks: `xtask i18n-extract`, `xtask i18n-check`,
+//! the WP-90 module manifest commands under `xtask modules` and the WP-91 CI
+//! jobs under `xtask ci`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
+pub mod ci;
 pub mod i18n;
 pub mod modules;
 
@@ -47,6 +49,10 @@ fn main() -> Result<()> {
         "modules" => {
             let rest: Vec<String> = arguments.collect();
             modules::run(&root, &rest)
+        }
+        "ci" => {
+            let rest: Vec<String> = arguments.collect();
+            ci::run(&root, &rest)
         }
         other => bail!("unknown task {other}"),
     }

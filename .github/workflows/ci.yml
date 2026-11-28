@@ -1,0 +1,139 @@
+# 持续集成（WP-91，docs/plan/WP-91-ci.md）。
+#
+# 原则（WP-91 §3.3 / §8）：工作流只负责「在哪个系统上、装什么工具、按什么顺序
+# 触发」；检查逻辑都在 `cargo xtask ci <job>`，本地用同一条命令即可复现 CI 的
+# 失败。本期接入 fmt / clippy / test / modules 四个基础 job（WP-91 实施步骤
+# 1～2，外加 WP-90 要求进 CI 的 modules check）；matrix、each-feature、cross、
+# x86、ui、e2e、supply-chain、msrv、pebble、openwrt 随对应工作包
+# （WP-32/65/80/92 等）逐步加入。
+#
+# 平台：全部 job 运行在 ubuntu（部署目标，WP-91 §3.3 job 表）；macOS arm64 是
+# 开发平台，由本地交付检查覆盖；Windows 打包暂缓（WP-92），不设 Windows
+# runner；darwin/freebsd 等目标随后续 cross job 在 Linux 上交叉检查。
+
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# WP-91 §3.3：按分支或标签分组，新提交取消进行中的旧运行。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# WP-91 §3.3：持续集成只需要读权限；写权限（发布、镜像、来源证明）属于
+# WP-92～94 的发布流水线。
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # 交付命令一：cargo fmt --all --check、git diff --check，另加 actionlint
+  # 检查工作流文件本身（WP-91 §3.3 fmt job）。
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust stable (rustfmt)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: rustfmt
+          cache: false
+      # WP-91 §3.3：下载的外部二进制固定版本并校验 SHA-256。
+      - name: Install actionlint v1.7.12 (pinned, SHA-256 verified)
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tgz" \
+            "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz"
+          echo "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  $RUNNER_TEMP/actionlint.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tgz" -C "$RUNNER_TEMP" actionlint
+          sudo install -m 0755 "$RUNNER_TEMP/actionlint" /usr/local/bin/actionlint
+      - name: Formatting, whitespace and workflow files
+        run: cargo run --locked -p xtask -- ci fmt
+
+  # 交付命令二：cargo clippy --workspace --locked --all-targets -- -D warnings。
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust stable (clippy)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: clippy
+          cache: false
+      # WP-91 §3.3：只缓存 Cargo 注册表、git 依赖与 target/；键带工具链版本、
+      # 锁文件哈希与 job 名（本 job 的特性组合固定，job 名即代表）；
+      # 不缓存任何第三方二进制。
+      - name: Cache cargo registry, git deps and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-stable-${{ github.job }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-stable-${{ github.job }}-
+      - name: Lint
+        run: cargo run --locked -p xtask -- ci clippy
+
+  # 交付命令三：cargo test --workspace --locked。需要外部环境的测试
+  # （ACME 端到端、真实 STUN 等）默认跳过并在输出里说明（WP-91 §3.3）。
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      - name: Cache cargo registry, git deps and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-stable-${{ github.job }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-stable-${{ github.job }}-
+      - name: Test
+        run: cargo run --locked -p xtask -- ci test
+
+  # WP-90：features.toml ↔ 生成物 ↔ 模块 crate 的一致性检查进 CI
+  # （改特性不改生成物、清单与 crate 脱节都会在这里失败）。
+  modules:
+    name: modules check
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      - name: Module manifest consistency
+        run: cargo run --locked -p xtask -- ci modules-check

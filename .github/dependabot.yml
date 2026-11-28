@@ -1,0 +1,17 @@
+# 依赖更新提示（WP-91 §3.3）：Cargo 依赖与 GitHub Actions，每周一次；
+# 更新 PR 与普通 PR 一样走完整 CI。Docker 基础镜像条目随 WP-92 的
+# Dockerfile 一起加入（仓库尚无镜像清单，先加会常驻报错）。
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  # - package-ecosystem: "docker"   # WP-92 加入 Dockerfile 后启用
+  #   directory: "/"
+  #   schedule:
+  #     interval: "weekly"
