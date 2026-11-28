@@ -1,0 +1,62 @@
+# cargo-deny configuration for the supply-chain job (WP-91 §3.3).
+# The allow list below is the complete license inventory of Cargo.lock as of
+# 2026-11-28, collected from `cargo metadata` — every entry maps to packages
+# in the dependency tree; extend it only with a new dependency's license and
+# a comment naming it. Duplicate crates are informational (`cargo tree
+# --duplicates`, bans.multiple-versions = warn); security advisories come
+# from the RustSec database; sources are restricted to crates.io.
+
+[graph]
+# Every target is checked (targets unset = all), so platform-specific
+# dependencies (UEFI, Windows) are covered by the same license policy.
+all-features = true
+
+[licenses]
+version = 2
+allow = [
+    # This repository and most transitive crates.
+    "Apache-2.0",
+    "MIT",
+    # rustls / rustls-webpki / untrusted / ring (Apache-2.0 AND ISC for ring).
+    "ISC",
+    # curve25519-dalek, ed25519-dalek, subtle; matchit adds BSD-3-Clause too.
+    "BSD-3-Clause",
+    # zerocopy.
+    "BSD-2-Clause",
+    # fiat-crypto.
+    "BSD-1-Clause",
+    # ryu.
+    "BSL-1.0",
+    # adler2.
+    "0BSD",
+    # aho-corasick, byteorder, jiff, walkdir, same-file.
+    "Unlicense",
+    # miniz_oxide, lru-slab, tinyvec, zlib-rs.
+    "Zlib",
+    # unicode-ident, unicode-normalization, the icu_* stack.
+    "Unicode-3.0",
+    # webpki-roots / webpki-root-certs.
+    "CDLA-Permissive-2.0",
+    # webauthn-rs family, crypto-glue.
+    "MPL-2.0",
+    # r-efi (UEFI-only target dependencies).
+    "LGPL-2.1-or-later",
+    # cap-std family / winx (Windows target).
+    "Apache-2.0 WITH LLVM-exception",
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+[bans]
+# Duplicates stay informational here; the job additionally runs
+# `cargo tree --locked --duplicates` so the listing is visible in logs.
+multiple-versions = "warn"
+
+[advisories]
+version = 2
+# Vulnerabilities and unmaintained warnings fail via `cargo deny check`'s
+# default severity handling; yanked crates are denied outright.
+yanked = "deny"

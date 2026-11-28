@@ -95,6 +95,7 @@ impl Job {
             Job::Matrix,
             Job::EachFeature,
             Job::Docs,
+            Job::SupplyChain,
             Job::ApiDocs,
         ]
     }
@@ -156,6 +157,7 @@ impl Job {
                 | Job::Matrix
                 | Job::EachFeature
                 | Job::Docs
+                | Job::SupplyChain
         )
     }
 
@@ -168,9 +170,6 @@ impl Job {
             Job::X86 => "waiting on WP-65: the SMB parser crate is not testable on i686 yet",
             Job::Ui => "waiting on WP-80: the trunk-based UI build is not wired yet",
             Job::E2e => "waiting on WP-80: the browser end-to-end cases are not wired yet",
-            Job::SupplyChain => {
-                "waiting on WP-91 step 5: deny.toml plus cargo-deny / cargo-audit wiring"
-            }
             Job::ApiDocs => "waiting on WP-11: `fgate api-docs` snapshot comparison",
             Job::Msrv => {
                 "no minimum supported toolchain declared yet; per AGENT.md a lower toolchain must run CI before it is announced"
@@ -216,6 +215,32 @@ impl Job {
                 let mut doc = cargo_command(root, DOC_ARGS);
                 doc.env("RUSTDOCFLAGS", RUSTDOCFLAGS_DENY_WARNINGS);
                 run_command(&mut doc, "cargo doc")?;
+            }
+            Job::SupplyChain => {
+                // WP-91 §3.3: licenses + advisories + sources through
+                // cargo-deny, the RustSec audit, and an informational
+                // duplicate listing. A missing tool skips its part with an
+                // explanation (the CI job installs pinned builds) — the
+                // gate never fails silently, it just names what it skipped.
+                if has_binary("cargo-deny") {
+                    // `--locked` is a global flag in cargo-deny 0.22+.
+                    cargo(root, &["deny", "--locked", "check"])?;
+                } else {
+                    println!(
+                        "ci supply-chain: skip cargo deny (not on PATH; the CI job installs a pinned build)"
+                    );
+                }
+                if has_binary("cargo-audit") {
+                    let mut audit = cargo_command(root, &["audit"]);
+                    run_command(&mut audit, "cargo audit")?;
+                } else {
+                    println!(
+                        "ci supply-chain: skip cargo audit (not on PATH; the CI job installs a pinned build)"
+                    );
+                }
+                // Informational by design: prints duplicate crates without
+                // failing the job (bans.multiple-versions stays warn).
+                cargo(root, &["tree", "--locked", "--duplicates"])?;
             }
             _ => bail!(
                 "ci {} is not wired yet: {}",
@@ -353,6 +378,7 @@ mod tests {
                 "matrix",
                 "each-feature",
                 "docs",
+                "supply-chain",
                 "api-docs"
             ]
         );

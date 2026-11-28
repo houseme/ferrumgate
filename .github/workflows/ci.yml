@@ -137,3 +137,35 @@ jobs:
           cache: false
       - name: Module manifest consistency
         run: cargo run --locked -p xtask -- ci modules-check
+
+  # WP-91 §3.3 supply-chain：许可证白名单（deny.toml 逐项列出）与来源限制
+  # 经 cargo-deny，RustSec 安全公告经 cargo-audit，重复依赖以
+  # `cargo tree --duplicates` 输出到日志（信息性，不失败）。
+  supply-chain:
+    name: supply-chain
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust stable
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          cache: false
+      # WP-91 §3.3：下载的工具固定版本；advisory 数据库缓存到
+      # cargo-deny（advisory-dbs）与 cargo-audit（advisory-db）各自的目录。
+      - name: Install cargo-deny 0.22.2 and cargo-audit 0.23.0 (pinned)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.22.2,cargo-audit@0.23.0
+      - name: Cache advisory databases
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/advisory-dbs
+            ~/.cargo/advisory-db
+          key: ${{ runner.os }}-stable-${{ github.job }}-advisories
+      - name: Supply-chain checks
+        run: cargo run --locked -p xtask -- ci supply-chain

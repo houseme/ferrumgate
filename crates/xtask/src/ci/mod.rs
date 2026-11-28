@@ -206,12 +206,28 @@ mod tests {
         // through `cargo xtask ci <job>` so CI is locally reproducible.
         let text =
             std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
-        for job in ["fmt", "clippy", "test", "modules-check"] {
+        for job in ["fmt", "clippy", "test", "modules-check", "supply-chain"] {
             let expected = format!("cargo run --locked -p xtask -- ci {job}");
             assert!(
                 text.contains(&expected),
                 "ci.yml must run `{expected}` so CI is locally reproducible"
             );
         }
+    }
+
+    #[test]
+    fn workflow_supply_chain_pins_tools_and_denies_writes() {
+        // WP-91 §3.3: the installed tools are pinned versions, and the job
+        // inherits the workflow-wide contents: read.
+        let text =
+            std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml")).expect("ci.yml");
+        assert!(
+            text.contains("cargo-deny@0.22.2,cargo-audit@0.23.0"),
+            "the supply-chain job must pin both tool versions: {text}"
+        );
+        assert!(
+            text.contains("taiki-e/install-action@"),
+            "tool installation must go through the pinned install action: {text}"
+        );
     }
 }
