@@ -1,0 +1,17 @@
+# Legacy sample: one proxy route with weighted + backup backends.
+schema_version = 1
+
+[server]
+listen = "127.0.0.1:8080"
+connect_timeout_ms = 3000
+
+[[routes]]
+host = "app.test"
+
+[[routes.backends]]
+upstream = "http://10.0.0.2:8080"
+weight = 3
+
+[[routes.backends]]
+upstream = "10.0.0.3:8081"
+backup = true

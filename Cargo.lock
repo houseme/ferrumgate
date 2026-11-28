@@ -1085,11 +1085,13 @@ dependencies = [
  "fg-config",
  "fg-core",
  "fg-cron",
+ "fg-ddns",
  "fg-gateway",
  "fg-guard",
  "fg-i18n",
  "fg-logging",
  "fg-net",
+ "fg-stun",
  "futures-util",
  "getrandom 0.4.3",
  "h2",
@@ -1109,6 +1111,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "webpki-roots",
@@ -1254,6 +1257,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "fg-ddns"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fg-config",
+ "fg-core",
+ "fg-dns",
+ "fg-logging",
+ "fg-net",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "fg-dns"
 version = "0.1.0"
 dependencies = [
@@ -1366,6 +1386,21 @@ dependencies = [
  "ipnet",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "fg-stun"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fg-config",
+ "fg-core",
+ "fg-logging",
+ "fg-net",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -56,7 +56,7 @@ pub struct MigrateReport {
 pub struct Converted {
     pub webservice: fg_gateway::web::model::FileConfig,
     pub ssl: fg_gateway::certs::model::FileConfig,
-    pub portforward: serde_json::Value,
+    pub portforward: fg_gateway::l4::portforward::model::FileConfig,
     pub report: MigrateReport,
 }
 

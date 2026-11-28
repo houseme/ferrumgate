@@ -152,7 +152,7 @@ fn convert_route(
         }
         site.targets.push(line);
     }
-    if site.targets.is_empty() {
+    if route.response.is_none() && site.targets.is_empty() {
         return Err(format!("routes[{host}] 没有上游或后端"));
     }
     if route.websocket {
@@ -203,40 +203,43 @@ fn convert_route(
         let Ok(value) = serde_json::to_value(response) else {
             return Err(format!("routes[{host}] response 无法读取"));
         };
-        // The legacy enum serializes as an externally tagged variant.
-        if let Some(target) = value.get("Redirect") {
+        // The legacy enum serializes with an internal `type` tag.
+        let kind = value
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_default()
+            .to_owned();
+        if kind == "redirect" {
             site.site_type = "redirect".to_owned();
-            site.redirect_to = target
+            site.redirect_to = value
                 .get("target")
                 .and_then(|t| t.as_str())
                 .unwrap_or_default()
                 .to_owned();
-            site.redirect_code = target
+            site.redirect_code = value
                 .get("status")
                 .and_then(|s| s.as_u64())
                 .map(|s| s as u16)
                 .unwrap_or(302);
-        } else if let Some(text) = value.get("Text").or_else(|| value.get("Static")) {
-            if value.get("Text").is_some() {
-                site.site_type = "text".to_owned();
-                site.text_body = text
-                    .get("body")
-                    .and_then(|b| b.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-                site.text_content_type = text
-                    .get("content_type")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-            } else {
-                site.site_type = "static".to_owned();
-                site.root = text
-                    .get("root")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or_default()
-                    .to_owned();
-            }
+        } else if kind == "text" {
+            site.site_type = "text".to_owned();
+            site.text_body = value
+                .get("body")
+                .and_then(|b| b.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            site.text_content_type = value
+                .get("content_type")
+                .and_then(|c| c.as_str())
+                .unwrap_or_default()
+                .to_owned();
+        } else if kind == "static" {
+            site.site_type = "static".to_owned();
+            site.root = value
+                .get("root")
+                .and_then(|r| r.as_str())
+                .unwrap_or_default()
+                .to_owned();
         } else {
             return Err(format!("routes[{host}] response 变体无法识别"));
         }
@@ -279,4 +282,118 @@ pub fn convert(config: &RawConfig, report: &mut MigrateReport) -> Result<FileCon
     }
     file.listeners.push(listener);
     Ok(file)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+
+    fn config(toml_text: &str) -> RawConfig {
+        toml::from_str::<RawConfig>(toml_text).expect("fixture parses")
+    }
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/toml/basic.toml");
+
+    #[test]
+    fn server_section_becomes_listener_and_routes_become_sites() {
+        let mut report = MigrateReport::default();
+        let file = convert(&config(FIXTURE), &mut report).expect("converts");
+        let listener = &file.listeners[0];
+        assert_eq!(listener.listen_ip, "127.0.0.1");
+        assert_eq!(listener.port, 8080);
+        let site = &listener.sites[0];
+        assert_eq!(site.domains, vec!["app.test".to_owned()]);
+        assert_eq!(site.targets, vec![
+            "http://10.0.0.2:8080 weight=3".to_owned(),
+            "http://10.0.0.3:8081 backup".to_owned(),
+        ]);
+        // connect_timeout_ms = 3000 was explicit → kept per site in seconds.
+        assert_eq!(site.timeouts_connect_secs, 3);
+        // response header was not configured → conservative 30s kept.
+        assert_eq!(site.timeouts_response_secs, 30);
+        assert!(report
+            .mapped
+            .iter()
+            .any(|m| m.from == "server.listen" && m.to == "listeners[0].listenIp + port"));
+    }
+
+    #[test]
+    fn unconfigured_timeouts_report_the_new_defaults() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[routes]]\nhost = \"app.test\"\n",
+            "upstream = \"http://127.0.0.1:9001\"\n",
+        );
+        let mut report = MigrateReport::default();
+        let file = convert(&config(text), &mut report).expect("converts");
+        let site = &file.listeners[0].sites[0];
+        // Zero keeps the new model default (10s via compile), 30 stays.
+        assert_eq!(site.timeouts_connect_secs, 0);
+        assert_eq!(site.timeouts_response_secs, 30);
+        assert!(report.defaults_changed.iter().any(|change| {
+            change.field == "server.connect_timeout_ms"
+                && change.new_effective.contains("10 秒")
+        }));
+        assert!(report.defaults_changed.iter().any(|change| {
+            change.field == "server.response_header_timeout_ms" && change.old_effective.contains("30")
+        }));
+    }
+
+    #[test]
+    fn protection_only_fields_are_dropped_with_hints() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\n",
+            "listen = \"127.0.0.1:8080\"\n",
+            "max_connections = 512\n",
+            "connection_lifetime_ms = 60000\n",
+            "metrics_listen = \"127.0.0.1:9090\"\n",
+        );
+        let mut report = MigrateReport::default();
+        convert(&config(text), &mut report).expect("converts");
+        for field in [
+            "server.tls_handshake_timeout_ms",
+            "server.max_connections",
+            "server.connection_lifetime_ms",
+            "server.metrics_listen",
+        ] {
+            assert!(
+                report.dropped.iter().any(|d| d.field == field && !d.hint_key.is_empty()),
+                "{field} should be dropped with a hint"
+            );
+        }
+    }
+
+    #[test]
+    fn response_routes_map_to_site_types() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[routes]]\nhost = \"old.test\"\n",
+            "response = { type = \"redirect\", target = \"https://new.test/\", status = 301 }\n",
+        );
+        let mut report = MigrateReport::default();
+        let file = convert(&config(text), &mut report).expect("converts");
+        let site = &file.listeners[0].sites[0];
+        assert_eq!(site.site_type, "redirect");
+        assert_eq!(site.redirect_to, "https://new.test/");
+        assert_eq!(site.redirect_code, 301);
+    }
+
+    #[test]
+    fn websocket_disabled_is_dropped() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[routes]]\nhost = \"app.test\"\n",
+            "websocket = false\n",
+            "upstream = \"http://127.0.0.1:9001\"\n",
+        );
+        let mut report = MigrateReport::default();
+        convert(&config(text), &mut report).expect("converts");
+        assert!(report.dropped.iter().any(|d| d.field.contains("websocket")));
+    }
+
 }

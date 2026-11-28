@@ -34,6 +34,23 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    /// Convert a legacy TOML configuration into the new configuration
+    /// directory (webservice.json + ssl.json + portforward.json).
+    Migrate {
+        /// The legacy schema_version = 1 TOML file (read-only).
+        #[arg(long)]
+        config: PathBuf,
+        /// The target configuration directory; must be new or empty
+        /// unless --force (existing documents move to backup-<timestamp>).
+        #[arg(long)]
+        dir: PathBuf,
+        /// Back up and replace existing documents in the target directory.
+        #[arg(long)]
+        force: bool,
+        /// Write the migration report as JSON instead of stdout.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
     /// Run the gateway.
     Serve {
         #[arg(long)]
@@ -158,6 +175,17 @@ async fn main() -> Result<()> {
             println!("configuration is valid");
             Ok(())
         }
+        Command::Migrate {
+            config,
+            dir,
+            force,
+            report,
+        } => crate::migrate_toml::run(&crate::migrate_toml::MigrateOptions {
+            config,
+            dir,
+            force,
+            report,
+        }),
         Command::ResetPassword {
             admin_dir,
             disable_totp,
