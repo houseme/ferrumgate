@@ -59,6 +59,7 @@ pub const OPTIONAL_MODULES: &[&str] = &["protoroute", "ddns", "stun", "tailscale
 /// root crate, see the generated root `[features]` section).
 pub fn built(id: &str) -> bool {
     matches!(id, "portforward" | "ssl" | "webservice")
+        || (matches!(id, "protoroute") && cfg!(feature = "mod-protoroute"))
         || (matches!(id, "ddns") && cfg!(feature = "mod-ddns"))
         || (matches!(id, "stun") && cfg!(feature = "mod-stun"))
         || (matches!(id, "tailscale") && cfg!(feature = "mod-tailscale"))
@@ -68,9 +69,12 @@ pub fn built(id: &str) -> bool {
         || (matches!(id, "cloudflared") && cfg!(feature = "mod-cloudflared"))
         || (matches!(id, "guard") && cfg!(feature = "mod-guard"))
         || (matches!(id, "knock") && cfg!(feature = "mod-knock"))
+        || (matches!(id, "webterminal") && cfg!(feature = "mod-webterminal"))
         || (matches!(id, "cron") && cfg!(feature = "mod-cron"))
+        || (matches!(id, "webdav") && cfg!(feature = "mod-webdav"))
         || (matches!(id, "filebrowser") && cfg!(feature = "mod-filebrowser"))
         || (matches!(id, "notify") && cfg!(feature = "mod-notify"))
+        || (matches!(id, "perf") && cfg!(feature = "mod-perf"))
         || (matches!(id, "nettools") && cfg!(feature = "mod-nettools"))
 }
 
