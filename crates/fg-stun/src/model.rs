@@ -76,6 +76,12 @@ pub mod limits {
     pub const KEEP_ALIVE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
     /// Keep-alive TCP connections held per rule.
     pub const KEEP_ALIVE_CONNECTIONS_MAX: usize = 8;
+    /// User script execution ceiling (WP-42 §8: scripts have a timeout).
+    pub const SCRIPT_TIMEOUT: Duration = Duration::from_secs(30);
+    /// Script output (stdout + stderr) truncation in characters.
+    pub const SCRIPT_OUTPUT_MAX_CHARS: usize = 4000;
+    /// UPnP lease requested before the refresh cycle re-adds it.
+    pub const UPNP_LEASE_SECS: u32 = 3600;
 }
 
 /// `stun.json`.

@@ -15,16 +15,22 @@
 //! ```
 //!
 //! 发现的公网地址经 [`Runtime::snapshot`] 以只读快照发布，供 L4 /
-//! protoroute（WP-36/WP-35）消费；UPnP / NAT-PMP 端口映射、内置转发与
-//! Webhook / 脚本通知按 WP-42 实施步骤在后续步骤接入。
+//! protoroute（WP-36/WP-35）消费；规则循环同时维护 UPnP IGD /
+//! NAT-PMP 网关映射（[`upnp`]，多层 NAT 时只保留通道端口）、在映射
+//! 学习/变化时触发 Webhook 与脚本通知（[`notify`]），并以
+//! [`StunCheck`] 暴露自检。内置转发（`disableForward` 关闭时的
+//! targetAddresses 管道）依赖 WP-36 的 L4 数据面，待其落地后接入。
 
 #![forbid(unsafe_code)]
 
 pub mod channel;
 pub mod model;
+pub mod notify;
 pub mod routes;
 pub mod runtime;
+pub mod selfcheck;
 pub mod stun;
+pub mod upnp;
 pub mod validate;
 
 use std::sync::Arc;
@@ -36,8 +42,10 @@ use tokio::sync::{RwLock as AsyncRwLock, watch};
 
 pub use channel::{Action, Channel, ChannelState, Timings, Transition};
 pub use model::{Bind, BindMode, FileConfig, Proto, Rule, Settings, WebhookConfig};
+pub use notify::Notification;
 pub use routes::{PersistFn, RoutesState, RuleView, StatusView, mount};
 pub use runtime::{EntryStatus, Runtime, RuntimeSnapshot};
+pub use selfcheck::StunCheck;
 pub use validate::{Problem, normalize, validate};
 
 /// The module's configuration file (`stun.json`).

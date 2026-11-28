@@ -35,8 +35,10 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::channel::{Action, Channel, Timings, Transition};
-use crate::model::{BindMode, FileConfig, Proto, Rule, Settings, limits};
+use crate::model::{BindMode, FileConfig, Proto, Rule, Settings, WebhookConfig, limits};
+use crate::notify::{self, Notification};
 use crate::stun::client::{self, ClientError, ConsistencyReport, ConsistencyVerdict, QueryOutcome};
+use crate::upnp::{self, MappingResult, MappingTarget};
 use crate::validate::{effective_keep_alive, effective_servers};
 
 /// Module-level settings a rule loop captures when it starts; config
@@ -47,6 +49,7 @@ struct EntrySettings {
     addr_check: u32,
     global_servers: Vec<String>,
     global_keep_alive: Vec<String>,
+    global_webhook: WebhookConfig,
 }
 
 impl EntrySettings {
@@ -55,6 +58,37 @@ impl EntrySettings {
             addr_check: config.settings.addr_check_interval,
             global_servers: config.settings.stun_servers.clone(),
             global_keep_alive: config.settings.keep_alive_servers.clone(),
+            global_webhook: config.settings.webhook.clone(),
+        }
+    }
+}
+
+/// Notification configuration of one loop incarnation, resolved at spawn
+/// time (config changes restart the loops). `last_notified` suppresses
+/// duplicate webhook / script runs for the same endpoint (a `Ready`
+/// confirmation after `Mapped` must not re-fire).
+#[derive(Debug)]
+struct EntryNotify {
+    webhook: WebhookConfig,
+    webhook_only_on_change: bool,
+    script_enable: bool,
+    script: String,
+    last_notified: Mutex<Option<SocketAddr>>,
+}
+
+impl EntryNotify {
+    /// Resolves the effective webhook (global when the rule opts in).
+    fn from_rule(rule: &Rule, settings: &EntrySettings) -> Self {
+        Self {
+            webhook: if rule.use_global_webhook {
+                settings.global_webhook.clone()
+            } else {
+                rule.webhook.clone()
+            },
+            webhook_only_on_change: rule.webhook_only_on_change,
+            script_enable: rule.script_enable,
+            script: rule.script.clone(),
+            last_notified: Mutex::new(None),
         }
     }
 }
@@ -119,6 +153,7 @@ struct EntryHandle {
     protocol: Proto,
     loop_id: u64,
     view: Mutex<EntryView>,
+    notify: Arc<EntryNotify>,
 }
 
 /// The STUN mapping runtime. Share it (`Arc`) between the module loop
@@ -236,6 +271,11 @@ impl Runtime {
             .as_ref()
             .map(|group| group.status(key))
             .unwrap_or_default()
+    }
+
+    /// Whether the module switch is on (self-check surface).
+    pub async fn module_enabled(&self) -> bool {
+        self.config.read().await.settings.enable
     }
 
     /// Operations currently in flight (binding rounds / checks).
@@ -390,12 +430,14 @@ impl Runtime {
             .lock()
             .expect("loops lock")
             .insert(rule.key.clone(), (loop_id, token.clone()));
+        let notify = Arc::new(EntryNotify::from_rule(&rule, &settings));
         let handle = Arc::new(EntryHandle {
             key: rule.key.clone(),
             name: rule.name.clone(),
             protocol: rule.protocol,
             loop_id,
             view: Mutex::new(EntryView::binding()),
+            notify,
         });
         self.handles
             .lock()
@@ -478,7 +520,8 @@ impl Runtime {
     }
 
     /// Applies a transition: logs and publishes `stun.changed` on mapping
-    /// changes.
+    /// changes (the webhook / script notifications are dispatched by the
+    /// loops through [`Runtime::notify_round`]).
     fn apply_transition(&self, handle: &EntryHandle, transition: &Transition) {
         match transition {
             Transition::None => {}
@@ -530,6 +573,69 @@ impl Runtime {
                     "STUN mapping lost"
                 );
             }
+        }
+    }
+
+    /// Notification dispatch for one successful binding round (WP-42 §3.3
+    /// "地址变化的通知"): the script runs on the first endpoint and on real
+    /// changes; the webhook fires on every success unless
+    /// `webhookOnlyOnChange` limits it to changes. Deliveries run in
+    /// detached tasks so the channel loop never waits on them.
+    fn notify_round(
+        self: &Arc<Self>,
+        handle: &Arc<EntryHandle>,
+        endpoint: SocketAddr,
+        changed: bool,
+        token: &CancellationToken,
+    ) {
+        let is_change = {
+            let mut last = handle.notify.last_notified.lock().expect("notify lock");
+            let previous = *last;
+            let is_change = changed || previous.is_none();
+            if previous != Some(endpoint) {
+                *last = Some(endpoint);
+            }
+            is_change
+        };
+        let notif = Notification::new(&handle.name, endpoint, is_change, SystemTime::now());
+        let notify = &handle.notify;
+        // Webhook: every successful round unless onlyOnChange restricts it
+        // to real changes.
+        if (!notify.webhook_only_on_change || is_change) && !notify.webhook.url.trim().is_empty() {
+            let webhook = notify.webhook.clone();
+            let notif = notif.clone();
+            let cancel = token.child_token();
+            tokio::spawn(async move {
+                match notify::deliver_webhook(&webhook, &notif, &cancel).await {
+                    Ok(()) => tracing::info!(
+                        module = "stun",
+                        rule = %notif.rule_name,
+                        "Webhook 通知已发送"
+                    ),
+                    Err(error) if error.contains("已停止") => {}
+                    Err(error) => tracing::warn!(
+                        module = "stun",
+                        rule = %notif.rule_name,
+                        %error,
+                        "Webhook 通知失败"
+                    ),
+                }
+            });
+        }
+        // Script: on the first endpoint and on changes only.
+        if is_change && notify.script_enable && !notify.script.trim().is_empty() {
+            let script = notify.script.clone();
+            let cancel = token.child_token();
+            tokio::spawn(async move {
+                let outcome = notify::run_script(&script, &notif, &cancel).await;
+                tracing::info!(
+                    module = "stun",
+                    rule = %notif.rule_name,
+                    success = outcome.success,
+                    output = %outcome.output,
+                    "通知脚本执行结束"
+                );
+            });
         }
     }
 
@@ -618,6 +724,162 @@ fn named_interface(name: &str, port: u16) -> Option<SocketAddr> {
         .map(|iface| SocketAddr::new(iface.ip(), port))
 }
 
+/// Spawns the gateway mapping task (UPnP / NAT-PMP) for a rule loop: it
+/// maps the channel port once the STUN endpoint is known, follows mapping
+/// changes, refreshes leases and deletes the mapping when the loop stops.
+fn spawn_port_mapping(
+    runtime: &Arc<Runtime>,
+    rule: &Rule,
+    local: SocketAddr,
+    token: &CancellationToken,
+) {
+    if !rule.upnp && !rule.natpmp {
+        return;
+    }
+    tokio::spawn(port_mapping_loop(
+        Arc::clone(runtime),
+        rule.clone(),
+        local,
+        token.child_token(),
+    ));
+}
+
+/// Builds the mapping target from the rule plus the bound channel socket.
+fn mapping_target(rule: &Rule, local: SocketAddr) -> MappingTarget {
+    MappingTarget {
+        upnp_gateway: rule
+            .upnp_gateway
+            .trim()
+            .parse::<IpAddr>()
+            .ok()
+            .filter(|_| !rule.upnp_gateway.trim().is_empty()),
+        upnp_control_url: (!rule.upnp_control_url.trim().is_empty())
+            .then(|| rule.upnp_control_url.trim().to_owned()),
+        natpmp_gateway: parse_natpmp_gateway(&rule.natpmp_gateway),
+        protocol: rule.protocol,
+        internal_ip: local.ip(),
+        internal_host: (!rule.upnp_local_host.trim().is_empty())
+            .then(|| rule.upnp_local_host.trim().to_owned()),
+        channel_port: local.port(),
+        upnp_internal_port: rule.upnp_internal_port,
+        description: rule.name.clone(),
+    }
+}
+
+/// Parses the NAT-PMP gateway setting: an IP literal (default port 5351)
+/// or `IP:port`.
+fn parse_natpmp_gateway(raw: &str) -> Option<SocketAddr> {
+    let (host, port) =
+        crate::validate::parse_host_port(raw.trim(), crate::upnp::natpmp::DEFAULT_PORT)?;
+    let ip = host.parse::<IpAddr>().ok()?;
+    Some(SocketAddr::new(ip, port))
+}
+
+/// The rule's STUN endpoint from the published snapshot.
+fn current_public(runtime: &Runtime, key: &str) -> Option<SocketAddr> {
+    runtime
+        .snapshot()
+        .entries
+        .iter()
+        .find(|entry| entry.key == key)
+        .and_then(|entry| entry.public_addr)
+}
+
+/// Keeps the gateway port mapping aligned with the channel's public
+/// endpoint: (re)maps on endpoint changes, refreshes at half lease and
+/// deletes the mapping on exit (WP-42 §3.3 "停止规则时 DeletePortMapping").
+async fn port_mapping_loop(
+    runtime: Arc<Runtime>,
+    rule: Rule,
+    local: SocketAddr,
+    token: CancellationToken,
+) {
+    let target = mapping_target(&rule, local);
+    let use_upnp = rule.upnp;
+    let mut applied: Option<MappingResult> = None;
+    let mut built_for: Option<SocketAddr> = None;
+    let mut refresh_at: Option<SystemTime> = None;
+    let poll = Duration::from_secs(1);
+    loop {
+        if token.is_cancelled() {
+            break;
+        }
+        let now = SystemTime::now();
+        let public = current_public(&runtime, &rule.key);
+        let endpoint_changed = public.is_some() && built_for != public;
+        let refresh_due = applied.is_some()
+            && !matches!(applied.as_ref().map(|m| m.permanent), Some(true))
+            && refresh_at.is_some_and(|at| now >= at);
+        if endpoint_changed || refresh_due {
+            // A changed endpoint invalidates the old mapping (its external
+            // port moved); a refresh re-asserts the same mapping.
+            if let Some(old) = applied.take() {
+                let cleanup = cleanup_token();
+                upnp::teardown_mapping(&target, &old, upnp::control_timeout(), &cleanup).await;
+            }
+            refresh_at = None;
+        }
+        if applied.is_none() && public.is_some() {
+            runtime.inflight_ops.fetch_add(1, Ordering::SeqCst);
+            let result =
+                upnp::setup_mapping(&target, public, use_upnp, upnp::control_timeout(), &token)
+                    .await;
+            runtime.inflight_ops.fetch_sub(1, Ordering::SeqCst);
+            match result {
+                Ok(result) => {
+                    built_for = public;
+                    refresh_at = (!result.permanent && result.lease_secs > 0).then(|| {
+                        SystemTime::now() + Duration::from_secs(u64::from(result.lease_secs) / 2)
+                    });
+                    applied = Some(result);
+                }
+                Err(upnp::UpnpError::Cancelled) => break,
+                Err(error) => {
+                    tracing::warn!(
+                        module = "stun",
+                        rule = %rule.name,
+                        %error,
+                        "端口映射失败，稍后重试"
+                    );
+                    refresh_at = Some(SystemTime::now() + Duration::from_secs(30));
+                }
+            }
+        }
+        // Sleep until the next poll tick or the scheduled refresh; a
+        // cancellation breaks out for the deletion.
+        let wait = refresh_at
+            .map(|at| {
+                at.duration_since(SystemTime::now())
+                    .unwrap_or(Duration::ZERO)
+                    .min(poll)
+            })
+            .unwrap_or(poll);
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => break,
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+    // Loop stopped: delete the mapping with a fresh grace token so the
+    // removal survives the loop's own cancellation.
+    if let Some(applied) = applied {
+        let cleanup = cleanup_token();
+        upnp::teardown_mapping(&target, &applied, upnp::control_timeout(), &cleanup).await;
+    }
+}
+
+/// A short-lived token that cancels itself after the cleanup grace so a
+/// shutdown cannot hang on the mapping deletion.
+fn cleanup_token() -> CancellationToken {
+    let token = CancellationToken::new();
+    let grace = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        grace.cancel();
+    });
+    token
+}
+
 /// One rule channel loop: owns the local socket, drives the state machine
 /// and cleans up on exit. `handle` identifies this incarnation; a newer
 /// incarnation (manual restart) owns the shared registrations afterwards.
@@ -667,6 +929,7 @@ async fn entry_loop(
             let local = socket.local_addr().ok().unwrap_or(bind);
             runtime.set_local_addr(&key, local);
             runtime.open_firewall(&rule, local);
+            spawn_port_mapping(&runtime, &rule, local, &token);
             udp_channel(&runtime, servers, &socket, &token, &handle, &timing).await;
         }
         Proto::Tcp => {
@@ -679,6 +942,7 @@ async fn entry_loop(
             let local = listener.local_addr().ok().unwrap_or(bind);
             runtime.set_local_addr(&key, local);
             runtime.open_firewall(&rule, local);
+            spawn_port_mapping(&runtime, &rule, local, &token);
             // TCP rules hold plain long connections to the keep-alive
             // targets so the NAT mapping survives between heartbeats.
             let keep_alive = client::resolve_servers(&effective_keep_alive(&rule, &live_settings))
@@ -823,6 +1087,12 @@ async fn udp_channel(
                             let transition = channel.on_mapped(mapped, SystemTime::now(), timing);
                             runtime.sync_state(key, &channel);
                             runtime.apply_transition(handle, &transition);
+                            runtime.notify_round(
+                                handle,
+                                mapped,
+                                matches!(transition, Transition::Changed { .. }),
+                                token,
+                            );
                             probe_consistency(
                                 runtime,
                                 handle,
@@ -912,6 +1182,12 @@ async fn tcp_channel(
                             let transition = channel.on_mapped(mapped, SystemTime::now(), timing);
                             runtime.sync_state(key, &channel);
                             runtime.apply_transition(handle, &transition);
+                            runtime.notify_round(
+                                handle,
+                                mapped,
+                                matches!(transition, Transition::Changed { .. }),
+                                token,
+                            );
                         }
                         Err(errors) => {
                             if cancelled(&errors) {
@@ -1154,6 +1430,13 @@ mod tests {
                 since: None,
                 last_error: None,
                 nat_consistent: Some(true),
+            }),
+            notify: Arc::new(EntryNotify {
+                webhook: WebhookConfig::default(),
+                webhook_only_on_change: false,
+                script_enable: false,
+                script: String::new(),
+                last_notified: Mutex::new(None),
             }),
         })
     }
