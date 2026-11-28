@@ -6,14 +6,18 @@ pub(crate) mod legacy;
 
 pub(crate) use legacy::Web;
 
+pub mod access;
 pub mod auth;
+pub mod cache;
+pub mod compress;
 pub mod domains;
+pub mod error_pages;
 pub mod identity;
 pub mod model;
 pub mod proxy;
+pub mod rate_limit;
 pub mod routes;
 pub mod site;
-pub mod access;
 pub mod table;
 pub mod upstream;
 pub mod userroute;

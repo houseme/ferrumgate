@@ -16,6 +16,7 @@ bcrypt.workspace = true
 cap-std.workspace = true
 fg-core.workspace = true
 fg-net.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hickory-resolver.workspace = true
