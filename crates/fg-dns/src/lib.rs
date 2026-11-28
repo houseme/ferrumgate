@@ -22,6 +22,7 @@ pub mod delete;
 pub mod http;
 pub mod providers;
 pub mod record;
+pub mod sign;
 pub mod simple;
 pub mod split;
 pub mod txt;
@@ -431,6 +432,16 @@ pub(crate) fn box_txt<P: TxtRecords + 'static>(p: P) -> Box<dyn DnsProvider> {
 type RegistryEntry = (&'static Meta, Factory);
 
 static REGISTRY: &[RegistryEntry] = &[
+    #[cfg(feature = "dns-alidns")]
+    register_provider!(txt, providers::alidns::META, providers::alidns::AliDns::new),
+    #[cfg(feature = "dns-aliesa")]
+    register_provider!(txt, providers::aliesa::META, providers::aliesa::AliEsa::new),
+    #[cfg(feature = "dns-baiducloud")]
+    register_provider!(
+        txt,
+        providers::baiducloud::META,
+        providers::baiducloud::BaiduCloud::new
+    ),
     #[cfg(feature = "dns-bunny")]
     register_provider!(txt, providers::bunny::META, providers::bunny::Bunny::new),
     #[cfg(feature = "dns-callback")]
@@ -441,6 +452,10 @@ static REGISTRY: &[RegistryEntry] = &[
         providers::cloudflare::META,
         providers::cloudflare::Cloudflare::new
     ),
+    #[cfg(feature = "dns-desec")]
+    register_provider!(txt, providers::desec::META, providers::desec::Desec::new),
+    #[cfg(feature = "dns-dnsla")]
+    register_provider!(txt, providers::dnsla::META, providers::dnsla::Dnsla::new),
     #[cfg(feature = "dns-dnspod")]
     register_provider!(txt, providers::dnspod::META, providers::dnspod::Dnspod::new),
     #[cfg(feature = "dns-dnspodcom")]
@@ -453,14 +468,48 @@ static REGISTRY: &[RegistryEntry] = &[
     register_provider!(providers::duckdns::META, providers::duckdns::DuckDns::new),
     #[cfg(feature = "dns-dynv6")]
     register_provider!(txt, providers::dynv6::META, providers::dynv6::Dynv6::new),
+    #[cfg(feature = "dns-edgeone")]
+    register_provider!(
+        txt,
+        providers::edgeone::META,
+        providers::edgeone::EdgeOne::new
+    ),
     #[cfg(feature = "dns-gandi")]
     register_provider!(txt, providers::gandi::META, providers::gandi::Gandi::new),
+    #[cfg(feature = "dns-gcore")]
+    register_provider!(txt, providers::gcore::META, providers::gcore::Gcore::new),
+    #[cfg(feature = "dns-huaweicloud")]
+    register_provider!(
+        txt,
+        providers::huaweicloud::META,
+        providers::huaweicloud::HuaweiCloud::new
+    ),
     #[cfg(feature = "dns-porkbun")]
     register_provider!(
         txt,
         providers::porkbun::META,
         providers::porkbun::Porkbun::new
     ),
+    #[cfg(feature = "dns-route53")]
+    register_provider!(
+        txt,
+        providers::route53::META,
+        providers::route53::Route53::new
+    ),
+    #[cfg(feature = "dns-tencentcloud")]
+    register_provider!(
+        txt,
+        providers::tencentcloud::META,
+        providers::tencentcloud::TencentCloud::new
+    ),
+    #[cfg(feature = "dns-trafficroute")]
+    register_provider!(
+        txt,
+        providers::trafficroute::META,
+        providers::trafficroute::TrafficRoute::new
+    ),
+    #[cfg(feature = "dns-vercel")]
+    register_provider!(txt, providers::vercel::META, providers::vercel::Vercel::new),
 ];
 
 #[cfg(test)]
@@ -474,12 +523,22 @@ mod tests {
     #[test]
     fn registry_matches_enabled_features() {
         let expected: &[&str] = &[
+            #[cfg(feature = "dns-alidns")]
+            "alidns",
+            #[cfg(feature = "dns-aliesa")]
+            "aliesa",
+            #[cfg(feature = "dns-baiducloud")]
+            "baiducloud",
             #[cfg(feature = "dns-bunny")]
             "bunny",
             #[cfg(feature = "dns-callback")]
             "callback",
             #[cfg(feature = "dns-cloudflare")]
             "cloudflare",
+            #[cfg(feature = "dns-desec")]
+            "desec",
+            #[cfg(feature = "dns-dnsla")]
+            "dnsla",
             #[cfg(feature = "dns-dnspod")]
             "dnspod",
             #[cfg(feature = "dns-dnspodcom")]
@@ -488,10 +547,24 @@ mod tests {
             "duckdns",
             #[cfg(feature = "dns-dynv6")]
             "dynv6",
+            #[cfg(feature = "dns-edgeone")]
+            "edgeone",
             #[cfg(feature = "dns-gandi")]
             "gandi",
+            #[cfg(feature = "dns-gcore")]
+            "gcore",
+            #[cfg(feature = "dns-huaweicloud")]
+            "huaweicloud",
             #[cfg(feature = "dns-porkbun")]
             "porkbun",
+            #[cfg(feature = "dns-route53")]
+            "route53",
+            #[cfg(feature = "dns-tencentcloud")]
+            "tencentcloud",
+            #[cfg(feature = "dns-trafficroute")]
+            "trafficroute",
+            #[cfg(feature = "dns-vercel")]
+            "vercel",
         ];
         assert_eq!(enabled_registry_names(), expected);
     }
@@ -511,15 +584,27 @@ mod tests {
     fn registry_capability_flags_match_upstream() {
         for (meta, _) in registry() {
             let (acme, del, remark, line) = match meta.name {
+                "alidns" => (true, true, true, true),
+                "aliesa" => (true, true, false, false),
+                "baiducloud" => (true, true, false, false),
                 "bunny" => (true, true, false, false),
                 "callback" => (false, false, false, false),
                 "cloudflare" => (true, true, true, false),
+                "desec" => (true, true, false, false),
+                "dnsla" => (true, true, false, false),
                 "dnspod" => (true, true, true, true),
                 "dnspodcom" => (true, true, true, false),
                 "duckdns" => (false, false, false, false),
                 "dynv6" => (true, true, false, false),
+                "edgeone" => (true, true, false, true),
                 "gandi" => (true, true, false, false),
+                "gcore" => (true, true, false, false),
+                "huaweicloud" => (true, true, true, false),
                 "porkbun" => (true, true, false, false),
+                "route53" => (true, false, false, false),
+                "tencentcloud" => (true, true, true, true),
+                "trafficroute" => (true, true, false, true),
+                "vercel" => (true, true, false, false),
                 other => panic!("未覆盖能力标记的提供商 {other}"),
             };
             assert_eq!(meta.supports_acme, acme, "{} supports_acme", meta.name);
