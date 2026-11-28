@@ -199,10 +199,13 @@ fn preview_zip(bytes: &[u8]) -> Result<ArchivePreview, ArchiveError> {
             .by_index(i)
             .map_err(|e| ArchiveError::Corrupt(e.to_string()))?;
         let unix_mode = file.unix_mode().unwrap_or(0);
-        let is_symlink = file.is_symlink() || is_zip_symlink(unix_mode);
+        let is_symlink = file.is_symlink();
         let is_dir = file.is_dir();
         entries.push(ArchivePreviewEntry {
-            path: file.name().to_owned(),
+            path: file
+                .name()
+                .map_err(|e| ArchiveError::Corrupt(e.to_string()))?
+                .into_owned(),
             is_dir,
             is_symlink,
             size: file.size(),
@@ -280,10 +283,6 @@ pub fn extract_archive(
     }
 }
 
-fn is_zip_symlink(unix_mode: u32) -> bool {
-    (unix_mode & 0o170000) == 0o120000
-}
-
 fn extract_zip(
     bytes: &[u8],
     extract_limits: ExtractLimits,
@@ -298,7 +297,9 @@ fn extract_zip(
         let mut file = archive
             .by_index(i)
             .map_err(|e| ArchiveError::Corrupt(e.to_string()))?;
-        let raw_name = file.name().to_owned();
+        let raw_name = file
+            .name()
+            .map_err(|e| ArchiveError::Corrupt(e.to_string()))?;
         // Always validate path BEFORE skipping anything so traversal entries
         // are rejected unconditionally.
         if raw_name == "." || raw_name == "./" {
@@ -307,7 +308,7 @@ fn extract_zip(
         let rel_path = validate_entry_path(&raw_name)?;
 
         let unix_mode = file.unix_mode().unwrap_or(0);
-        if file.is_symlink() || is_zip_symlink(unix_mode) {
+        if file.is_symlink() {
             continue;
         }
 
@@ -666,6 +667,23 @@ mod tests {
         assert_eq!(preview.entries.len(), limits::ARCHIVE_PREVIEW_MAX_ENTRIES);
         assert_eq!(preview.total, 10_005);
         assert!(preview.truncated);
+    }
+
+    #[test]
+    fn archive_preserves_legacy_zip_names_in_preview_and_extraction() {
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file_with_options(SimpleFileOptions::default().name(b"caf\x82.txt"))
+            .unwrap();
+        writer.write_all(b"legacy ZIP").unwrap();
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let preview = preview_archive(ArchiveFormat::Zip, &bytes).unwrap();
+        assert_eq!(preview.entries[0].path, "café.txt");
+        let extracted =
+            extract_archive(ArchiveFormat::Zip, &bytes, ExtractLimits::default()).unwrap();
+        assert_eq!(extracted[0].rel_path, "café.txt");
+        assert_eq!(extracted[0].data, b"legacy ZIP");
     }
 
     #[test]

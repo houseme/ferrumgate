@@ -199,8 +199,10 @@ fn extract_zip(
         if count > limits.max_entries {
             return Err(entry_limit_error(limits));
         }
-        let raw = entry.name().to_owned();
-        check_entry(Path::new(&raw))?;
+        let raw = entry
+            .name()
+            .map_err(|error| InstallError::Extract(format!("读取条目名失败：{error}")))?;
+        check_entry(Path::new(&*raw))?;
         let name = raw
             .rsplit(['/', '\\'])
             .next()
@@ -209,10 +211,7 @@ fn extract_zip(
         if entry.encrypted() {
             return Err(InstallError::Extract(format!("归档包含加密条目：{name}")));
         }
-        #[cfg(unix)]
-        if let Some(mode) = entry.unix_mode()
-            && (mode >> 16) & 0o170000 == 0o120000
-        {
+        if entry.is_symlink() {
             return Err(InstallError::Extract(format!("归档包含链接条目：{name}")));
         }
         if entry.is_dir() {
@@ -402,6 +401,33 @@ mod tests {
             .expect_err("zip traversal entries are rejected");
         assert!(matches!(error, InstallError::Extract(_)));
         assert!(!dir.path().join("evil.txt").exists());
+    }
+
+    #[test]
+    fn extract_rejects_zip_symlink_named_as_requested_binary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("out");
+        let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        writer
+            .add_symlink(
+                "bin/prog",
+                "another-file",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .expect("write zip symlink");
+        let bytes = writer.finish().expect("finish zip").into_inner();
+        let archive = write_archive(dir.path(), "link.zip", &bytes);
+
+        let error = extract(
+            &archive,
+            ArchiveKind::Zip,
+            &["prog"],
+            &out,
+            &Limits::default(),
+        )
+        .expect_err("zip symlink is rejected");
+        assert!(matches!(error, InstallError::Extract(message) if message.contains("链接条目")));
+        assert!(!out.join("prog").exists());
     }
 
     #[test]
