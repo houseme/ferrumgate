@@ -1414,3 +1414,11 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-91 持续集成（步骤 5 交付：supply-chain job）
 
 - 2026-11-28 交付 3780eae。deny.toml 按实测许可证清单逐项列出（每条注明覆盖的 crate 族）：Apache-2.0/MIT/ISC/BSD 三档/BSL-1.0/0BSD/Unlicense/Zlib/Unicode-3.0，另加 webpki-roots 的 CDLA-Permissive-2.0、webauthn 族的 MPL-2.0、UEFI 目标 r-efi 的 LGPL-2.1-or-later、cap-std Windows 栈的 Apache-2.0 WITH LLVM-exception；来源限定 crates.io；重复依赖保持信息性（与 `cargo tree --duplicates` 并行）；yanked 直接拒绝。xtask supply-chain job 依次跑 cargo-deny（--locked 为全局旗标）与 cargo-audit，工具缺失时说明跳过（CI 固定安装 cargo-deny 0.22.2 与 cargo-audit 0.23.0 并缓存 advisory 数据库）。licenses/bans/sources 三项已用真实工具本地验证通过；advisories 因本机 GitHub 不可达留待 CI 首跑验证。41 项 xtask 测试（新增工作流内容断言）。剩余 job：msrv（仓库未声明最低工具链）、matrix/each-feature 的 CI 接线、cross/x86/ui/e2e/pebble/openwrt（分别随 WP-92/65/80/32）。
+
+### WP-24 站点认证：基本认证、网页认证与共享用户（大部分交付，2026-11-28）
+
+- 三批交付（2721137、d8004ab、454119f）：`web/auth/` 十个模块——站点用户（明文→bcrypt、掩码按位置/用户名沿用、72 字节上限）、共享用户（不可变 id、SSO 域点分边界最长匹配与嵌套拒绝、常量时序校验含未命中占位、凭据指纹 HMAC 密码+TOTP）、签名会话（`gately_site_<sha256[:6]>` 绑定监听器/站点、`base64url+HMAC`、7 天、Site/Sso 作用域、一次性令牌防重放）、校验预留（每来源 8 并发/64 排队先于 bcrypt、15 分钟 10 次锁死、IPv6 /64 归一）、基本认证（三级判定）、TOTP 步（RFC 6238 向量）、自助改密（8–128 字符、60s 冷却、改密即失效会话）、登录页（全上限校验 + 默认样式渲染快照 + HTML/CSS 转义）。
+- 管线接线：`/__gately_auth` 保留路径在任何站点路径下由认证器应答（登录页/登录提交/两步验证/退出）；web 会话先行、Basic 兜底；未认证浏览器 302 登录页、非浏览器 401；同源表单校验与 safeNext 防开放重定向；跨站 Cookie 按站点 key 绑定天然隔离。
+- 模型：settings 增 authSecret/authUsers/ssoDomains/autoBanSeconds，站点增 basicAuth/webAuth/users/sharedUsers/loginStyle；桥接校验「基本认证至少一个用户」「网页认证需用户或共享用户」。
+- 测试：auth 模块 54 单元 + 6 管线集成（basic 允许/拒绝、登录全流程含跨域拒绝、safe_next_only、跨站 Cookie 隔离、TOTP 步含令牌重放拒绝、保留路径旁路路径规则），fg-gateway 全量 309 lib + 68 e2e，clippy 0。
+- 尚余：dir_config 装配生产 Authenticator（with_authenticator 已就绪）；bcrypt 校验移入阻塞线程池；站点用户凭据指纹；SSO 父域 Cookie（Authenticator 需 ssoDomains 输入，随 WP-25）；auth.banned 事件接 WP-26 封禁表；登录页其余 9 种样式资产（WP-86）。
