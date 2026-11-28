@@ -110,7 +110,7 @@ openidconnect = { version = "4.1", default-features = false }
 pem = "4"
 percent-encoding = "2"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "query", "form"] }
 regex = "1"
 ring = "0.17"
 # WP-61 web terminal: async SSH client/server (keys module merged since 0.50).
