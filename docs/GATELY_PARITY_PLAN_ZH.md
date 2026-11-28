@@ -1391,7 +1391,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-39 | 迁移现有 TOML 配置 | M | WP-20、WP-31、WP-34 | 未开始 |
 | WP-40 | 动态域名任务 | M | WP-16、WP-41 | 本地实现及回环验收（fg-ddns 完整模块；根进程接线与 OutboundHttp 迁移待接），见 [验收记录](EXECUTION.md#wp-40-动态域名完整模块交付) |
 | WP-41 | DNS 提供商适配 | L（分三批） | — | 本地实现及回环验收（步骤 1-9 已交付：fg-dns 核心机制、五套签名工具与全量 36 家提供商带契约测试；步骤 10 联调随根进程接线），见 [验收记录](EXECUTION.md#wp-41-dns-提供商适配步骤-9-交付全量-36-项) |
-| WP-42 | STUN 穿透 | L | WP-36、WP-16 | 部分实现（RFC 5389 编解码、映射保持运行时与管理接口；UPnP/NAT-PMP/转发/通知/selfcheck 随后续梯队），见 [验收记录](EXECUTION.md#wp-42-stun-穿透第一梯队交付) |
+| WP-42 | STUN 穿透 | L | WP-36、WP-16 | 本地实现及回环验收（RFC 5389 + UPnP IGD + NAT-PMP + 通知 + selfcheck；内置转发待 L4 数据面，真实 NAT 穿透待 LAN 验证），见 [验收记录](EXECUTION.md#wp-42-stun-穿透后续梯队交付模块收尾) |
 | WP-43 | 托管程序基础设施 | M | WP-09 | 本地实现及回环验收（fg-proc 安装校验与监督；各托管模块 WP-44+ 接入时复核发布源），见 [验收记录](EXECUTION.md#wp-43-托管程序基础设施核心交付) |
 | WP-44 | frp | L | WP-43、WP-36 | 未开始 |
 | WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 未开始 |

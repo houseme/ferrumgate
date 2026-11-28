@@ -1394,3 +1394,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 测试切换：integration 套件经迁移目录运行（断言零改动）——11 个 migrate 单测 + 根 e2e 68 全绿。5 个场景显式留在 legacy 路径（replace+reload、websocket=false 拒绝、SIGINT 截止期、模块停用开关、证书轮换重读——均为 legacy 运行时专属语义，待 locations/身份头/WP-32 落地后迁移）。
 - 迁移套件抓出的真缺陷：connection_lifetime=0 使连接瞬时过期、webservice.settings.enable 被无视、TCP 健康检查误带 path、Site Default 与 serde 语义分叉（enable/forwardedHeaders）、文本 statusCode 缺失、桥接 WS 恒禁、tls::load 守卫误拒目录形态、ferrumgate.json 空对象丢全局。
 - 剩余：locations（前缀路由）落地后迁移剩余 5 个场景并移除 TOML 路径（serve --config 保留提示语一个版本）；README/样例更新随移除一起交付。
+
+### WP-42 STUN 穿透（后续梯队交付，模块收尾）
+
+- 2026-11-28 交付 707b26e。UPnP IGD：SSDP 发现（upnpGateway 单播 + 组播、设备描述 XML 按服务优先级解析、controlURL 强制指向网关本机否则拒绝〔§8 安全要求〕）、SOAP Add/Get/Delete 映射（错误 725 自动回退永久租期、删除前经 GetSpecificPortMappingEntry 校验归属、强制 no_proxy）、多层 NAT 判定（网关 WAN IP ≠ STUN 公网 IP 时只映射通道端口）；NAT-PMP 按 RFC 6886（250ms 起倍增重传、7200 秒建议租期半租期刷新）；运行时自动维护映射（端点变化跟随、停止规则删除映射、5 秒优雅清理）；通知按文档语义（webhook 每次成功或仅变化、脚本 30 秒上限 + 环境变量、事件仅变化/首次）；selfcheck 三项（module/rules/network，CGNAT 检测排除 tun/wg/utun 等虚拟网卡）。fg-stun 全量 70 项测试（+25）、fg-net 87 项无回归。UPnP/NAT-PMP 位置按文档 §3.1 放 fg-stun/src/upnp/（fg-net 零改动）。**跳过项**：内置转发（步骤 9）待 L4 数据面落地后在 channel socket 上接管（record_connection 计数钩子已预留）；SSDP 组播收包与真实 NAT 穿透按 §8 留待真实 LAN 验证。**WP-42 实现层收尾**：尚余 DESIGN/EXECUTION 模块章节与转发接线。
