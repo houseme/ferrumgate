@@ -158,6 +158,18 @@ fn compile_wp23_options(
     });
     let response_header_timeout = (site.timeouts_response_secs != 0)
         .then(|| Duration::from_secs(u64::from(site.timeouts_response_secs)));
+    // WP-24 site authentication (§3.4): basic auth needs at least one
+    // user; web auth needs one user or an enabled shared-user pool.
+    if site.basic_auth && site.users.is_empty() {
+        errors.push(format!(
+            "site {label}: basicAuth 需要至少一个用户（users）"
+        ));
+    }
+    if site.web_auth && site.users.is_empty() && !site.shared_users {
+        errors.push(format!(
+            "site {label}: webAuth 需要至少一个用户（users）或开启共享用户（sharedUsers）"
+        ));
+    }
     crate::config::SiteProxyOptions {
         use_target_host: site.use_target_host,
         forwarded_headers: site.forwarded_headers,
@@ -170,6 +182,17 @@ fn compile_wp23_options(
         // Dial-failure retry only makes sense with somewhere to go; a
         // lone backend never retries (same bound as MAX_ATTEMPTS).
         retry: site.targets.len() > 1,
+        // WP-24 authentication. The cookie name binds the session to
+        // the listener/site pair; the listener key is not threaded
+        // through the compile bridge yet, so "main" stands in for it
+        // (the session payload itself stays host-bound, and a later
+        // batch passes the real listener key through).
+        basic_auth: site.basic_auth,
+        web_auth: site.web_auth,
+        site_users: site.users.clone(),
+        shared_users: site.shared_users,
+        login_style: site.login_style.clone(),
+        cookie_name: crate::web::auth::session::cookie_name("main", &site.key),
     }
 }
 

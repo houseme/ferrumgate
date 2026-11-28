@@ -1,9 +1,9 @@
 use std::{
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     pin::Pin,
-    sync::OnceLock,
+    sync::{Arc, OnceLock},
     task::{Context, Poll},
-    time::Duration,
+    time::{Duration, Instant, SystemTime},
 };
 
 use http_body_util::{BodyExt, Either, Empty, Full};
@@ -11,9 +11,9 @@ use hyper::{
     Method, Request, Response, StatusCode, Uri, Version,
     body::{Body, Bytes, Frame, Incoming, SizeHint},
     header::{
-        CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderMap, HeaderName, HeaderValue,
-        LOCATION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, TRANSFER_ENCODING, UPGRADE,
-        VIA,
+        ACCEPT, AUTHORIZATION, CONNECTION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HOST, HeaderMap,
+        HeaderName, HeaderValue, LOCATION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, SET_COOKIE, TE,
+        TRAILER, TRANSFER_ENCODING, UPGRADE, VIA, WWW_AUTHENTICATE,
     },
     http::uri::{Authority, PathAndQuery, Scheme},
 };
@@ -29,6 +29,7 @@ use crate::{
     static_files::LocalBody,
     tls::ConnectionIdentity,
     web::{
+        auth::{self, AuthPathReply, AuthSite, Authenticator, BasicOutcome},
         identity,
         proxy::{
             cors, headers,
@@ -66,6 +67,7 @@ const MAX_REPLAY_BYTES: usize = 256 * 1024;
 
 pub(crate) struct Proxy {
     routes: Routes,
+    authenticator: Arc<Authenticator>,
     client: Client<HttpsConnector<HttpConnector>, RequestBody>,
     upgrade_client: Client<HttpsConnector<HttpConnector>, RequestBody>,
     h2c_client: Client<HttpConnector, RequestBody>,
@@ -104,11 +106,27 @@ impl Proxy {
 
         Self {
             routes,
+            // WP-24: the TOML path carries no auth users — an empty
+            // authenticator behind the default options never dispatches,
+            // keeping legacy requests byte-for-byte unchanged. The
+            // webservice configuration path attaches its
+            // settings-derived authenticator via `with_authenticator`.
+            authenticator: Arc::new(Authenticator::new(&[], Vec::new())),
             client: builder.build(negotiated),
             upgrade_client: builder.build(http1),
             h2c_client: builder.http2_only(true).build(connector),
             response_header_timeout: milliseconds(settings.response_header_timeout_ms),
         }
+    }
+
+    /// Attaches the generation's authenticator (built from the
+    /// webservice settings' `authSecret` + `authUsers`).
+    // Only the pipeline tests call it so far; the webservice
+    // configuration wiring (dir_config) attaches it in production.
+    #[allow(dead_code)]
+    pub(crate) fn with_authenticator(mut self, authenticator: Arc<Authenticator>) -> Self {
+        self.authenticator = authenticator;
+        self
     }
 
     pub async fn monitor_health(&self, events: &fg_core::events::EventBus) {
@@ -229,6 +247,34 @@ impl Proxy {
             // TOML path (`SiteProxyOptions::default`), so legacy routes
             // behave byte-for-byte as before.
             let options = &route.options;
+            // WP-24: authentication dispatch — the reserved auth paths,
+            // the web session cookie and the basic authorization all run
+            // before any option transform, so the authenticator sees the
+            // visitor's original headers. Every auth branch answers with
+            // its own response; unconfigured sites never enter here.
+            if options.web_auth || options.basic_auth {
+                if target.path().starts_with(auth::AUTH_PATH) {
+                    // The reserved auth paths never proxy: the body is
+                    // buffered here (the login form) and the reply comes
+                    // straight from the authenticator — 404 for unknown
+                    // auth subpaths.
+                    let (parts, incoming) = request.into_parts();
+                    let bytes = auth_form_body(incoming).await;
+                    let cx = auth_cx(&parts, &host, peer.ip(), &bytes);
+                    let site = AuthSite {
+                        users: &options.site_users,
+                        shared_users: options.shared_users,
+                        login_style: &options.login_style,
+                        cookie_name: &options.cookie_name,
+                    };
+                    return auth_reply(self.authenticator.handle_auth_path(&site, cx));
+                }
+                if let Some(response) =
+                    self.authenticate(options, &request, &host, peer.ip(), &target)
+                {
+                    return response;
+                }
+            }
             // Forged identity headers go first, before anything reads them.
             identity::strip(request.headers_mut(), &options.identity);
             // Rewrites and redirects; the host parameter is the original
@@ -539,6 +585,208 @@ impl Proxy {
             }
         }
     }
+
+    /// WP-24: the session/basic checks for requests outside the reserved
+    /// auth paths. A valid web session or basic authorization lets the
+    /// request through; browsers (`Accept: text/html`) without a session
+    /// are bounced to the login page with the original target riding in
+    /// `next`; other clients are refused. With basic and web configured
+    /// together the session wins and basic stays the fallback. Basic
+    /// failures land in the failure reserve (Denied → 401 with the
+    /// challenge, Locked → 429, Overloaded → 503).
+    fn authenticate(
+        &self,
+        options: &config::SiteProxyOptions,
+        request: &Request<Incoming>,
+        host: &str,
+        source: IpAddr,
+        target: &PathAndQuery,
+    ) -> Option<Reply> {
+        let authenticator = &self.authenticator;
+        let mut authenticated = false;
+        if options.web_auth
+            && let Some(value) = cookie_value(request.headers(), &options.cookie_name)
+            && authenticator
+                .verify_session(value, host, SystemTime::now())
+                .is_some()
+        {
+            authenticated = true;
+        }
+        if !authenticated
+            && options.basic_auth
+            && let Some((user, pass)) = request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(auth::basic::parse_header)
+        {
+            // TODO(WP-24 wiring): the bcrypt verification currently
+            // runs inline on the request path; move it to the
+            // blocking pool when the production settings wiring
+            // lands (the plan puts verification on a thread pool).
+            match authenticator.check_basic(&options.site_users, source, &user, &pass) {
+                BasicOutcome::Allowed(slot) => {
+                    // The verification is done; the slot releases.
+                    drop(slot);
+                    authenticated = true;
+                }
+                BasicOutcome::Denied => {
+                    authenticator.reserve().record_failure(source, Instant::now());
+                    return Some(basic_challenge(StatusCode::UNAUTHORIZED));
+                }
+                BasicOutcome::Locked => return Some(reply(StatusCode::TOO_MANY_REQUESTS)),
+                BasicOutcome::Overloaded => {
+                    return Some(reply(StatusCode::SERVICE_UNAVAILABLE));
+                }
+            }
+        }
+        if authenticated {
+            return None;
+        }
+        // Browsers get the login page; the original target rides along
+        // (encoded, so `&`/`=` inside it cannot break the query).
+        if options.web_auth && accepts_html(request.headers()) {
+            let next = auth::login_page::encode_next(target.as_str());
+            return Some(auth_reply(auth::login_page::redirect_reply(
+                &format!("{}?next={next}", auth::AUTH_PATH),
+                Vec::new(),
+            )));
+        }
+        // Non-browser refusal; with basic auth configured the challenge
+        // doubles as the password prompt.
+        Some(if options.basic_auth {
+            basic_challenge(StatusCode::UNAUTHORIZED)
+        } else {
+            reply(StatusCode::UNAUTHORIZED)
+        })
+    }
+}
+
+/// Buffers the login-form body, capped (a login form is a few hundred
+/// bytes; anything larger — or an aborted body — reads as garbage and
+/// fails verification).
+async fn auth_form_body(body: Incoming) -> Bytes {
+    const MAX_AUTH_FORM_BYTES: usize = 64 * 1024;
+    http_body_util::Limited::new(body, MAX_AUTH_FORM_BYTES)
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .unwrap_or_default()
+}
+
+/// Fills the auth context from the original request parts: cookies and
+/// the same-source header come from the headers, path/query from the
+/// URI. The Origin header wins over Referer for the same-source check.
+fn auth_cx<'a>(
+    parts: &'a hyper::http::request::Parts,
+    host: &'a str,
+    source: IpAddr,
+    body: &'a [u8],
+) -> auth::AuthCx<'a> {
+    let headers = &parts.headers;
+    let mut cookies = Vec::new();
+    for value in headers.get_all(COOKIE) {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for pair in value.split(';') {
+            if let Some((name, value)) = pair.trim().split_once('=') {
+                cookies.push((name, value));
+            }
+        }
+    }
+    let origin = headers
+        .get("origin")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| headers.get("referer").and_then(|value| value.to_str().ok()));
+    let content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    auth::AuthCx {
+        method: parts.method.as_str(),
+        host,
+        path: parts.uri.path(),
+        query: parts.uri.query().unwrap_or(""),
+        source,
+        body,
+        cookies,
+        content_type,
+        origin,
+    }
+}
+
+/// The first `name` cookie across every Cookie header (the value keeps
+/// any `=`, so signed cookie values with base64 padding survive).
+fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|cookies| {
+            cookies
+                .split(';')
+                .filter_map(|pair| {
+                    let (pair_name, pair_value) = pair.trim().split_once('=')?;
+                    (pair_name == name).then_some(pair_value)
+                })
+                .next()
+        })
+}
+
+/// Does the client present as a browser (HTML-capable Accept)?
+fn accepts_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// A basic-auth challenge response.
+fn basic_challenge(status: StatusCode) -> Reply {
+    let mut response = reply(status);
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Basic"));
+    response
+}
+
+/// Shapes an authenticator reply into a response: unknown reserved-path
+/// requests fall back to the plain 404; handled replies carry the
+/// status, content type, body, redirect target and every Set-Cookie.
+fn auth_reply(outcome: AuthPathReply) -> Reply {
+    match outcome {
+        AuthPathReply::NotFound => reply(StatusCode::NOT_FOUND),
+        AuthPathReply::Handled {
+            status,
+            content_type,
+            body,
+            location,
+            set_cookies,
+        } => {
+            let Ok(status) = StatusCode::from_u16(status) else {
+                return reply(StatusCode::BAD_GATEWAY);
+            };
+            let mut response = Response::new(Either::Right(Either::Left(Full::new(Bytes::from(
+                body,
+            )))));
+            *response.status_mut() = status;
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+            if !location.is_empty()
+                && let Ok(value) = HeaderValue::from_str(&location)
+            {
+                response.headers_mut().insert(LOCATION, value);
+            }
+            for (name, value) in set_cookies {
+                if let Ok(cookie) = HeaderValue::from_str(&format!("{name}={value}")) {
+                    response.headers_mut().append(SET_COOKIE, cookie);
+                }
+            }
+            response
+        }
+    }
 }
 
 pub(crate) fn strip_hop_headers(headers: &mut HeaderMap) -> Result<bool, ()> {
@@ -846,3 +1094,10 @@ mod wp23_options;
 #[cfg(test)]
 #[path = "../../../tests/gateway/wp23_retry.rs"]
 mod wp23_retry;
+
+// WP-24 batch 3: the authentication pipeline — reserved paths, login
+// flow, session binding, basic auth — driven end-to-end through
+// `Proxy::forward` the same way (`tests/gateway/wp24_auth.rs`).
+#[cfg(test)]
+#[path = "../../../tests/gateway/wp24_auth.rs"]
+mod wp24_auth;

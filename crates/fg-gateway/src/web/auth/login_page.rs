@@ -227,6 +227,246 @@ fn css_escape(value: &str) -> String {
     value.replace('<', "&lt;")
 }
 
+// ---------------------------------------------------------------------------
+// WP-24 batch 3: login submission, verification-code step and logout
+// handling. The rendering above is untouched; these helpers shape the
+// request side (form parsing, same-origin and `next` restrictions) and
+// the replies the authenticator returns for the reserved paths.
+// ---------------------------------------------------------------------------
+
+use super::AuthPathReply;
+
+/// Content type of every rendered page.
+const HTML: &str = "text/html; charset=utf-8";
+/// Content type of the empty-body redirects and throttle replies.
+const TEXT: &str = "text/plain; charset=utf-8";
+
+/// The four fields the login form submits (`next` as a hidden field,
+/// the credentials, and the optional verification code).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LoginForm {
+    pub next: String,
+    pub username: String,
+    pub password: String,
+    pub code: String,
+}
+
+/// Parses an `application/x-www-form-urlencoded` body into the login
+/// form fields; unknown fields are dropped, malformed pairs are skipped
+/// (`+` decodes as a space, as browsers encode form bodies).
+pub fn parse_login_form(body: &[u8]) -> LoginForm {
+    let mut form = LoginForm::default();
+    let text = String::from_utf8_lossy(body);
+    for pair in text.split('&') {
+        let Some((name, value)) = pair.split_once('=') else {
+            continue;
+        };
+        let value = decode_percent(value, true);
+        match name {
+            "next" => form.next = value,
+            "username" => form.username = value,
+            "password" => form.password = value,
+            "code" => form.code = value,
+            _ => {}
+        }
+    }
+    form
+}
+
+/// The `next` target from the auth-path query (`?next=...`), decoded
+/// and restricted by [`safe_next`] (falls back to `/`).
+pub fn next_from_query(query: &str) -> String {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("next="))
+        .map(|value| safe_next(&decode_percent(value, false)).to_owned())
+        .unwrap_or_else(|| "/".to_owned())
+}
+
+/// Restricts the post-login target to a site-relative path (§3.3): it
+/// must start with `/`, must not start with `//`, must not contain a
+/// backslash or control characters — anything else falls back to `/`,
+/// so `//evil`, `/\evil` and `https://evil` cannot leave the site.
+pub fn safe_next(next: &str) -> &str {
+    let safe = next.starts_with('/')
+        && !next.starts_with("//")
+        && !next.contains('\\')
+        && !next.chars().any(char::is_control);
+    if safe {
+        next
+    } else {
+        "/"
+    }
+}
+
+/// Extracts the host of an `Origin`/`Referer` header value (the caller
+/// passes the Origin first, falling back to Referer). Scheme-less,
+/// `null` and empty values yield `None`; a numeric port tail is stripped
+/// because the session host never carries one.
+pub fn origin_host(header: Option<&str>) -> Option<String> {
+    let value = header?.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let rest = value.split_once("://").map_or(value, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.rsplit_once(':') {
+        // Only a numeric tail counts as a port (IPv6 literals keep
+        // their colons; the bracketed host compares fine).
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
+            host
+        }
+        _ => authority,
+    };
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_ascii_lowercase())
+    }
+}
+
+/// Percent-encodes a `next` target for the `?next=` query value (RFC
+/// 3986 unreserved characters and `/` pass through; `&`, `=` and `?`
+/// inside the target must not break the query).
+pub fn encode_next(target: &str) -> String {
+    const NEXT_SET: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'/')
+        .remove(b'.')
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'~');
+    percent_encoding::utf8_percent_encode(target, NEXT_SET).to_string()
+}
+
+/// Percent-decodes one component. `plus_as_space` follows the form
+/// encoding (`+` = space) for bodies; query values keep their `+`.
+fn decode_percent(value: &str, plus_as_space: bool) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                match (hex_val(bytes[index + 1]), hex_val(bytes[index + 2])) {
+                    (Some(high), Some(low)) => {
+                        out.push(high << 4 | low);
+                        index += 3;
+                    }
+                    _ => {
+                        out.push(b'%');
+                        index += 1;
+                    }
+                }
+            }
+            b'+' if plus_as_space => {
+                out.push(b' ');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// The login (or verification-code) page as a 200 reply.
+pub fn page_reply(
+    page: &LoginPage,
+    error: Option<&str>,
+    need_code: bool,
+    host: &str,
+    next: &str,
+) -> AuthPathReply {
+    AuthPathReply::Handled {
+        status: 200,
+        content_type: HTML,
+        body: render(page, error, need_code, host, next),
+        location: String::new(),
+        set_cookies: Vec::new(),
+    }
+}
+
+/// A locked-out source: the page renders, but the status says 429 —
+/// even correct credentials are refused until the window expires.
+pub fn throttled_reply(
+    page: &LoginPage,
+    need_code: bool,
+    host: &str,
+    next: &str,
+) -> AuthPathReply {
+    AuthPathReply::Handled {
+        status: 429,
+        content_type: HTML,
+        body: render(page, Some("尝试次数过多，请稍后再试"), need_code, host, next),
+        location: String::new(),
+        set_cookies: Vec::new(),
+    }
+}
+
+/// An exhausted gate pool: the verification itself never ran, so no
+/// failure counts; the source may retry once the pool drains.
+pub fn busy_reply(page: &LoginPage, host: &str) -> AuthPathReply {
+    AuthPathReply::Handled {
+        status: 503,
+        content_type: HTML,
+        body: render(page, Some("系统繁忙，请稍后再试"), false, host, "/"),
+        location: String::new(),
+        set_cookies: Vec::new(),
+    }
+}
+
+/// The verification-code step's page: the code input rides on the
+/// normal form (it posts back to the reserved path), and the one-time
+/// token travels in a short-lived cookie scoped to the auth path.
+pub fn code_reply(
+    page: &LoginPage,
+    host: &str,
+    next: &str,
+    token_cookie: (String, String),
+) -> AuthPathReply {
+    AuthPathReply::Handled {
+        status: 200,
+        content_type: HTML,
+        body: render(page, None, true, host, next),
+        location: String::new(),
+        set_cookies: vec![token_cookie],
+    }
+}
+
+/// An empty-body redirect with the cookies to set (session issuance,
+/// token clearing, logout).
+pub fn redirect_reply(location: &str, set_cookies: Vec<(String, String)>) -> AuthPathReply {
+    AuthPathReply::Handled {
+        status: 302,
+        content_type: TEXT,
+        body: String::new(),
+        location: location.to_owned(),
+        set_cookies,
+    }
+}
+
+/// 退出: clears the site's session cookie and bounces to the root.
+pub fn logout_reply(cookie_name: &str) -> AuthPathReply {
+    redirect_reply(
+        "/",
+        vec![(
+            cookie_name.to_owned(),
+            "; Path=/; HttpOnly; Max-Age=0".to_owned(),
+        )],
+    )
+}
+
 /// The default look's base stylesheet (inline, no external resources).
 const BASE_CSS: &str = concat!(
     ":root{color-scheme:light dark}",
@@ -488,3 +728,109 @@ mod tests {
 </html>
 "#;
 }
+
+#[cfg(test)]
+mod handling_tests {
+    use super::*;
+
+    #[test]
+    fn safe_next_keeps_site_relative_targets_only() {
+        // §3.3：next 只接受站内相对路径；越界一律回落 /。
+        assert_eq!(safe_next("/dashboard?a=1&b=2"), "/dashboard?a=1&b=2");
+        assert_eq!(safe_next("/"), "/");
+        assert_eq!(safe_next("//evil.test"), "/");
+        assert_eq!(safe_next("/\\evil.test"), "/");
+        assert_eq!(safe_next("https://evil.test"), "/");
+        assert_eq!(safe_next(""), "/");
+        // 控制字符（包括 \n 伪造的头注入）不可接受。
+        assert_eq!(safe_next("/a\nX: y"), "/");
+    }
+
+    #[test]
+    fn origin_host_parses_scheme_port_and_null() {
+        assert_eq!(
+            origin_host(Some("http://a.test")).as_deref(),
+            Some("a.test")
+        );
+        assert_eq!(
+            origin_host(Some("https://A.test:8443/path?x=1")).as_deref(),
+            Some("a.test")
+        );
+        assert_eq!(
+            origin_host(Some("http://[2001:db8::1]:8080/")).as_deref(),
+            Some("[2001:db8::1]")
+        );
+        assert_eq!(origin_host(None), None);
+        assert_eq!(origin_host(Some("")), None);
+        assert_eq!(origin_host(Some("null")), None);
+        assert_eq!(origin_host(Some("http://")).as_deref(), None);
+    }
+
+    #[test]
+    fn form_fields_round_trip_through_the_encodings() {
+        // 表单体：+ 是空格，%XX 逐字节解码。
+        let form = parse_login_form(
+            b"next=%2Fdash%3Fa%3D1%26b%3D2&username=ali+ce&password=pa%3Ass&code=123456",
+        );
+        assert_eq!(form.next, "/dash?a=1&b=2");
+        assert_eq!(form.username, "ali ce");
+        assert_eq!(form.password, "pa:ss");
+        assert_eq!(form.code, "123456");
+
+        // 空体与未知字段安全。
+        assert_eq!(parse_login_form(b""), LoginForm::default());
+        assert_eq!(parse_login_form(b"junk&x=1").username, "");
+
+        // 查询里的 next 解码后再做安全检查。
+        assert_eq!(next_from_query("next=%2Fhtml"), "/html");
+        assert_eq!(next_from_query("next=%2F%2Fevil"), "/");
+        assert_eq!(next_from_query(""), "/");
+
+        // encode_next：/ 与未保留字符原样，&=? 编码（不破坏查询）。
+        assert_eq!(encode_next("/"), "/");
+        assert_eq!(encode_next("/a?b=1&c=2"), "/a%3Fb%3D1%26c%3D2");
+        assert_eq!(encode_next("/组"), "/%E7%BB%84");
+    }
+
+    #[test]
+    fn replies_carry_status_cookies_and_redirects() {
+        let page = LoginPage::default();
+        // 登录页 200、无 Cookie、无跳转。
+        let reply = page_reply(&page, None, false, "h.test", "/");
+        let AuthPathReply::Handled {
+            status,
+            content_type,
+            location,
+            set_cookies,
+            ..
+        } = reply
+        else {
+            panic!("page reply must be Handled");
+        };
+        assert_eq!(status, 200);
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        assert!(location.is_empty());
+        assert!(set_cookies.is_empty());
+
+        // 退出：清 Cookie 并回根。
+        let AuthPathReply::Handled {
+            status,
+            location,
+            set_cookies,
+            ..
+        } = logout_reply("gately_site_x")
+        else {
+            panic!("logout reply must be Handled");
+        };
+        assert_eq!(status, 302);
+        assert_eq!(location, "/");
+        assert_eq!(
+            set_cookies,
+            vec![(
+                "gately_site_x".to_owned(),
+                "; Path=/; HttpOnly; Max-Age=0".to_owned()
+            )]
+        );
+    }
+}
+

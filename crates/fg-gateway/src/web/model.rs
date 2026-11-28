@@ -19,6 +19,16 @@ pub struct Settings {
     pub enable: bool,
     /// Default response header timeout milliseconds for proxy sites.
     pub response_header_timeout_ms: u64,
+    /// WP-24: HMAC key for session cookies; empty = generated at first
+    /// startup (redacted in API responses).
+    pub auth_secret: String,
+    /// WP-24: shared authentication users (`authUsers`).
+    pub auth_users: Vec<AuthUserSite>,
+    /// WP-24: single-sign-on parent domains.
+    pub sso_domains: Vec<String>,
+    /// WP-24: automatic ban seconds after repeated auth failures
+    /// (0 = rate-limit only).
+    pub auto_ban_seconds: u32,
 }
 
 impl Default for Settings {
@@ -26,6 +36,42 @@ impl Default for Settings {
         Self {
             enable: false,
             response_header_timeout_ms: 30_000,
+            auth_secret: String::new(),
+            auth_users: Vec::new(),
+            sso_domains: Vec::new(),
+            auto_ban_seconds: 0,
+        }
+    }
+}
+
+/// One shared authentication user (WP-24): the password is bcrypt (a
+/// submitted plaintext is hashed on save; responses show `********`)
+/// and the TOTP secret is Base32 (empty = disabled).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthUserSite {
+    pub id: String,
+    pub name: String,
+    pub password: String,
+    pub totp_secret: String,
+    pub email: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub groups: Vec<String>,
+    pub remark: String,
+}
+
+impl Default for AuthUserSite {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            password: String::new(),
+            totp_secret: String::new(),
+            email: String::new(),
+            display_name: String::new(),
+            groups: Vec::new(),
+            remark: String::new(),
         }
     }
 }
@@ -131,6 +177,15 @@ pub struct Site {
     /// Source access lists (WP-36 shape, validated in WP-24/26).
     pub access_allow: Vec<String>,
     pub access_deny: Vec<String>,
+    /// WP-24 authentication (site-level).
+    pub basic_auth: bool,
+    pub web_auth: bool,
+    /// `name:password` lines; plaintext is hashed on save.
+    pub users: Vec<String>,
+    /// Shared users may authenticate here (TOTP users via web flow only).
+    pub shared_users: bool,
+    /// Login page style override (loginStyle).
+    pub login_style: String,
     pub remark: String,
 }
 
@@ -182,6 +237,11 @@ impl Default for Site {
             health_passes: 0,
             access_allow: Vec::new(),
             access_deny: Vec::new(),
+            basic_auth: false,
+            web_auth: false,
+            users: Vec::new(),
+            shared_users: false,
+            login_style: String::new(),
             remark: String::new(),
         }
     }
@@ -454,6 +514,10 @@ mod tests {
             settings: Settings {
                 enable: true,
                 response_header_timeout_ms: 45_000,
+                auth_secret: String::new(),
+                auth_users: Vec::new(),
+                sso_domains: Vec::new(),
+                auto_ban_seconds: 0,
             },
             listeners: vec![
                 Listener {

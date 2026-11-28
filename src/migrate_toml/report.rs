@@ -57,6 +57,9 @@ pub struct Converted {
     pub webservice: fg_gateway::web::model::FileConfig,
     pub ssl: fg_gateway::certs::model::FileConfig,
     pub portforward: fg_gateway::l4::portforward::model::FileConfig,
+    /// The `ferrumgate.json` body carrying the legacy globals
+    /// (disabledModules, shutdownTimeoutMs, upstreamCaFile).
+    pub management: serde_json::Value,
     pub report: MigrateReport,
 }
 

@@ -99,6 +99,23 @@ pub(crate) struct SiteProxyOptions {
     /// path keeps the legacy single-attempt behavior; the webservice
     /// model enables it for multi-backend proxy sites.
     pub retry: bool,
+    /// WP-24: HTTP basic authentication on this site. The TOML path
+    /// never enables it (no auth users there), keeping legacy behavior.
+    pub basic_auth: bool,
+    /// WP-24: web authentication (login page + signed session cookie).
+    pub web_auth: bool,
+    /// WP-24: the site's `name:password` user entries, verbatim (the
+    /// auth dispatch verifies against them).
+    pub site_users: Vec<String>,
+    /// WP-24: shared users may authenticate here (TOTP users via the
+    /// web flow only).
+    pub shared_users: bool,
+    /// WP-24: per-site login page style override (`loginStyle`).
+    pub login_style: String,
+    /// WP-24: the signed session cookie name for this site
+    /// (`gately_site_<hash>`), compiled by the webservice bridge. Empty
+    /// on the TOML path (no web auth there).
+    pub cookie_name: String,
 }
 
 impl Default for SiteProxyOptions {
@@ -113,6 +130,12 @@ impl Default for SiteProxyOptions {
             response_headers: Vec::new(),
             cors: None,
             retry: false,
+            basic_auth: false,
+            web_auth: false,
+            site_users: Vec::new(),
+            shared_users: false,
+            login_style: String::new(),
+            cookie_name: String::new(),
         }
     }
 }
