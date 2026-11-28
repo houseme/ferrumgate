@@ -6,6 +6,7 @@ pub(crate) mod legacy;
 
 pub(crate) use legacy::Web;
 
+pub mod auth;
 pub mod domains;
 pub mod identity;
 pub mod model;

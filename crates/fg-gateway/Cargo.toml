@@ -11,6 +11,7 @@ anyhow.workspace = true
 arc-swap.workspace = true
 axum = { workspace = true, features = ["json"] }
 base64.workspace = true
+bcrypt.workspace = true
 cap-std.workspace = true
 fg-core.workspace = true
 fg-net.workspace = true
