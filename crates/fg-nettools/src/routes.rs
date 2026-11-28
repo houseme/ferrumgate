@@ -45,12 +45,12 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::RwLock;
 
+use crate::PingParams;
 use crate::jobs::{Caps, JobError, JobRegistry};
 use crate::model::{
     DnsParams, FileConfig, LanScanParams, PortProbeParams, Settings, SpeedParams, Tool,
     TracerouteParams,
 };
-use crate::PingParams;
 use crate::validate;
 
 /// Writes the whole [`FileConfig`] to `nettools.json`.
