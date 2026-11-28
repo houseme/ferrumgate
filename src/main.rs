@@ -52,6 +52,11 @@ enum Command {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Import configuration from another Gately instance.
+    Import {
+        #[command(subcommand)]
+        source: ImportSource,
+    },
     /// Run the gateway.
     Serve {
         /// The legacy TOML configuration file, or (WP-39) a configuration
@@ -133,6 +138,34 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum ImportSource {
+    /// Import a Gately configuration directory into FerrumGate.
+    Gately {
+        /// Source Gately configuration directory (read-only).
+        #[arg(long)]
+        dir: PathBuf,
+        /// Target FerrumGate configuration directory (defaults to ./data).
+        #[arg(long, default_value = "./data")]
+        target: PathBuf,
+        /// Only import the listed module IDs (repeatable or comma-separated).
+        #[arg(long, value_delimiter = ',')]
+        include: Vec<String>,
+        /// Handling of account.json and tokens.json: skip (default) or import.
+        #[arg(long, value_enum, default_value_t = ferrumgate::import_gately::AccountPolicy::Skip)]
+        accounts: ferrumgate::import_gately::AccountPolicy,
+        /// Write converted configurations to the target directory (default is dry-run).
+        #[arg(long)]
+        apply: bool,
+        /// Allow overwriting a non-empty target directory (backs up overwritten files first).
+        #[arg(long)]
+        force: bool,
+        /// Write the structured JSON report to this file.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum CtlVerb {
     /// List operations the token may call, optionally filtered by keyword.
     Ls { filter: Option<String> },
@@ -189,6 +222,35 @@ async fn main() -> Result<()> {
             force,
             report,
         }),
+        Command::Import { source } => match source {
+            ImportSource::Gately {
+                dir,
+                target,
+                include,
+                accounts,
+                apply,
+                force,
+                report,
+            } => {
+                let options = ferrumgate::import_gately::ImportOptions {
+                    source_dir: dir,
+                    target_dir: target,
+                    dry_run: !apply,
+                    force,
+                    include,
+                    accounts,
+                    report_file: report,
+                };
+                let result = ferrumgate::import_gately::run_import(&options)?;
+                print!("{}", result.format_human(&options.target_dir));
+                ensure!(
+                    !result.has_failures(),
+                    "Gately import completed with {} failed module(s)",
+                    result.summary.failed + result.summary.unsupported_version
+                );
+                Ok(())
+            }
+        },
         Command::ResetPassword {
             admin_dir,
             disable_totp,

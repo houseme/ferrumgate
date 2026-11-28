@@ -1,0 +1,32 @@
+{
+  "settings": {
+    "enable": true,
+    "renewBeforeDays": 30,
+    "shortLivedRenewHours": 24,
+    "defaultEmail": "admin@example.com"
+  },
+  "certs": [
+    {
+      "key": "example-upload",
+      "remark": "example.com",
+      "group": "fixture",
+      "enable": true,
+      "source": "upload",
+      "certPem": "-----BEGIN CERTIFICATE-----\nMIIBhzCCAS2gAwIBAgIUCEToNBeYC4ZIwWTv4GUFkjJrZdEwCgYIKoZIzj0EAwIw\nFjEUMBIGA1UEAwwLZXhhbXBsZS5jb20wHhcNMjYxMTI4MTY1NjQ0WhcNMzYxMTI1\nMTY1NjQ0WjAWMRQwEgYDVQQDDAtleGFtcGxlLmNvbTBZMBMGByqGSM49AgEGCCqG\nSM49AwEHA0IABI+FD+CEAsmjYdaF4ctCX4Iy+barOnWUg2/HJ9XASyeEtbIpjv6h\nahNmqGr0vzqnYoODbMCjdzwsNdg6uzqvu9ujWTBXMB0GA1UdDgQWBBR6M4jawI5h\nEELlX5qGJG3gTbxYTTAPBgNVHRMBAf8EBTADAQH/MCUGA1UdEQQeMByCC2V4YW1w\nbGUuY29tgg0qLmV4YW1wbGUuY29tMAoGCCqGSM49BAMCA0gAMEUCIQDMvw42WWfK\nmdt/6LGuplU5WclnYrOT+B/4dFDnFAmUWAIgBlTWP8YuwpUs5zpdq9m+ECzUolL3\nELj+ZjGIuB2Vnyk=\n-----END CERTIFICATE-----\n",
+      "keyPem": "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg1x1BDVwK7lMVUKBI\n52kQkugo50P/zJNe9KIwxunpFmahRANCAASPhQ/ghALJo2HWheHLQl+CMvm2qzp1\nlINvxyfVwEsnhLWyKY7+oWoTZqhq9L86p2KDg2zAo3c8LDXYOrs6r7vb\n-----END PRIVATE KEY-----\n"
+    },
+    {
+      "key": "example-acme",
+      "remark": "acme.example.com",
+      "group": "fixture",
+      "enable": false,
+      "source": "acme",
+      "acme": {
+        "domains": [
+          "acme.example.com"
+        ],
+        "keyType": "P256"
+      }
+    }
+  ]
+}

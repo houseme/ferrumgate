@@ -1,0 +1,100 @@
+{
+  "settings": {
+    "enable": true,
+    "responseHeaderTimeoutMs": 15000
+  },
+  "listeners": [
+    {
+      "key": "web-edge",
+      "name": "Public HTTPS",
+      "enable": true,
+      "network": "tcp",
+      "listenIp": "0.0.0.0",
+      "port": 8443,
+      "tls": true,
+      "minTls": "1.2",
+      "plainHttp": false,
+      "httpPort": "",
+      "acceptProxyProtocol": false,
+      "accessScheme": "https",
+      "accessPort": 8443,
+      "autoFirewall": false,
+      "default": true,
+      "remark": "sanitized fixture listener",
+      "sites": [
+        {
+          "key": "app-proxy",
+          "name": "App Backend",
+          "enable": true,
+          "group": "services",
+          "domains": [
+            "app.example.com"
+          ],
+          "siteType": "proxy",
+          "targets": [
+            "http://127.0.0.1:18080"
+          ],
+          "lbPolicy": "round_robin",
+          "upstreamH2c": false,
+          "useTargetHost": false,
+          "forwardedHeaders": true,
+          "timeoutsConnectSecs": 5,
+          "healthMode": "http",
+          "healthPath": "/healthz",
+          "healthIntervalSecs": 10,
+          "healthTimeoutSecs": 3,
+          "healthFails": 3,
+          "healthPasses": 2,
+          "accessAllow": [
+            "10.0.0.0/8",
+            "127.0.0.1"
+          ],
+          "accessDeny": [
+            "203.0.113.0/24"
+          ],
+          "remark": "primary app"
+        },
+        {
+          "key": "legacy-redirect",
+          "name": "Old Host Redirect",
+          "enable": true,
+          "group": "services",
+          "domains": [
+            "old.example.com"
+          ],
+          "siteType": "redirect",
+          "redirectTo": "https://app.example.com/",
+          "redirectCode": 301,
+          "remark": "redirect fixture"
+        },
+        {
+          "key": "status-text",
+          "name": "Status Page",
+          "enable": true,
+          "group": "ops",
+          "domains": [
+            "status.example.com"
+          ],
+          "siteType": "text",
+          "textBody": "service healthy",
+          "textContentType": "text/plain",
+          "textStatusCode": 200,
+          "remark": "text fixture"
+        }
+      ]
+    },
+    {
+      "key": "standby",
+      "name": "Standby Listener",
+      "enable": false,
+      "network": "tcp",
+      "listenIp": "127.0.0.1",
+      "port": 8444,
+      "tls": false,
+      "minTls": "1.2",
+      "sites": [],
+      "default": false,
+      "remark": "disabled listener"
+    }
+  ]
+}

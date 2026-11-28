@@ -1,0 +1,50 @@
+{
+  "listen": ":16680",
+  "httpsListen": ":16443",
+  "forceHTTPS": false,
+  "safePath": "/panel",
+  "lanOnly": false,
+  "denyMode": "notfound",
+  "denyStatus": 404,
+  "denyPage": "",
+  "gatewaySSO": false,
+  "disableProxyHeaders": false,
+  "trustedProxies": [
+    "127.0.0.1",
+    "10.0.0.0/8"
+  ],
+  "maxLoginFailures": 5,
+  "lockMinutes": 15,
+  "loginGlobalLimit": 20,
+  "confirmTimeout": 90,
+  "language": "zh-CN",
+  "uiLanguage": "en",
+  "timeZone": "Asia/Shanghai",
+  "dnsServers": [
+    "1.1.1.1",
+    "8.8.8.8:53"
+  ],
+  "updateProxy": "",
+  "restrictOutbound": false,
+  "disableUpdateCheck": true,
+  "logLevel": "info",
+  "logLines": 2000,
+  "disableLogPersist": false,
+  "logFileMB": 4,
+  "accessLogDays": 7,
+  "accessLogMB": 32,
+  "logDir": "",
+  "gcPercent": 100,
+  "maxProcs": 4,
+  "thirdLogin": {
+    "enable": false,
+    "callbackBase": "",
+    "providers": [],
+    "allowed": [],
+    "skipTotp": false
+  },
+  "disabledModules": [
+    "docker",
+    "waf"
+  ]
+}

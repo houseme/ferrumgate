@@ -1,0 +1,59 @@
+{
+  "settings": {
+    "enable": true,
+    "defaultMaxConnections": 256,
+    "defaultMaxConnsPerSource": 64,
+    "perSourceExempt": [
+      "127.0.0.1"
+    ],
+    "defaultUdpSessionTimeout": 60,
+    "maxUdpSessions": 1024,
+    "dialTimeout": 5,
+    "firstDataTimeout": 60
+  },
+  "rules": [
+    {
+      "key": "ssh-fwd",
+      "name": "SSH Bastion",
+      "enable": true,
+      "group": "ops",
+      "protocols": [
+        "tcp"
+      ],
+      "listenAddress": "127.0.0.1",
+      "listenPorts": "2222",
+      "autoFirewall": false,
+      "targetAddresses": [
+        "127.0.0.1:22"
+      ],
+      "targetPorts": "22",
+      "maxConnections": 128,
+      "maxConnsPerSource": 32,
+      "proxyProtocol": "none",
+      "allow": [
+        "127.0.0.0/8"
+      ],
+      "deny": [],
+      "remark": "sanitized tcp rule"
+    },
+    {
+      "key": "dns-fwd",
+      "name": "Local DNS",
+      "enable": true,
+      "group": "ops",
+      "protocols": [
+        "udp"
+      ],
+      "listenAddress": "127.0.0.1",
+      "listenPorts": "5353",
+      "autoFirewall": false,
+      "targetAddresses": [
+        "127.0.0.1:53"
+      ],
+      "targetPorts": "53",
+      "udpSessionTimeout": 30,
+      "proxyProtocol": "none",
+      "remark": "sanitized udp rule"
+    }
+  ]
+}
