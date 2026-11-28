@@ -1,0 +1,29 @@
+[package]
+name = "fg-proc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+flate2.workspace = true
+rustix = { workspace = true, features = ["process"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+tokio = { workspace = true, features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tracing.workspace = true
+url.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "net"] }

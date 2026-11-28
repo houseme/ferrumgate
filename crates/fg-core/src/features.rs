@@ -63,6 +63,7 @@ pub fn built(id: &str) -> bool {
         || (matches!(id, "stun") && cfg!(feature = "mod-stun"))
         || (matches!(id, "guard") && cfg!(feature = "mod-guard"))
         || (matches!(id, "cron") && cfg!(feature = "mod-cron"))
+        || (matches!(id, "notify") && cfg!(feature = "mod-notify"))
 }
 
 /// All module ids compiled into this build, in display order.
