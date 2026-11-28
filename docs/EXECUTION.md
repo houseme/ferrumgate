@@ -1398,3 +1398,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-42 STUN 穿透（后续梯队交付，模块收尾）
 
 - 2026-11-28 交付 707b26e。UPnP IGD：SSDP 发现（upnpGateway 单播 + 组播、设备描述 XML 按服务优先级解析、controlURL 强制指向网关本机否则拒绝〔§8 安全要求〕）、SOAP Add/Get/Delete 映射（错误 725 自动回退永久租期、删除前经 GetSpecificPortMappingEntry 校验归属、强制 no_proxy）、多层 NAT 判定（网关 WAN IP ≠ STUN 公网 IP 时只映射通道端口）；NAT-PMP 按 RFC 6886（250ms 起倍增重传、7200 秒建议租期半租期刷新）；运行时自动维护映射（端点变化跟随、停止规则删除映射、5 秒优雅清理）；通知按文档语义（webhook 每次成功或仅变化、脚本 30 秒上限 + 环境变量、事件仅变化/首次）；selfcheck 三项（module/rules/network，CGNAT 检测排除 tun/wg/utun 等虚拟网卡）。fg-stun 全量 70 项测试（+25）、fg-net 87 项无回归。UPnP/NAT-PMP 位置按文档 §3.1 放 fg-stun/src/upnp/（fg-net 零改动）。**跳过项**：内置转发（步骤 9）待 L4 数据面落地后在 channel socket 上接管（record_connection 计数钩子已预留）；SSDP 组播收包与真实 NAT 穿透按 §8 留待真实 LAN 验证。**WP-42 实现层收尾**：尚余 DESIGN/EXECUTION 模块章节与转发接线。
+
+### WP-46 Cloudflare Tunnel（完整模块交付）
+
+- 2026-11-28 交付 5e8f7f5。fg-cloudflared：token/quick 双模式隧道经 fg-proc 监督运行（`TUNNEL_TOKEN` 只进环境变量、quick 模式从进程输出解析 trycloudflare 地址、退出即重启、drain 有界停止）；ingress 编辑器经注入的 FetchFn 读写远端隧道配置（最长后缀 zone 限定本账号、proxied CNAME 同步、8 MiB 响应帽、版本并发核对 409、local 源需 force、只替换 ingress 键保留其他远端字段）；安装管理（check/rollback/backups）、settings 携带二进制与版本、reset 停全部隧道保留程序。23 个操作按集合契约；token 四种 base64 变体解析与脱敏。66 项测试（rustc 编译的 cloudflared 夹具 + 假 Cloudflare API 服务器）；clippy -D warnings、fmt 干净。**已定偏差**：crate 零网络直连（骨架中的 fg-net 依赖移除），Cloudflare 出站经注入通道在装配层包装——若改为 CfClient 直持 OutboundHttp 需同步更新 WP-46 §3.1；ingress 版本用 JSON 数字（对齐 Cloudflare API 线格式）；`/api/cloudflared/settings` 的 session-only 由 fg-admin 接线层执行；真实 trycloudflare 隧道未验证（§7 允许标注）。根进程接线与 fg-logging 日志来源替换随后续接线批次。
