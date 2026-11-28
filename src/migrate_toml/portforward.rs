@@ -281,3 +281,91 @@ fn target_ports(targets: &[String]) -> Vec<u16> {
     }
     ports
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(toml_text: &str) -> RawConfig {
+        toml::from_str::<RawConfig>(toml_text).expect("fixture parses")
+    }
+
+    #[test]
+    fn tcp_rules_map_listen_targets_and_globals() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[tcp_forward]]\n",
+            "listen = \"0.0.0.0:2222\"\n",
+            "targets = [\"192.168.1.10:22\"]\n",
+            "max_connections = 100\n",
+            "connect_timeout_ms = 3000\n",
+            "first_data_timeout_ms = 4000\n",
+            "max_connections_per_source = 8\n",
+            "[[tcp_forward]]\n",
+            "listen = \"0.0.0.0:2223\"\n",
+            "targets = [\"192.168.1.11:22\"]\n",
+            "connect_timeout_ms = 6000\n",
+        );
+        let mut report = MigrateReport::default();
+        let file = convert(&config(text), &mut report).expect("converts");
+        assert_eq!(file.rules.len(), 2);
+        let first = &file.rules[0];
+        assert_eq!(first.listen_address, "0.0.0.0");
+        assert_eq!(first.listen_ports, "2222");
+        assert_eq!(first.target_addresses, vec!["192.168.1.10:22".to_owned()]);
+        assert_eq!(first.target_ports, "22");
+        assert_eq!(first.max_connections, 100);
+        assert_eq!(first.max_conns_per_source, 8);
+        assert!(first.protocols.contains(&pf::Protocol::Tcp));
+        // Global aggregation: dial timeout = max (6s); first data = max over
+        assert_eq!(file.settings.dial_timeout, 6);
+        // rules, where an unconfigured rule keeps the legacy default 60s --
+        // which the new model normalizes 0 to anyway.
+        assert_eq!(file.settings.first_data_timeout, 60);
+    }
+
+    #[test]
+    fn udp_rules_sum_sessions_and_take_max_idle() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[udp_forward]]\n",
+            "listen = \"0.0.0.0:5353\"\n",
+            "targets = [\"10.0.0.5:53\"]\n",
+            "max_sessions = 128\n",
+            "idle_timeout_ms = 30000\n",
+            "[[udp_forward]]\n",
+            "listen = \"0.0.0.0:5354\"\n",
+            "target = \"10.0.0.6:53\"\n",
+            "max_sessions = 64\n",
+            "idle_timeout_ms = 60000\n",
+        );
+        let mut report = MigrateReport::default();
+        let file = convert(&config(text), &mut report).expect("converts");
+        assert_eq!(file.rules.len(), 2);
+        assert!(file.rules[0].protocols.contains(&pf::Protocol::Udp));
+        assert_eq!(file.settings.max_udp_sessions, 192);
+        assert_eq!(file.settings.default_udp_session_timeout, 60);
+    }
+
+    #[test]
+    fn connection_lifetime_is_dropped() {
+        let text = concat!(
+            "schema_version = 1\n",
+            "[server]\nlisten = \"127.0.0.1:8080\"\n",
+            "[[tcp_forward]]\n",
+            "listen = \"0.0.0.0:2222\"\n",
+            "targets = [\"10.0.0.5:22\"]\n",
+            "connection_lifetime_ms = 600000\n",
+        );
+        let mut report = MigrateReport::default();
+        convert(&config(text), &mut report).expect("converts");
+        assert!(
+            report
+                .dropped
+                .iter()
+                .any(|d| d.field == "tcp_forward.connection_lifetime_ms")
+        );
+    }
+}

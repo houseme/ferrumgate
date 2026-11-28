@@ -150,3 +150,61 @@ pub fn convert(
     }
     Ok(file)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(toml_text: &str) -> RawConfig {
+        toml::from_str::<RawConfig>(toml_text).expect("fixture parses")
+    }
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/toml/certs.toml");
+
+    #[test]
+    fn certificates_become_file_source_entries() {
+        let mut report = MigrateReport::default();
+        let file = convert(&config(FIXTURE), &mut report).expect("converts");
+        let entry = file
+            .certs
+            .iter()
+            .find(|cert| cert.source == CertSource::File)
+            .expect("file entry");
+        assert_eq!(entry.remark, "home.example.com");
+        assert_eq!(entry.cert_file, "/etc/ssl/home.pem");
+        assert_eq!(entry.key_file, "/etc/ssl/home.key");
+        assert!(entry.enable);
+    }
+
+    #[test]
+    fn acme_maps_to_custom_directory_and_days() {
+        let mut report = MigrateReport::default();
+        let file = convert(&config(FIXTURE), &mut report).expect("converts");
+        let entry = file
+            .certs
+            .iter()
+            .find(|cert| cert.source == CertSource::Acme)
+            .expect("acme entry");
+        assert_eq!(entry.acme["ca"], "custom");
+        assert_eq!(entry.acme["directoryUrl"], "https://acme.example/dir");
+        assert_eq!(entry.acme["profile"], "shortlived");
+        assert_eq!(entry.acme["renewBeforeDays"], 2); // integer division 50/24 = 2
+        assert!(file.settings.default_email.contains("@"));
+        assert!(report.dropped.iter().any(|d| d.field == "acme.accept_terms"));
+        assert!(report.dropped.iter().any(|d| d.field == "acme.state_dir"));
+    }
+
+    #[test]
+    fn dns01_maps_to_challenge_and_provider() {
+        let mut report = MigrateReport::default();
+        let file = convert(&config(FIXTURE), &mut report).expect("converts");
+        let entry = file
+            .certs
+            .iter()
+            .find(|cert| cert.source == CertSource::Acme)
+            .expect("acme entry");
+        assert_eq!(entry.acme["challenge"], "dns");
+        assert_eq!(entry.acme["provider"], "cloudflare");
+        assert!(entry.acme.get("credentials").is_some());
+    }
+}

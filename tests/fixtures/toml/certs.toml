@@ -1,0 +1,22 @@
+# Legacy sample: manual certificates plus an ACME section with DNS-01.
+schema_version = 1
+
+[server]
+listen = "127.0.0.1:8080"
+
+[[certificates]]
+host = "home.example.com"
+cert_file = "/etc/ssl/home.pem"
+key_file = "/etc/ssl/home.key"
+
+[acme]
+state_dir = "/var/lib/ferrumgate/acme"
+domains = ["vpn.example.com"]
+email = "admin@example.com"
+directory = "https://acme.example/dir"
+profile = "shortlived"
+renew_before_hours = 50
+
+[acme.dns01]
+token_file = "/etc/cloudflare.ini"
+resolver = "127.0.0.1:53"
