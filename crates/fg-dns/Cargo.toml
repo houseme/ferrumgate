@@ -32,19 +32,34 @@ fg-dns = { path = ".", features = [
     "dns-bunny",
     "dns-callback",
     "dns-cloudflare",
+    "dns-cloudns",
     "dns-desec",
     "dns-dnsla",
     "dns-dnspod",
     "dns-dnspodcom",
     "dns-duckdns",
+    "dns-dynadot",
+    "dns-dyndns2",
     "dns-dynv6",
     "dns-edgeone",
+    "dns-eranet",
     "dns-gandi",
     "dns-gcore",
+    "dns-godaddy",
+    "dns-hipmdnsmgr",
     "dns-huaweicloud",
+    "dns-namecheap",
+    "dns-namecom",
+    "dns-namesilo",
+    "dns-nowcn",
+    "dns-ns1",
+    "dns-ovh",
     "dns-porkbun",
+    "dns-rainyun",
     "dns-route53",
+    "dns-spaceship",
     "dns-tencentcloud",
+    "dns-tnethk",
     "dns-trafficroute",
     "dns-vercel",
 ] }
@@ -59,19 +74,34 @@ dns-baiducloud = []
 dns-bunny = []
 dns-callback = []
 dns-cloudflare = []
+dns-cloudns = []
 dns-desec = []
 dns-dnsla = []
 dns-dnspod = []
 dns-dnspodcom = []
 dns-duckdns = []
+dns-dynadot = []
+dns-dyndns2 = []
 dns-dynv6 = []
 dns-edgeone = []
+dns-eranet = []
 dns-gandi = []
 dns-gcore = []
+dns-godaddy = []
+dns-hipmdnsmgr = []
 dns-huaweicloud = []
+dns-namecheap = []
+dns-namecom = []
+dns-namesilo = []
+dns-nowcn = []
+dns-ns1 = []
+dns-ovh = []
 dns-porkbun = []
+dns-rainyun = []
 dns-route53 = []
+dns-spaceship = []
 dns-tencentcloud = []
+dns-tnethk = []
 dns-trafficroute = []
 dns-vercel = []
 
@@ -101,6 +131,10 @@ name = "contract-cloudflare"
 path = "tests/contract/cloudflare.rs"
 
 [[test]]
+name = "contract-cloudns"
+path = "tests/contract/cloudns.rs"
+
+[[test]]
 name = "contract-desec"
 path = "tests/contract/desec.rs"
 
@@ -117,12 +151,24 @@ name = "contract-duckdns"
 path = "tests/contract/duckdns.rs"
 
 [[test]]
+name = "contract-dynadot"
+path = "tests/contract/dynadot.rs"
+
+[[test]]
+name = "contract-dyndns2"
+path = "tests/contract/dyndns2.rs"
+
+[[test]]
 name = "contract-dynv6"
 path = "tests/contract/dynv6.rs"
 
 [[test]]
 name = "contract-edgeone"
 path = "tests/contract/edgeone.rs"
+
+[[test]]
+name = "contract-eranet"
+path = "tests/contract/eranet.rs"
 
 [[test]]
 name = "contract-gandi"
@@ -133,20 +179,64 @@ name = "contract-gcore"
 path = "tests/contract/gcore.rs"
 
 [[test]]
+name = "contract-godaddy"
+path = "tests/contract/godaddy.rs"
+
+[[test]]
+name = "contract-hipmdnsmgr"
+path = "tests/contract/hipmdnsmgr.rs"
+
+[[test]]
 name = "contract-huaweicloud"
 path = "tests/contract/huaweicloud.rs"
+
+[[test]]
+name = "contract-namecheap"
+path = "tests/contract/namecheap.rs"
+
+[[test]]
+name = "contract-namecom"
+path = "tests/contract/namecom.rs"
+
+[[test]]
+name = "contract-namesilo"
+path = "tests/contract/namesilo.rs"
+
+[[test]]
+name = "contract-nowcn"
+path = "tests/contract/nowcn.rs"
+
+[[test]]
+name = "contract-ns1"
+path = "tests/contract/ns1.rs"
+
+[[test]]
+name = "contract-ovh"
+path = "tests/contract/ovh.rs"
 
 [[test]]
 name = "contract-porkbun"
 path = "tests/contract/porkbun.rs"
 
 [[test]]
+name = "contract-rainyun"
+path = "tests/contract/rainyun.rs"
+
+[[test]]
 name = "contract-route53"
 path = "tests/contract/route53.rs"
 
 [[test]]
+name = "contract-spaceship"
+path = "tests/contract/spaceship.rs"
+
+[[test]]
 name = "contract-tencentcloud"
 path = "tests/contract/tencentcloud.rs"
+
+[[test]]
+name = "contract-tnethk"
+path = "tests/contract/tnethk.rs"
 
 [[test]]
 name = "contract-trafficroute"

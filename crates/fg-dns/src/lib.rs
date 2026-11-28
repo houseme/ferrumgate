@@ -452,6 +452,12 @@ static REGISTRY: &[RegistryEntry] = &[
         providers::cloudflare::META,
         providers::cloudflare::Cloudflare::new
     ),
+    #[cfg(feature = "dns-cloudns")]
+    register_provider!(
+        txt,
+        providers::cloudns::META,
+        providers::cloudns::Cloudns::new
+    ),
     #[cfg(feature = "dns-desec")]
     register_provider!(txt, providers::desec::META, providers::desec::Desec::new),
     #[cfg(feature = "dns-dnsla")]
@@ -466,6 +472,10 @@ static REGISTRY: &[RegistryEntry] = &[
     ),
     #[cfg(feature = "dns-duckdns")]
     register_provider!(providers::duckdns::META, providers::duckdns::DuckDns::new),
+    #[cfg(feature = "dns-dynadot")]
+    register_provider!(providers::dynadot::META, providers::dynadot::Dynadot::new),
+    #[cfg(feature = "dns-dyndns2")]
+    register_provider!(providers::dyndns2::META, providers::dyndns2::Dyndns2::new),
     #[cfg(feature = "dns-dynv6")]
     register_provider!(txt, providers::dynv6::META, providers::dynv6::Dynv6::new),
     #[cfg(feature = "dns-edgeone")]
@@ -474,21 +484,64 @@ static REGISTRY: &[RegistryEntry] = &[
         providers::edgeone::META,
         providers::edgeone::EdgeOne::new
     ),
+    #[cfg(feature = "dns-eranet")]
+    register_provider!(txt, providers::eranet::META, providers::eranet::Eranet::new),
     #[cfg(feature = "dns-gandi")]
     register_provider!(txt, providers::gandi::META, providers::gandi::Gandi::new),
     #[cfg(feature = "dns-gcore")]
     register_provider!(txt, providers::gcore::META, providers::gcore::Gcore::new),
+    #[cfg(feature = "dns-godaddy")]
+    register_provider!(
+        txt,
+        providers::godaddy::META,
+        providers::godaddy::GoDaddy::new
+    ),
+    #[cfg(feature = "dns-hipmdnsmgr")]
+    register_provider!(
+        txt,
+        providers::hipmdnsmgr::META,
+        providers::hipmdnsmgr::HipmDnsMgr::new
+    ),
     #[cfg(feature = "dns-huaweicloud")]
     register_provider!(
         txt,
         providers::huaweicloud::META,
         providers::huaweicloud::HuaweiCloud::new
     ),
+    #[cfg(feature = "dns-namecheap")]
+    register_provider!(
+        providers::namecheap::META,
+        providers::namecheap::Namecheap::new
+    ),
+    #[cfg(feature = "dns-namecom")]
+    register_provider!(
+        txt,
+        providers::namecom::META,
+        providers::namecom::NameCom::new
+    ),
+    #[cfg(feature = "dns-namesilo")]
+    register_provider!(
+        txt,
+        providers::namesilo::META,
+        providers::namesilo::NameSilo::new
+    ),
+    #[cfg(feature = "dns-nowcn")]
+    register_provider!(txt, providers::nowcn::META, providers::nowcn::Nowcn::new),
+    #[cfg(feature = "dns-ns1")]
+    register_provider!(txt, providers::ns1::META, providers::ns1::Ns1::new),
+    #[cfg(feature = "dns-ovh")]
+    register_provider!(txt, providers::ovh::META, providers::ovh::Ovh::new),
     #[cfg(feature = "dns-porkbun")]
     register_provider!(
         txt,
         providers::porkbun::META,
         providers::porkbun::Porkbun::new
+    ),
+    #[cfg(feature = "dns-rainyun")]
+    register_provider!(
+        txt,
+        providers::rainyun::META,
+        providers::rainyun::Rainyun::new
     ),
     #[cfg(feature = "dns-route53")]
     register_provider!(
@@ -496,12 +549,20 @@ static REGISTRY: &[RegistryEntry] = &[
         providers::route53::META,
         providers::route53::Route53::new
     ),
+    #[cfg(feature = "dns-spaceship")]
+    register_provider!(
+        txt,
+        providers::spaceship::META,
+        providers::spaceship::Spaceship::new
+    ),
     #[cfg(feature = "dns-tencentcloud")]
     register_provider!(
         txt,
         providers::tencentcloud::META,
         providers::tencentcloud::TencentCloud::new
     ),
+    #[cfg(feature = "dns-tnethk")]
+    register_provider!(txt, providers::tnethk::META, providers::tnethk::Tnethk::new),
     #[cfg(feature = "dns-trafficroute")]
     register_provider!(
         txt,
@@ -535,6 +596,8 @@ mod tests {
             "callback",
             #[cfg(feature = "dns-cloudflare")]
             "cloudflare",
+            #[cfg(feature = "dns-cloudns")]
+            "cloudns",
             #[cfg(feature = "dns-desec")]
             "desec",
             #[cfg(feature = "dns-dnsla")]
@@ -545,22 +608,50 @@ mod tests {
             "dnspodcom",
             #[cfg(feature = "dns-duckdns")]
             "duckdns",
+            #[cfg(feature = "dns-dynadot")]
+            "dynadot",
+            #[cfg(feature = "dns-dyndns2")]
+            "dyndns2",
             #[cfg(feature = "dns-dynv6")]
             "dynv6",
             #[cfg(feature = "dns-edgeone")]
             "edgeone",
+            #[cfg(feature = "dns-eranet")]
+            "eranet",
             #[cfg(feature = "dns-gandi")]
             "gandi",
             #[cfg(feature = "dns-gcore")]
             "gcore",
+            #[cfg(feature = "dns-godaddy")]
+            "godaddy",
+            #[cfg(feature = "dns-hipmdnsmgr")]
+            "hipmdnsmgr",
             #[cfg(feature = "dns-huaweicloud")]
             "huaweicloud",
+            #[cfg(feature = "dns-namecheap")]
+            "namecheap",
+            #[cfg(feature = "dns-namecom")]
+            "namecom",
+            #[cfg(feature = "dns-namesilo")]
+            "namesilo",
+            #[cfg(feature = "dns-nowcn")]
+            "nowcn",
+            #[cfg(feature = "dns-ns1")]
+            "ns1",
+            #[cfg(feature = "dns-ovh")]
+            "ovh",
             #[cfg(feature = "dns-porkbun")]
             "porkbun",
+            #[cfg(feature = "dns-rainyun")]
+            "rainyun",
             #[cfg(feature = "dns-route53")]
             "route53",
+            #[cfg(feature = "dns-spaceship")]
+            "spaceship",
             #[cfg(feature = "dns-tencentcloud")]
             "tencentcloud",
+            #[cfg(feature = "dns-tnethk")]
+            "tnethk",
             #[cfg(feature = "dns-trafficroute")]
             "trafficroute",
             #[cfg(feature = "dns-vercel")]
@@ -590,19 +681,34 @@ mod tests {
                 "bunny" => (true, true, false, false),
                 "callback" => (false, false, false, false),
                 "cloudflare" => (true, true, true, false),
+                "cloudns" => (true, true, false, false),
                 "desec" => (true, true, false, false),
                 "dnsla" => (true, true, false, false),
                 "dnspod" => (true, true, true, true),
                 "dnspodcom" => (true, true, true, false),
                 "duckdns" => (false, false, false, false),
+                "dynadot" => (false, false, false, false),
+                "dyndns2" => (false, false, false, false),
                 "dynv6" => (true, true, false, false),
                 "edgeone" => (true, true, false, true),
+                "eranet" => (true, true, false, false),
                 "gandi" => (true, true, false, false),
                 "gcore" => (true, true, false, false),
+                "godaddy" => (true, true, false, false),
+                "hipmdnsmgr" => (true, true, false, false),
                 "huaweicloud" => (true, true, true, false),
+                "namecheap" => (false, false, false, false),
+                "namecom" => (true, true, false, false),
+                "namesilo" => (true, true, false, false),
+                "nowcn" => (true, true, false, false),
+                "ns1" => (true, true, false, false),
+                "ovh" => (true, true, false, false),
                 "porkbun" => (true, true, false, false),
+                "rainyun" => (true, true, false, true),
                 "route53" => (true, false, false, false),
+                "spaceship" => (true, true, false, false),
                 "tencentcloud" => (true, true, true, true),
+                "tnethk" => (true, true, false, false),
                 "trafficroute" => (true, true, false, true),
                 "vercel" => (true, true, false, false),
                 other => panic!("未覆盖能力标记的提供商 {other}"),

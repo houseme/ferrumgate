@@ -61,6 +61,12 @@ pub fn sha1_hex(bytes: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// 标准 Base64（Basic 认证头与时代互联系列的 HMAC-SHA1 签名值）。
+pub fn base64_std(data: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(data)
+}
+
 /// 把 Unix 秒转成 UTC 的 (年, 月, 日, 时, 分, 秒)。不引入日期库，
 /// 按天数到公历日期的换算（Howard Hinnant 的 civil_from_days 算法）。
 pub fn utc_parts(unix: i64) -> (i64, u32, u32, u32, u32, u32) {

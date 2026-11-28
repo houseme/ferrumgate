@@ -105,6 +105,67 @@ pub fn value_str(value: &serde_json::Value) -> String {
     }
 }
 
+/// 取 XML 里第一个 `<tag>…</tag>` 的文本（NameSilo 与 Namecheap 的响应是
+/// 简单的扁平 XML，不需要完整的解析器）。
+pub fn xml_text(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = xml.find(&open)? + open.len();
+    let end = start + xml[start..].find(&close)?;
+    Some(xml_unescape(&xml[start..end]))
+}
+
+/// 还原 XML 转义：命名实体与 `&#NN;` / `&#xHH;` 数字实体。
+pub fn xml_unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_owned();
+    }
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'&' {
+            out.push(s[i..].chars().next().expect("utf8 char"));
+            i += s[i..].chars().next().expect("utf8 char").len_utf8();
+            continue;
+        }
+        let rest = &s[i..];
+        let Some(semi) = rest.find(';') else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        let entity = &rest[1..semi];
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            digits if digits.starts_with("#x") || digits.starts_with("#X") => {
+                u32::from_str_radix(digits.trim_start_matches("#x").trim_start_matches("#X"), 16)
+                    .ok()
+                    .and_then(char::from_u32)
+            }
+            numeric if numeric.starts_with('#') => {
+                numeric[1..].parse::<u32>().ok().and_then(char::from_u32)
+            }
+            _ => None,
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                i += semi + 1;
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +220,24 @@ mod tests {
         let err = json::<serde_json::Value>("p", b"not json").expect_err("parse");
         assert_eq!(err.kind, crate::ProviderErrorKind::Parse);
         assert!(err.detail.contains("解析响应失败"));
+    }
+
+    #[test]
+    fn xml_text_reads_first_tag_occurrence() {
+        let xml = r#"<reply><code>300</code><detail>a &amp; b</detail></reply>"#;
+        assert_eq!(xml_text(xml, "code").as_deref(), Some("300"));
+        assert_eq!(xml_text(xml, "detail").as_deref(), Some("a & b"));
+        assert_eq!(xml_text(xml, "missing"), None);
+    }
+
+    #[test]
+    fn xml_unescape_handles_named_and_numeric_entities() {
+        assert_eq!(
+            xml_unescape("a&lt;b&gt;&quot;c&quot;&amp;&apos;d"),
+            "a<b>\"c\"&'d"
+        );
+        assert_eq!(xml_unescape("&#65;&#x42;"), "AB");
+        assert_eq!(xml_unescape("plain"), "plain");
+        assert_eq!(xml_unescape("a & b"), "a & b");
     }
 }
