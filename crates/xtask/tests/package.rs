@@ -66,14 +66,14 @@ fn targets_cover_upstream_matrix() {
         .collect();
     assert_eq!(macos_ids, ["darwin-amd64", "darwin-arm64"]);
 
-    // WP-92 §8: the 6 mips/mipsle/riscv64 targets are flagged as ring-incompatible.
-    let ring_unsupported: Vec<&str> = TARGETS
+    // WP-92 §8: the 6 mips/mipsle/riscv64 targets are pending AWS-LC cross-build validation.
+    let crypto_pending: Vec<&str> = TARGETS
         .iter()
-        .filter(|t| !t.ring_supported)
+        .filter(|t| !t.crypto_supported)
         .map(|t| t.id)
         .collect();
     assert_eq!(
-        ring_unsupported,
+        crypto_pending,
         [
             "linux-mipsle",
             "linux-mips",
@@ -83,13 +83,13 @@ fn targets_cover_upstream_matrix() {
             "openwrt-riscv64",
         ]
     );
-    for target in TARGETS.iter().filter(|t| !t.ring_supported) {
+    for target in TARGETS.iter().filter(|t| !t.crypto_supported) {
         let note = target
             .crypto_note
-            .expect("ring-unsupported target must carry an explanatory note");
+            .expect("target pending crypto validation must carry an explanatory note");
         assert!(
-            note.contains("ring"),
-            "note for {} should mention ring: {note}",
+            note.contains("AWS-LC"),
+            "note for {} should mention AWS-LC: {note}",
             target.id
         );
     }

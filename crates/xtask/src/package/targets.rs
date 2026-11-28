@@ -33,17 +33,16 @@ pub struct Target {
     /// the three platforms in [`DOCKER_PLATFORMS`].
     pub triple: &'static str,
     pub runner: Runner,
-    /// Whether the workspace's non-TLS `ring` dependency builds on this target
-    /// (WP-92 §8).
-    pub ring_supported: bool,
+    /// Whether this target is in the configured AWS-LC build matrix.
+    /// The six MIPS and RISC-V router targets are pending validation (WP-92 §8).
+    pub crypto_supported: bool,
     /// Optional compatibility note explaining TLS / FPU constraints (WP-92 §8).
     pub crypto_note: Option<&'static str>,
 }
 
-const NOTE_MIPS_LE: &str = "ring 0.17.14 lacks mipsel C/asm support (WP-92 §8); requires pure-Rust CryptoProvider; soft-float MIPS";
-const NOTE_MIPS_BE: &str = "ring 0.17.14 lacks mips C/asm support (WP-92 §8); requires pure-Rust CryptoProvider; soft-float MIPS";
-const NOTE_RISCV64: &str =
-    "ring 0.17.14 lacks riscv64 C/asm support (WP-92 §8); requires pure-Rust CryptoProvider";
+const NOTE_MIPS_LE: &str = "AWS-LC build and TLS handshake pending for mipsel (soft-float MIPS)";
+const NOTE_MIPS_BE: &str = "AWS-LC build and TLS handshake pending for mips (soft-float MIPS)";
+const NOTE_RISCV64: &str = "AWS-LC build and TLS handshake pending for riscv64 musl";
 const NOTE_ARM_V7: &str =
     "ARMv7 with hardware FPU (musleabihf); non-FPU arm_cortex-a9 devices are unsupported";
 
@@ -55,7 +54,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Docker,
         triple: "",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -63,7 +62,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "x86_64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -71,7 +70,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "aarch64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -79,7 +78,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "armv7-unknown-linux-musleabihf",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: Some(NOTE_ARM_V7),
     },
     Target {
@@ -87,7 +86,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "mipsel-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_MIPS_LE),
     },
     Target {
@@ -95,7 +94,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "mips-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_MIPS_BE),
     },
     Target {
@@ -103,7 +102,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "riscv64gc-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_RISCV64),
     },
     Target {
@@ -111,7 +110,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "x86_64-pc-windows-gnu",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -119,7 +118,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "x86_64-apple-darwin",
         runner: Runner::Macos,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -127,7 +126,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "aarch64-apple-darwin",
         runner: Runner::Macos,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -135,7 +134,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Tar,
         triple: "x86_64-unknown-freebsd",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -143,7 +142,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Fpk,
         triple: "x86_64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -151,7 +150,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Fpk,
         triple: "aarch64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -159,7 +158,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "x86_64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -167,7 +166,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "aarch64-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: None,
     },
     Target {
@@ -175,7 +174,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "armv7-unknown-linux-musleabihf",
         runner: Runner::Linux,
-        ring_supported: true,
+        crypto_supported: true,
         crypto_note: Some(NOTE_ARM_V7),
     },
     Target {
@@ -183,7 +182,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "mipsel-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_MIPS_LE),
     },
     Target {
@@ -191,7 +190,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "mips-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_MIPS_BE),
     },
     Target {
@@ -199,7 +198,7 @@ pub const TARGETS: &[Target] = &[
         kind: Kind::Openwrt,
         triple: "riscv64gc-unknown-linux-musl",
         runner: Runner::Linux,
-        ring_supported: false,
+        crypto_supported: false,
         crypto_note: Some(NOTE_RISCV64),
     },
 ];

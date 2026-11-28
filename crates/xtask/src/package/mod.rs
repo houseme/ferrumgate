@@ -74,10 +74,10 @@ fn run_targets(args: &[String]) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(TARGETS)?);
     } else {
         for target in TARGETS {
-            let ring = if target.ring_supported {
-                "ring:ok"
+            let crypto = if target.crypto_supported {
+                "aws-lc:configured"
             } else {
-                "ring:unsupported"
+                "aws-lc:pending"
             };
             println!(
                 "{:<16} {:<8} {:<32} {:<6} {}",
@@ -89,7 +89,7 @@ fn run_targets(args: &[String]) -> Result<()> {
                     target.triple
                 },
                 format!("{:?}", target.runner).to_lowercase(),
-                ring,
+                crypto,
             );
         }
     }

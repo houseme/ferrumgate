@@ -207,7 +207,7 @@ fgate（根包：参数、装配、ctl / mcp / rollback / reset / migrate / serv
 
 ### 5.5 平台范围
 
-开发与 CI 以 macOS（arm64）与 Linux 为主。防火墙（nftables / iptables）、系统服务、原始套接字等能力只在 Linux 上完整可用，其他平台编译为返回「不支持」的实现并在界面说明原因；Windows 提供二进制、系统服务与不依赖特权的功能。路由器架构（mips、mipsle、riscv64）的加密后端是一个**已知风险**：工作区现在用的 `ring` 0.17.14 只面向 aarch64、arm、x86、x86_64 编译，这三个架构都不在其中（见 §16.2 与 WP-92 步骤 1 的可行性验证）。
+开发与 CI 以 macOS（arm64）与 Linux 为主。防火墙（nftables / iptables）、系统服务、原始套接字等能力只在 Linux 上完整可用，其他平台编译为返回「不支持」的实现并在界面说明原因；Windows 提供二进制、系统服务与不依赖特权的功能。路由器架构（mips、mipsle、riscv64）的加密后端是一个**已知风险**：工作区使用 `aws-lc-rs`，这三个架构的交叉构建与 TLS 握手仍待验证（见 §16.2 与 WP-92 步骤 1 的可行性验证）。
 
 ## 6. 工作包总览与执行路线
 
@@ -1177,7 +1177,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
   - 目标：Docker 多架构（`linux/amd64`、`linux/arm64`、`linux/arm/v7`）、Linux amd64 / arm64 / arm / mipsle / mips / riscv64、Windows amd64、macOS amd64 / arm64、FreeBSD amd64 的压缩包、fnOS 的 `.fpk`（x86 / arm）、OpenWrt 的 `.ipk`（24.10 及更早）与 `.apk`（25.12 及更后），以及架构无关的 LuCI 应用。
   - Docker 镜像：多阶段构建（前端 → 后端 → `alpine` 运行时），运行时包含 CA 证书、时区数据、`curl`、`bash`、Docker CLI 与 Compose 插件、`nftables`、`iptables`、`iptables-legacy`、`ipset`；`GATELY_CONFIG_DIR=/etc/gately`；对外暴露管理端口。发布时推送到 GHCR 与 Docker Hub，带版本标签与 `latest`。
   - 版本号最多四段；每个 `v*` 标签触发发布流水线；安全修复只针对最新版本。
-- **Rust 设计**：Linux 目标用 musl 静态链接（`x86_64-unknown-linux-musl` 等，候选 `cargo-zigbuild` 或 `cross`，待核实），路由器架构（mips、mipsle、riscv64）对应 Rust 的 tier 2 目标 `mips-unknown-linux-musl`、`mipsel-unknown-linux-musl`、`riscv64gc-unknown-linux-musl`（待核实）；`ring`（现有加密提供方）对这些目标的支持需要在 WP-90 之前验证，不支持时改用 `aws-lc-rs` 或评估 `rustls` 的其他后端。OpenWrt 与 fnOS 的打包脚本沿用上游的目录结构与元数据格式，改由 `xtask` 调用。
+- **Rust 设计**：Linux 目标用 musl 静态链接（`x86_64-unknown-linux-musl` 等，候选 `cargo-zigbuild` 或 `cross`，待核实），路由器架构（mips、mipsle、riscv64）对应 Rust 的 tier 2 目标 `mips-unknown-linux-musl`、`mipsel-unknown-linux-musl`、`riscv64gc-unknown-linux-musl`（待核实）；需验证 `aws-lc-rs` 在这些目标上的交叉构建与 TLS 握手。OpenWrt 与 fnOS 的打包脚本沿用上游的目录结构与元数据格式，改由 `xtask` 调用。
 - **验收**：全部目标产物可构建；`file` 显示静态链接；musl 产物在 `scratch` 容器中可运行；OpenWrt 与 fnOS 包在对应系统的安装验证单独记录。
 
 ### WP-93 签名、来源证明与校验
@@ -1256,7 +1256,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 
 ### 15.1 现有依赖（保持）
 
-`tokio` 1.54、`hyper` 1.13、`hyper-util` 0.1、`hyper-rustls` 0.27、`rustls` 0.23（`ring` 提供方）、`tokio-rustls` 0.26、`hickory-resolver` 0.26、`instant-acme` 0.8、`arc-swap` 1.9、`cap-std` 4.0、`ipnet` 2.12、`serde` / `serde_json`、`toml` 1.2、`tracing`、`clap` 4.6、`anyhow`。工具链：rustc / cargo 1.100.0（本次研读所用环境为 aarch64-apple-darwin）。
+`tokio` 1.54、`hyper` 1.13、`hyper-util` 0.1、`hyper-rustls` 0.27、`rustls` 0.23（`aws-lc-rs` 提供方）、`tokio-rustls` 0.26、`hickory-resolver` 0.26、`instant-acme` 0.8、`arc-swap` 1.9、`cap-std` 4.0、`ipnet` 2.12、`serde` / `serde_json`、`toml` 1.2、`tracing`、`clap` 4.6、`anyhow`。工具链：rustc / cargo 1.100.0（本次研读所用环境为 aarch64-apple-darwin）。
 
 ### 15.2 新增候选（按用途）
 
@@ -1287,7 +1287,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 
 ### 15.3 选型约束
 
-- 能用纯 Rust 实现的不引入 C 依赖；确需 C 依赖（`pcre2`、`ring` 已存在）时在 `Cargo.toml` 注明原因。
+- 能用纯 Rust 实现的不引入 C 依赖；确需 C 依赖（`pcre2`、`aws-lc-rs` 已存在）时在 `Cargo.toml` 注明原因。
 - 新增直接依赖须在 `Cargo.toml` 写明用途，传递依赖由 Cargo 求解；更新后用 `cargo tree --locked --depth 1` 核对。
 - 候选 crate 在引入前先做一次最小验证（能否在目标平台上编译、许可是否兼容、维护是否活跃），结论写进对应工作包。
 - 不引入 `coraza` 的 C 绑定或其他需要 Go 工具链的方案（见 D4）。
@@ -1329,7 +1329,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | 配置模型迁移破坏现有部署 | 中 | 高 | WP-39 的迁移命令 + 现有全部集成测试在转换后的配置上通过；保留一个版本的 TOML 兼容入口 | 回退到迁移前的二进制与配置（迁移只写目标目录） |
 | 模块框架重构使数据面性能退化 | 中 | 中 | 重构前后用同一负载对比；热路径保持「每请求只读一次快照」 | 按提交逐个模块回退；`fg-gateway` 在迁移期间保持可用 |
 | 管理界面工作量超出预期 | 高 | 中 | 先 API 后界面；界面按页交付，每页可独立上线；上游前端可作为对照 | 界面进度不影响 API 与 CLI 的可用性 |
-| 路由器架构（mips、mipsle、riscv64）上加密后端不可用 | 高 | 中 | **已确认存在**：`ring` 0.17.14 的构建脚本只面向 aarch64、arm、x86、x86_64，这三个架构都不在其中（19 个发布目标里的 6 个）。WP-92 的步骤 1 提前到 WP-90 之前做：在全部目标上构建并完成一次 TLS 握手；备选依次为 `aws-lc-rs` 1.19.0（同样不含 mips）、自写的最小 `CryptoProvider`（纯 Rust，最可能的路线；现成的 `rustls-rustcrypto` 只有预发布版） | 这三个架构暂不发布，列入已知限制（与上游的偏差，需用户确认） |
+| 路由器架构（mips、mipsle、riscv64）上加密后端不可用 | 高 | 中 | 工作区使用 `aws-lc-rs`，这三个架构的目标构建和 TLS 握手待验证（见 WP-92 §8）。 | 这三个架构暂不发布，列入已知限制（与上游的偏差，需用户确认） |
 | 上游持续快速演进导致对齐目标漂移 | 高 | 中 | 基线冻结在 `442162e4d0b6`；之后的上游变更作为增量对齐，不混入本方案 | — |
 | 真实环境验证不足（Linux、NET_ADMIN、Windows） | 中 | 中 | 每个相关工作包列出需真实环境验证的条目；开发机为 macOS 时使用 Linux 虚拟机或容器 | 相关工作包保持「未验证」状态，不宣称完成 |
 | 供应链与许可证 | 低 | 高 | `cargo deny`（许可与来源）+ `cargo audit`；复用上游前端或资产时核对 Apache-2.0 的署名义务 | 替换或移除有问题的依赖 |
