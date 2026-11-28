@@ -1389,9 +1389,9 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-37 | 自动放行防火墙 | M | WP-36 | 本地实现及回环验收（fg_net::fwopen 库与 nft/iptables 双后端；监听接线、Linux 真机验证随 WP-21/34/CI），见 [验收记录](EXECUTION.md#wp-37-自动放行防火墙库实现交付) |
 | WP-38 | 导入 Gately 配置目录 | M | 各模块配置模型 | 未开始 |
 | WP-39 | 迁移现有 TOML 配置 | M | WP-20、WP-31、WP-34 | 未开始 |
-| WP-40 | 动态域名任务 | M | WP-16、WP-41 | 未开始 |
+| WP-40 | 动态域名任务 | M | WP-16、WP-41 | 本地实现及回环验收（fg-ddns 完整模块；根进程接线与 OutboundHttp 迁移待接），见 [验收记录](EXECUTION.md#wp-40-动态域名完整模块交付) |
 | WP-41 | DNS 提供商适配 | L（分三批） | — | 部分实现（步骤 1-6 已交付：fg-dns 核心机制与第一批 9 项带契约测试；签名工具与第二三批 28 项随步骤 7-9），见 [验收记录](EXECUTION.md#wp-41-dns-提供商适配步骤-1-6-交付) |
-| WP-42 | STUN 穿透 | L | WP-36、WP-16 | 未开始 |
+| WP-42 | STUN 穿透 | L | WP-36、WP-16 | 部分实现（RFC 5389 编解码、映射保持运行时与管理接口；UPnP/NAT-PMP/转发/通知/selfcheck 随后续梯队），见 [验收记录](EXECUTION.md#wp-42-stun-穿透第一梯队交付) |
 | WP-43 | 托管程序基础设施 | M | WP-09 | 未开始 |
 | WP-44 | frp | L | WP-43、WP-36 | 未开始 |
 | WP-45 | Tailscale、NetBird 与 EasyTier | L | WP-43 | 未开始 |
@@ -1424,7 +1424,7 @@ Gately 的定位是「在浏览器里配置一切」，管理界面是产品的�
 | WP-85 | 系统页 | L | WP-80、WP-13、WP-70 | 未开始 |
 | WP-86 | 服务端渲染的对外页面 | M | WP-24、WP-27、WP-29 | 未开始 |
 | WP-90 | 定制构建与模块清单 | M | WP-01 | 部分实现（步骤 1-4 已交付：features.toml 唯一来源、gen 生成三产物、resolve、一致性检查；运行时行为与体积基准随 P6），见 [验收记录](EXECUTION.md#wp-90-定制构建步骤-1-4) |
-| WP-91 | 持续集成 | M | — | 未开始 |
+| WP-91 | 持续集成 | M | — | 部分实现（fmt/clippy/test/modules-check 四个 job 与 xtask ci 规划器；矩阵 job、supply-chain、msrv、cross、ui/e2e/pebble 随 WP-92/32/80），见 [验收记录](EXECUTION.md#wp-91-持续集成第一梯队交付) |
 | WP-92 | 多平台构建与打包 | L | WP-90 | 未开始 |
 | WP-93 | 签名、来源证明与校验 | M | WP-92 | 未开始 |
 | WP-94 | 更新检查与在线升级 | M | WP-03、WP-93 | 未开始 |
