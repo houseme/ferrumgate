@@ -108,6 +108,7 @@ fn convert_route(
     report: &mut MigrateReport,
 ) -> Result<Site, String> {
     let mut site = Site {
+        enable: true,
         domains: vec![host.to_owned()],
         site_type: "proxy".to_owned(),
         timeouts_connect_secs: timeouts.0,
@@ -172,16 +173,22 @@ fn convert_route(
     if let Some(health) = &route.health {
         // RawHealthCheck fields are module-private; serde is the contract.
         if let Ok(value) = serde_json::to_value(health) {
-            site.health_mode = value
+            let mode = value
                 .get("mode")
                 .and_then(|m| m.as_str())
                 .unwrap_or("http")
                 .to_owned();
-            site.health_path = value
-                .get("path")
-                .and_then(|p| p.as_str())
-                .unwrap_or("/")
-                .to_owned();
+            site.health_mode = mode.clone();
+            // TCP checks carry no path; the bridge rejects one.
+            site.health_path = if mode == "tcp" {
+                String::new()
+            } else {
+                value
+                    .get("path")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("/")
+                    .to_owned()
+            };
             site.health_interval_secs = value
                 .get("interval_secs")
                 .and_then(|v| v.as_u64())

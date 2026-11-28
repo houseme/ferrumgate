@@ -65,6 +65,8 @@ pub struct Listener {
 pub struct Site {
     pub key: String,
     pub name: String,
+    /// Upstream semantics: sites default to enabled.
+    #[serde(default = "Site::default_true")]
     pub enable: bool,
     pub group: String,
     /// Domain rules; at most one `*` per entry.

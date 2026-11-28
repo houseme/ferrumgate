@@ -26,7 +26,9 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
 }
 
 /// Assembles the runtime config from a configuration directory.
-pub async fn load(dir: &Path, managed: Arc<Managed>) -> Result<Config> {
+/// `managed` mirrors the TOML loader's signature; the new model has no
+/// ACME section to restore into it yet (WP-32).
+pub(crate) async fn load(dir: &Path, _managed: Arc<Managed>) -> Result<Config> {
     ensure!(
         dir.is_dir(),
         "配置目录 {} 不存在或不是目录",
@@ -43,7 +45,7 @@ pub async fn load(dir: &Path, managed: Arc<Managed>) -> Result<Config> {
     };
 
     let listener = first_enabled_listener(&webservice)?;
-    let legacy_settings = derive_settings(&management, &listener);
+    let legacy_settings = derive_settings(&management, listener, webservice.settings.enable);
 
     // The web model owns its certificates in ssl.json (WP-31); the TOML
     // certificate list is gone.
@@ -104,7 +106,14 @@ fn first_enabled_listener(webservice: &WebFileConfig) -> Result<&Listener> {
 /// Derives the legacy server settings the serving pipeline still
 /// consumes; the new model fixes the protection values (5s handshake,
 /// 30s header timeout) and takes limits from the management settings.
-fn derive_settings(management: &ManagementSettings, listener: &Listener) -> LegacySettings {
+/// `webservice_enabled` is the model's own switch (migrated from
+/// `server.http_enabled`): false keeps the business listener down while
+/// forwarding rules and modules still run.
+fn derive_settings(
+    management: &ManagementSettings,
+    listener: &Listener,
+    webservice_enabled: bool,
+) -> LegacySettings {
     LegacySettings {
         listen: std::net::SocketAddr::new(
             listener
@@ -114,18 +123,16 @@ fn derive_settings(management: &ManagementSettings, listener: &Listener) -> Lega
             listener.port,
         ),
         metrics_listen: None,
-        http_enabled: webservice_enabled(management),
+        http_enabled: webservice_enabled,
         tls: listener.tls,
         tls_handshake_timeout_ms: 5_000,
         max_connections: 1024,
         header_timeout_ms: 30_000,
         connect_timeout_ms: 10_000,
         response_header_timeout_ms: 30_000,
-        connection_lifetime_ms: 0,
+        // The legacy connection-lifetime guard has no new-model knob; keep
+        // the legacy default (0 would expire every connection instantly).
+        connection_lifetime_ms: 300_000,
         shutdown_timeout_ms: management.shutdown_timeout_ms.max(0) as u64,
     }
-}
-
-fn webservice_enabled(_management: &ManagementSettings) -> bool {
-    true
 }

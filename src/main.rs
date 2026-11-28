@@ -5,7 +5,8 @@ mod ctl;
 mod listen;
 mod logging;
 mod mcp;
-mod migrate_toml;
+use ferrumgate::migrate_toml;
+
 mod offline;
 mod publicip;
 mod restart;

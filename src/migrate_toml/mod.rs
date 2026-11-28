@@ -4,6 +4,8 @@
 //! every mapping decision, and never touches the source file.
 #![allow(dead_code)]
 
+use anyhow::Context as _;
+
 pub mod certs;
 pub mod portforward;
 pub mod report;
@@ -24,6 +26,58 @@ pub struct MigrateOptions {
     pub dir: std::path::PathBuf,
     pub force: bool,
     pub report: Option<std::path::PathBuf>,
+}
+
+/// Mirrors the assembler's duplicate-domain rejection (bridge compile
+/// rule) so callers can fall back to the legacy path for scenarios the
+/// new model cannot express yet — prefix routing needs `locations`.
+fn ensure_no_duplicate_domains(converted: &Converted) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for listener in &converted.webservice.listeners {
+        for site in listener.sites.iter().filter(|site| site.enable) {
+            for domain in &site.domains {
+                if !seen.insert(domain.clone()) {
+                    anyhow::bail!("站点域名重复：{domain}（前缀路由需要 locations，暂走旧路径）");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Converts a legacy TOML file into the documents of `dir` — the test
+/// harness runs every scenario this way, so the integration suite proves
+/// the migration serves identically. No backup/rollback ceremony: the
+/// caller owns the directory.
+pub fn convert_to_dir(config_path: &Path, dir: &Path) -> anyhow::Result<()> {
+    let text = std::fs::read_to_string(config_path)
+        .with_context(|| format!("读取旧配置失败：{}", config_path.display()))?;
+    let raw: RawConfig = toml::from_str(&text)
+        .map_err(|error| anyhow::anyhow!("旧配置 schema 校验失败：{error}"))?;
+    let converted = convert(&raw).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    ensure_no_duplicate_domains(&converted)?;
+    std::fs::create_dir_all(dir)?;
+    // Only the webservice document is unconditional; ssl/portforward keep
+    // any pre-existing sibling file when the TOML has no such section —
+    // in TOML mode those files coexist with absent sections, and test
+    // harnesses may have written them already.
+    let mut documents: Vec<(&str, serde_json::Value)> = vec![
+        ("ferrumgate.json", serde_json::json!({})),
+        ("webservice.json", serde_json::to_value(&converted.webservice)?),
+    ];
+    if !raw.certificates.is_empty() || raw.acme.is_some() {
+        documents.push(("ssl.json", serde_json::to_value(&converted.ssl)?));
+    }
+    if !raw.tcp_forward.is_empty() || !raw.udp_forward.is_empty() {
+        documents.push((
+            "portforward.json",
+            serde_json::to_value(&converted.portforward)?,
+        ));
+    }
+    for (name, value) in &documents {
+        std::fs::write(dir.join(name), serde_json::to_string_pretty(value)?)?;
+    }
+    Ok(())
 }
 
 /// Reads the legacy TOML, converts it, writes the target directory
@@ -49,6 +103,7 @@ pub fn run(options: &MigrateOptions) -> anyhow::Result<()> {
             }
         })?;
     let converted = convert(&raw).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    ensure_no_duplicate_domains(&converted)?;
 
     let dir = &options.dir;
     let mut backup: Option<std::path::PathBuf> = None;

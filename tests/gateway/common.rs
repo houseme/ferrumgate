@@ -300,11 +300,21 @@ impl Gateway {
     }
 
     pub async fn with_args(config: &str, dir: TempDir, args: &[&std::ffi::OsStr]) -> Result<Self> {
-        let path = dir.path().join("live.toml");
-        std::fs::write(&path, config)?;
+        // WP-39 step 8: scenarios the new model can express run from the
+        // migrated configuration directory; prefix-routing scenarios
+        // (locations pending) stay on the legacy path. The assertions in
+        // the tests never change either way.
+        let legacy = dir.path().join("legacy.toml");
+        std::fs::write(&legacy, config)?;
+        let serves_directory = ferrumgate::migrate_toml::convert_to_dir(&legacy, dir.path()).is_ok();
+        let serve_path = if serves_directory {
+            dir.path().to_path_buf()
+        } else {
+            legacy.clone()
+        };
         let mut child = Command::new(env!("CARGO_BIN_EXE_fgate"))
             .args(["serve", "--log-level", "info", "--config"])
-            .arg(path)
+            .arg(serve_path)
             .args(args)
             .env("TOKIO_WORKER_THREADS", "2")
             .stdin(Stdio::null())
