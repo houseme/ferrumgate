@@ -191,7 +191,60 @@ fn compile_wp23_options(
         shared_users: site.shared_users,
         login_style: site.login_style.clone(),
         cookie_name: crate::web::auth::session::cookie_name("main", &site.key),
+        forward_auth: compile_forward_auth(site, label, errors),
+        trust_auth_users: site.trust_auth_users,
     }
+}
+
+/// Compiles the forward-auth section (WP-25): visitor-supplied identity
+/// headers are validated against the known set, and forward auth cannot
+/// combine with basic or web auth (§3.3).
+fn compile_forward_auth(
+    site: &Site,
+    label: &str,
+    errors: &mut Vec<String>,
+) -> Option<crate::web::auth::forward_auth::ForwardAuth> {
+    let Some(raw) = &site.forward_auth else {
+        return None;
+    };
+    let url = raw.url.trim().to_owned();
+    if url.is_empty() {
+        errors.push(format!("site {label}: forwardAuth.url 必须是 http(s) 绝对地址"));
+        return None;
+    }
+    let mut copy_headers = Vec::new();
+    for header in &raw.copy_headers {
+        match hyper::header::HeaderName::from_bytes(header.trim().as_bytes()) {
+            Ok(name) => copy_headers.push(name),
+            Err(_) => {
+                errors.push(format!(
+                    "site {label}: forwardAuth.copyHeaders 含非法头名 {header:?}"
+                ));
+            }
+        }
+    }
+    if copy_headers.is_empty() {
+        copy_headers = crate::web::auth::forward_auth::DEFAULT_COPY_HEADERS
+            .iter()
+            .filter_map(|name| hyper::header::HeaderName::from_bytes(name.as_bytes()).ok())
+            .collect();
+    }
+    let login_url = raw.login_url.trim().to_owned();
+    let auth = crate::web::auth::forward_auth::ForwardAuth::new(
+        url,
+        (!login_url.is_empty()).then_some(login_url),
+        raw.login_from_location,
+        copy_headers,
+    );
+    for problem in auth.validate() {
+        errors.push(format!("site {label}: forwardAuth: {problem}"));
+    }
+    if site.basic_auth || site.web_auth {
+        errors.push(format!(
+            "site {label}: forwardAuth 不能与 basicAuth 或 webAuth 同时使用"
+        ));
+    }
+    Some(auth)
 }
 
 /// Converts a Listener's sites into a legacy-compatible Routes structure

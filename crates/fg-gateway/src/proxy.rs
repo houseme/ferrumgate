@@ -247,6 +247,41 @@ impl Proxy {
             // TOML path (`SiteProxyOptions::default`), so legacy routes
             // behave byte-for-byte as before.
             let options = &route.options;
+            // WP-25: forward authentication runs first and exclusively
+            // (§3.3 — it cannot combine with basic/web auth, which the
+            // bridge validates): the sub-request decides allow/redirect/
+            // status before anything else touches the request.
+            if let Some(forward) = &options.forward_auth {
+                let scheme = if tls_identity.is_some() { "https" } else { "http" };
+                let full_url = format!("{scheme}://{host}{}", target.as_str());
+                let outcome = auth::forward_auth::sub_request(
+                    forward,
+                    request.headers(),
+                    (
+                        request.method().as_str(),
+                        &full_url,
+                        target.as_str(),
+                    ),
+                    peer.ip(),
+                )
+                .await;
+                match outcome {
+                    auth::forward_auth::SubRequestOutcome::Allowed { identity, .. } => {
+                        // The auth service approved: strip any
+                        // visitor-supplied copies of the identity headers
+                        // first, then write the approved values (they are
+                        // the only source the backend can trust).
+                        let headers = request.headers_mut();
+                        for (name, value) in &identity {
+                            headers.remove(name);
+                            if let Ok(value) = HeaderValue::from_str(value) {
+                                headers.insert(name.clone(), value);
+                            }
+                        }
+                    }
+                    outcome => return forward_auth_reply(outcome),
+                }
+            }
             // WP-24: authentication dispatch — the reserved auth paths,
             // the web session cookie and the basic authorization all run
             // before any option transform, so the authenticator sees the
@@ -753,6 +788,31 @@ fn basic_challenge(status: StatusCode) -> Reply {
     response
 }
 
+/// Shapes a forward-auth sub-request outcome into the visitor's response
+/// (§3.3): allow never reaches here (the pipeline continues), 401
+/// redirects carry the auth service's cookies, other statuses answer
+/// verbatim, and an unreachable auth service is a 502.
+fn forward_auth_reply(outcome: auth::forward_auth::SubRequestOutcome) -> Reply {
+    match outcome {
+        auth::forward_auth::SubRequestOutcome::Redirect { location, set_cookies } => {
+            // Raw Set-Cookie values from the auth service pass through:
+            // shape them as bare cookie pairs for the reply builder.
+            let cookies = set_cookies
+                .into_iter()
+                .map(|value| (String::new(), value))
+                .collect();
+            auth_reply(auth::login_page::redirect_reply(&location, cookies))
+        }
+        auth::forward_auth::SubRequestOutcome::Status(status) => {
+            reply(StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_GATEWAY))
+        }
+        auth::forward_auth::SubRequestOutcome::Unreachable => reply(StatusCode::BAD_GATEWAY),
+        auth::forward_auth::SubRequestOutcome::Allowed { .. } => {
+            unreachable!("allow outcomes continue the pipeline")
+        }
+    }
+}
+
 /// Shapes an authenticator reply into a response: unknown reserved-path
 /// requests fall back to the plain 404; handled replies carry the
 /// status, content type, body, redirect target and every Set-Cookie.
@@ -781,7 +841,16 @@ fn auth_reply(outcome: AuthPathReply) -> Reply {
                 response.headers_mut().insert(LOCATION, value);
             }
             for (name, value) in set_cookies {
-                if let Ok(cookie) = HeaderValue::from_str(&format!("{name}={value}")) {
+                // Forward-auth cookies arrive as complete attribute
+                // strings (`token=x; Path=/; HttpOnly`) with an empty
+                // name — pass them through verbatim. Authenticator
+                // cookies carry `name=value` pairs.
+                let cookie = if name.is_empty() {
+                    HeaderValue::from_str(&value)
+                } else {
+                    HeaderValue::from_str(&format!("{name}={value}"))
+                };
+                if let Ok(cookie) = cookie {
                     response.headers_mut().append(SET_COOKIE, cookie);
                 }
             }
@@ -1102,3 +1171,10 @@ mod wp23_retry;
 #[cfg(test)]
 #[path = "../../../tests/gateway/wp24_auth.rs"]
 mod wp24_auth;
+
+// WP-25 batch 2: forward authentication — the mock auth service answers
+// the sub-request and the pipeline follows its verdict
+// (`tests/gateway/wp25_ext.rs`).
+#[cfg(test)]
+#[path = "../../../tests/gateway/wp25_ext.rs"]
+mod wp25_ext;

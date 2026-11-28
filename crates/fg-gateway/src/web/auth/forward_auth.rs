@@ -4,9 +4,18 @@
 //! itself wires with the pipeline.
 #![allow(dead_code)]
 
+use std::net::IpAddr;
 use std::sync::OnceLock;
+use std::time::Duration;
 
-use hyper::header::HeaderName;
+use http_body_util::Empty;
+use hyper::{
+    HeaderMap,
+    body::Bytes,
+    header::{AUTHORIZATION, COOKIE, LOCATION, SET_COOKIE, HeaderName, HeaderValue},
+    Method, Request, StatusCode,
+};
+use tokio::time::timeout;
 
 /// The identity headers copied from a 2xx auth response to the backend.
 pub const DEFAULT_COPY_HEADERS: &[&str] = &[
@@ -49,6 +58,25 @@ pub struct ForwardAuth {
     /// compilation (sites are built once, then shared read-only), so the
     /// cache cannot go stale in practice.
     identity_view: OnceLock<Vec<HeaderName>>,
+}
+
+impl ForwardAuth {
+    /// Assembles a compiled configuration (the bridge's entry point;
+    /// fields stay private so the identity view stays consistent).
+    pub fn new(
+        url: String,
+        login_url: Option<String>,
+        login_from_location: bool,
+        copy_headers: Vec<HeaderName>,
+    ) -> Self {
+        Self {
+            url,
+            login_url,
+            login_from_location,
+            copy_headers,
+            identity_view: OnceLock::new(),
+        }
+    }
 }
 
 impl Default for ForwardAuth {
@@ -171,6 +199,169 @@ impl ForwardAuth {
             headers
         })
     }
+}
+
+/// The result of one authentication sub-request (§3.3: 2xx 放行并复制
+/// 身份头；401 跳登录；其他状态原样回访客；无法连接 502).
+#[derive(Debug)]
+pub enum SubRequestOutcome {
+    /// The auth service accepted the visitor. `identity` carries the
+    /// allowed identity headers present in the response (comma-joined
+    /// when repeated); `set_cookies` passes the auth service's cookies
+    /// through (Casdoor-style login flows rely on it).
+    Allowed {
+        identity: Vec<(HeaderName, String)>,
+        set_cookies: Vec<String>,
+    },
+    /// 401 with a login address resolved from `loginUrl` or (when
+    /// `loginFromLocation` is on and the Location is the only absolute
+    /// http(s) address) from the response itself.
+    Redirect {
+        location: String,
+        set_cookies: Vec<String>,
+    },
+    /// Any other status answers the visitor verbatim.
+    Status(u16),
+    /// The auth service could not be reached (→ 502).
+    Unreachable,
+}
+
+/// The outbound auth request timeout (§3.4: 单次 10 秒).
+const SUB_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+type SubClient = hyper_util::client::legacy::Client<
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
+    Empty<Bytes>,
+>;
+
+static SUB_CLIENT: OnceLock<SubClient> = OnceLock::new();
+
+fn sub_client() -> SubClient {
+    let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
+    connector.set_nodelay(true);
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .expect("native roots")
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(connector);
+    hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
+}
+
+/// Runs the authentication sub-request: a bodyless `GET` to the auth
+/// service carrying the visitor's `Cookie`/`Authorization` plus the
+/// `X-Original-*` / `X-Forwarded-*` / `X-Real-IP` set. The visitor's own
+/// identity headers are never among them (§3.3 — they cannot be forged
+/// into the backend).
+pub async fn sub_request(
+    auth: &ForwardAuth,
+    visitor_headers: &HeaderMap,
+    original: (&str, &str, &str),
+    source: IpAddr,
+) -> SubRequestOutcome {
+    let (method, full_url, uri) = original;
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri(&auth.url)
+        .body(Empty::<Bytes>::new())
+        .expect("static body");
+    let headers = request.headers_mut();
+    for name in auth.auth_request_headers() {
+        let value = match name.as_str() {
+            "x-original-method" | "x-forwarded-method" => Some(method.to_owned()),
+            "x-original-url" => Some(full_url.to_owned()),
+            "x-original-uri" | "x-forwarded-uri" => Some(uri.to_owned()),
+            "x-forwarded-for" | "x-real-ip" => Some(source.to_string()),
+            _ => None,
+        };
+        if let Some(value) = value
+            && let Ok(value) = HeaderValue::from_str(&value)
+        {
+            headers.insert(name, value);
+        }
+    }
+    // Forward proto/host from the visitor's own headers when present.
+    for name in ["x-forwarded-proto", "x-forwarded-host"] {
+        if let Some(value) = visitor_headers.get(name) {
+            headers.insert(HeaderName::from_static(name), value.clone());
+        }
+    }
+    // The credentials the auth service judges: cookies and the
+    // Authorization header, verbatim.
+    for name in [COOKIE, AUTHORIZATION] {
+        for value in visitor_headers.get_all(&name) {
+            headers.append(&name, value.clone());
+        }
+    }
+    let client = SUB_CLIENT.get_or_init(sub_client);
+    let pending = client.request(request);
+    let response = match timeout(SUB_REQUEST_TIMEOUT, pending).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            tracing::debug!(%error, url = %auth.url, "forward-auth sub-request failed");
+            return SubRequestOutcome::Unreachable;
+        }
+        Err(_) => {
+            tracing::debug!(url = %auth.url, "forward-auth sub-request timed out");
+            return SubRequestOutcome::Unreachable;
+        }
+    };
+    let status = response.status();
+    let set_cookies: Vec<String> = response
+        .headers()
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok().map(str::to_owned))
+        .collect();
+    if status.is_success() {
+        let identity = auth
+            .allowed_identity_headers()
+            .iter()
+            .filter_map(|name| {
+                let values: Vec<&str> = response
+                    .headers()
+                    .get_all(name)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .collect();
+                (!values.is_empty())
+                    .then(|| (name.clone(), values.join(", ")))
+            })
+            .collect();
+        return SubRequestOutcome::Allowed {
+            identity,
+            set_cookies,
+        };
+    }
+    if status == StatusCode::UNAUTHORIZED {
+        if let Some(location) = auth.login_redirect(full_url, method) {
+            return SubRequestOutcome::Redirect {
+                location,
+                set_cookies,
+            };
+        }
+        if auth.login_from_location {
+            let locations: Vec<&str> = response
+                .headers()
+                .get_all(LOCATION)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .collect();
+            let absolute = |text: &str| {
+                text.parse::<hyper::Uri>().ok().is_some_and(|uri| {
+                    matches!(uri.scheme_str(), Some("http" | "https")) && uri.authority().is_some()
+                })
+            };
+            if locations.len() == 1 && absolute(locations[0]) {
+                return SubRequestOutcome::Redirect {
+                    location: locations[0].to_owned(),
+                    set_cookies,
+                };
+            }
+        }
+        return SubRequestOutcome::Status(StatusCode::UNAUTHORIZED.as_u16());
+    }
+    SubRequestOutcome::Status(status.as_u16())
 }
 
 #[cfg(test)]

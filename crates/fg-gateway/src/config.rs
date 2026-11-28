@@ -116,6 +116,15 @@ pub(crate) struct SiteProxyOptions {
     /// (`gately_site_<hash>`), compiled by the webservice bridge. Empty
     /// on the TOML path (no web auth there).
     pub cookie_name: String,
+    /// WP-25: forward authentication — a bodyless sub-request per
+    /// authenticated request; the visitor's 401 answers come straight
+    /// from the auth service. None = not configured.
+    pub forward_auth: Option<crate::web::auth::forward_auth::ForwardAuth>,
+    /// WP-25: verified Gately credentials skip the WAF (the credential
+    /// classes and the basic-auth cache live in web::auth::trust).
+    /// Compiled now; the WAF consumption point arrives with WP-52/55.
+    #[allow(dead_code)]
+    pub trust_auth_users: bool,
 }
 
 impl Default for SiteProxyOptions {
@@ -136,6 +145,8 @@ impl Default for SiteProxyOptions {
             shared_users: false,
             login_style: String::new(),
             cookie_name: String::new(),
+            forward_auth: None,
+            trust_auth_users: false,
         }
     }
 }

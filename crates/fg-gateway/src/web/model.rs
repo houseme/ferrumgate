@@ -171,7 +171,26 @@ pub struct Site {
     pub shared_users: bool,
     /// Login page style override (loginStyle).
     pub login_style: String,
+    /// WP-25: forward authentication (Authelia-style); mutually
+    /// exclusive with basicAuth/webAuth.
+    pub forward_auth: Option<ForwardAuthSite>,
+    /// WP-25: verified Gately credentials skip the WAF (consumed by
+    /// WP-52/55; the credential classes live in auth::trust).
+    pub trust_auth_users: bool,
     pub remark: String,
+}
+
+/// Forward-auth configuration (WP-25): the bodyless GET goes to `url`;
+/// 401 answers either redirect to `loginUrl` or — with
+/// `loginFromLocation` — to the Location the auth service itself sent.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForwardAuthSite {
+    pub url: String,
+    pub login_url: String,
+    pub login_from_location: bool,
+    #[serde(default)]
+    pub copy_headers: Vec<String>,
 }
 
 impl Default for Site {
@@ -227,6 +246,8 @@ impl Default for Site {
             users: Vec::new(),
             shared_users: false,
             login_style: String::new(),
+            forward_auth: None,
+            trust_auth_users: false,
             remark: String::new(),
         }
     }
