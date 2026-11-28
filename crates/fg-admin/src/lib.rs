@@ -26,6 +26,7 @@ mod security_score;
 mod settings_api;
 mod system;
 mod token_routes;
+pub mod update;
 mod upload;
 
 pub use assets::{AdminAssets, Asset};
