@@ -46,7 +46,10 @@ use serde_json::json;
 use tokio::sync::RwLock;
 
 use crate::jobs::{Caps, JobError, JobRegistry};
-use crate::model::{FileConfig, Settings, Tool};
+use crate::model::{
+    DnsParams, FileConfig, LanScanParams, PortProbeParams, Settings, SpeedParams, Tool,
+    TracerouteParams,
+};
 use crate::validate;
 
 /// Writes the whole [`FileConfig`] to `nettools.json`.
@@ -124,7 +127,34 @@ fn decode_error() -> Response {
 /// Starts one tool run. The deny list comes from the current settings; the
 /// future is spawned immediately and the view returned while running.
 async fn run_tool(state: Arc<RoutesState>, body: Bytes) -> Response {
-    let Ok(request) = serde_json::from_slice::<RunRequest>(&body) else {
+    // fg-admin enables serde_json's `arbitrary_precision`, which feature
+    // unification shares with this crate; under it, numbers inside a
+    // `serde_json::Value` deserialize through the private Content path and
+    // break both internally-tagged enums and `from_value` of float fields.
+    // The `tool` tag is therefore read from a `Value` peek and each params
+    // struct is deserialized typed from the raw bytes, which
+    // arbitrary_precision handles correctly.
+    let peek: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(peek) => peek,
+        Err(_) => return decode_error(),
+    };
+    let parsed = match peek.get("tool").and_then(|tool| tool.as_str()) {
+        Some("ping") => serde_json::from_slice::<PingParams>(&body).map(RunRequest::Ping),
+        Some("traceroute") => {
+            serde_json::from_slice::<TracerouteParams>(&body).map(RunRequest::Traceroute)
+        }
+        Some("portprobe") => {
+            serde_json::from_slice::<PortProbeParams>(&body).map(RunRequest::PortProbe)
+        }
+        Some("dns") => serde_json::from_slice::<DnsParams>(&body).map(RunRequest::Dns),
+        Some("speed") => serde_json::from_slice::<SpeedParams>(&body).map(RunRequest::Speed),
+        Some("lanscan") => serde_json::from_slice::<LanScanParams>(&body).map(RunRequest::LanScan),
+        _ => Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unknown tool",
+        ))),
+    };
+    let Ok(request) = parsed else {
         return decode_error();
     };
     let config = state.config.read().await.clone();
