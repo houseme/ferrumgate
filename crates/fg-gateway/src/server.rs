@@ -84,7 +84,13 @@ async fn serve_gateway(
     ready: Option<oneshot::Sender<ManagementReady>>,
 ) -> Result<()> {
     let managed = Arc::new(Managed::default());
-    let config = config::load(&path, managed.clone()).await?;
+    // WP-39: the path is either the legacy TOML file or the new
+    // configuration directory (ferrumgate.json + webservice.json + …).
+    let config = if path.is_dir() {
+        crate::dir_config::load(&path, managed.clone()).await?
+    } else {
+        config::load(&path, managed.clone()).await?
+    };
     let mut disabled_at_start = config.disabled_modules.clone();
     disabled_at_start.extend_from_slice(disabled);
     let enabled = REGISTRY.resolve_enabled(&disabled_at_start, false);
@@ -232,7 +238,11 @@ async fn serve_gateway(
         #[cfg(unix)]
         while hangup.recv().await.is_some() {
             let candidate = async {
-                let next = config::load(&path, managed.clone()).await?;
+                let next = if path.is_dir() {
+                    crate::dir_config::load(&path, managed.clone()).await?
+                } else {
+                    config::load(&path, managed.clone()).await?
+                };
                 anyhow::ensure!(
                     next.settings == settings
                         && next.disabled_modules == disabled_modules

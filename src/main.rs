@@ -53,6 +53,8 @@ enum Command {
     },
     /// Run the gateway.
     Serve {
+        /// The legacy TOML configuration file, or (WP-39) a configuration
+        /// directory containing ferrumgate.json + webservice.json.
         #[arg(long)]
         config: PathBuf,
         /// Override the runtime log level.
