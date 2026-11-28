@@ -50,6 +50,7 @@ use crate::model::{
     DnsParams, FileConfig, LanScanParams, PortProbeParams, Settings, SpeedParams, Tool,
     TracerouteParams,
 };
+use crate::PingParams;
 use crate::validate;
 
 /// Writes the whole [`FileConfig`] to `nettools.json`.
