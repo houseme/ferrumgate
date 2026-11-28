@@ -1,0 +1,40 @@
+[package]
+name = "fg-webterminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+data-encoding.workspace = true
+flate2.workspace = true
+hmac.workspace = true
+russh.workspace = true
+russh-sftp.workspace = true
+axum = { workspace = true, features = ["json", "ws"] }
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+fg-net.workspace = true
+getrandom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+tar.workspace = true
+time = { workspace = true, features = ["formatting", "parsing"] }
+tokio = { workspace = true, features = ["macros", "process", "rt", "net", "sync", "time", "io-util"] }
+tokio-util.workspace = true
+tracing.workspace = true
+zip.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+hyper.workspace = true
+tempfile.workspace = true
+tokio-tungstenite.workspace = true
+futures-util = { workspace = true, features = ["sink"] }
