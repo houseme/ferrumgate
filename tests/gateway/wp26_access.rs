@@ -9,15 +9,14 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::Result;
-use http_body_util::{Full, BodyExt};
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full};
 use hyper::{
-    Response,
-    Request, StatusCode,
+    Request, Response, StatusCode,
     body::{Bytes, Incoming},
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use http_body_util::combinators::BoxBody;
 use tokio::{net::TcpListener, net::TcpStream, time::timeout};
 
 use super::Proxy;
@@ -120,24 +119,20 @@ async fn spawn_access(
         .await
         .map_err(|errors| anyhow::anyhow!("site compile failed: {errors:?}"))?;
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(rustls::RootCertStore::empty())
     .with_no_client_auth();
-    let proxy = Proxy::new(routes, &Settings::default(), tls)
-        .with_test_access(decision, rules);
+    let proxy = Proxy::new(routes, &Settings::default(), tls).with_test_access(decision, rules);
     spawn_frontend(proxy).await
 }
 
 /// One fresh request; returns the status and body.
-async fn send(
-    addr: SocketAddr,
-    path: &str,
-    host: &str,
-) -> Result<(StatusCode, String)> {
+async fn send(addr: SocketAddr, path: &str, host: &str) -> Result<(StatusCode, String)> {
     let stream = timeout(DEADLINE, TcpStream::connect(addr)).await??;
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -149,10 +144,8 @@ async fn send(
         .body(Full::new(Bytes::from_static(b"")))?;
     let response = timeout(DEADLINE, sender.send_request(request)).await??;
     let status = response.status();
-    let body = String::from_utf8_lossy(
-        &response.into_body().collect().await?.to_bytes(),
-    )
-    .into_owned();
+    let body =
+        String::from_utf8_lossy(&response.into_body().collect().await?.to_bytes()).into_owned();
     Ok((status, body))
 }
 
@@ -161,10 +154,14 @@ async fn blacklist_denies_with_403_and_other_host_passes() -> Result<()> {
     let backend = spawn_echo().await?;
     // Blacklist key "blocked" resolves 203.0.113.0/24 in the test
     // registry the proxy was seeded with.
-    let gateway = spawn_access("app.test", |decision, _| {
-        decision.whitelist = false;
-        decision.list_entries = vec!["blocked".to_owned()];
-    }, backend)
+    let gateway = spawn_access(
+        "app.test",
+        |decision, _| {
+            decision.whitelist = false;
+            decision.list_entries = vec!["blocked".to_owned()];
+        },
+        backend,
+    )
     .await?;
     // The registry has no "blocked" key in this bare Proxy: an empty
     // configured list rejects nothing, so the request proxies.
@@ -180,15 +177,19 @@ async fn path_rule_override_feels_only_under_prefix() -> Result<()> {
     // Whitelist semantics with an empty site list reject nothing; the
     // /admin rule's override makes everything under it fail closed
     // (deny 403) while /public proxies.
-    let gateway = spawn_access("app.test", |decision, rules| {
-        decision.whitelist = true;
-        decision.list_entries = Vec::new();
-        rules.push(PathRule {
-            prefix: "/admin".to_owned(),
-            auth: crate::web::access::path_rules::AuthRule::Inherit,
-            ip_list: vec!["never".to_owned()],
-        });
-    }, backend)
+    let gateway = spawn_access(
+        "app.test",
+        |decision, rules| {
+            decision.whitelist = true;
+            decision.list_entries = Vec::new();
+            rules.push(PathRule {
+                prefix: "/admin".to_owned(),
+                auth: crate::web::access::path_rules::AuthRule::Inherit,
+                ip_list: vec!["never".to_owned()],
+            });
+        },
+        backend,
+    )
     .await?;
     let (status, _) = send(gateway, "/admin/keys", "app.test").await?;
     assert_eq!(status, StatusCode::FORBIDDEN, "rule override denies");
@@ -201,19 +202,27 @@ async fn path_rule_override_feels_only_under_prefix() -> Result<()> {
 #[tokio::test]
 async fn deny_close_answers_without_content() -> Result<()> {
     let backend = spawn_echo().await?;
-    let gateway = spawn_access("app.test", |decision, rules| {
-        decision.deny_mode = DenyMode::Close;
-        decision.whitelist = true;
-        decision.list_entries = vec!["nothing".to_owned()];
-        rules.push(PathRule {
-            prefix: "/closed".to_owned(),
-            auth: crate::web::access::path_rules::AuthRule::Inherit,
-            ip_list: vec!["never".to_owned()],
-        });
-    }, backend)
+    let gateway = spawn_access(
+        "app.test",
+        |decision, rules| {
+            decision.deny_mode = DenyMode::Close;
+            decision.whitelist = true;
+            decision.list_entries = vec!["nothing".to_owned()];
+            rules.push(PathRule {
+                prefix: "/closed".to_owned(),
+                auth: crate::web::access::path_rules::AuthRule::Inherit,
+                ip_list: vec!["never".to_owned()],
+            });
+        },
+        backend,
+    )
     .await?;
     let (status, body) = send(gateway, "/closed", "app.test").await?;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "444 approximation");
+    assert_eq!(
+        status,
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "444 approximation"
+    );
     assert!(body.is_empty(), "no content for deny-close: {body:?}");
     Ok(())
 }

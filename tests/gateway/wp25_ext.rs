@@ -17,22 +17,23 @@ use std::{
 };
 
 use anyhow::Result;
-use http_body_util::{Full, combinators::BoxBody};
 use http_body_util::BodyExt;
-use std::convert::Infallible;
+use http_body_util::{Full, combinators::BoxBody};
 use hyper::{
     Request, Response, StatusCode,
     body::{Bytes, Incoming},
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use tokio::{net::{TcpListener, TcpStream}, time::timeout};
-
+use std::convert::Infallible;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    time::timeout,
+};
 
 use super::Proxy;
 use crate::config::Settings;
 use crate::web::{
-
     compile_routes,
     model::{ForwardAuthSite, Listener, Site},
 };
@@ -112,9 +113,7 @@ impl MockAuth {
                                             .body(empty()),
                                         _ => Response::builder().status(403).body(empty()),
                                     };
-                                    Ok::<_, hyper::Error>(
-                                        response.expect("static mock response"),
-                                    )
+                                    Ok::<_, hyper::Error>(response.expect("static mock response"))
                                 }
                             }),
                         )
@@ -131,10 +130,7 @@ impl MockAuth {
 }
 
 fn empty() -> BoxBody<Bytes, hyper::Error> {
-    BoxBody::new(
-        Full::new(Bytes::from_static(b""))
-            .map_err(|never| match never {}),
-    )
+    BoxBody::new(Full::new(Bytes::from_static(b"")).map_err(|never| match never {}))
 }
 
 /// A proxy site on `domain` forwarding authentication to the mock's
@@ -170,7 +166,7 @@ async fn spawn_fa(
         .await
         .map_err(|errors| anyhow::anyhow!("site compile failed: {errors:?}"))?;
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(rustls::RootCertStore::empty())
@@ -187,7 +183,8 @@ async fn send(
     headers: &[(&str, String)],
 ) -> Result<(StatusCode, hyper::HeaderMap, String)> {
     let stream = timeout(DEADLINE, TcpStream::connect(addr)).await??;
-    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
+    let (mut sender, connection) =
+        hyper::client::conn::http1::handshake(TokioIo::new(stream)).await?;
     tokio::spawn(async move {
         let _ = connection.await;
     });
@@ -286,14 +283,23 @@ async fn forward_auth_allowed_copies_identity_and_strips_forged() -> Result<()> 
         "GET",
         "/",
         "app.test",
-        &[("Remote-User", "forged".to_owned()), ("Cookie", "sid=1".to_owned())],
+        &[
+            ("Remote-User", "forged".to_owned()),
+            ("Cookie", "sid=1".to_owned()),
+        ],
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(mock.hits.load(Relaxed), 1, "the sub-request ran");
-    assert!(body.contains("remote-user=alice"), "approved identity copied: {body}");
+    assert!(
+        body.contains("remote-user=alice"),
+        "approved identity copied: {body}"
+    );
     assert!(!body.contains("forged"), "forged identity stripped: {body}");
-    assert!(body.contains("cookie=sid=1"), "visitor cookie forwarded: {body}");
+    assert!(
+        body.contains("cookie=sid=1"),
+        "visitor cookie forwarded: {body}"
+    );
     Ok(())
 }
 
@@ -314,7 +320,13 @@ async fn forward_auth_401_redirects_via_login_url() -> Result<()> {
     let (status, headers, _) = send(gateway, "GET", "/", "app.test", &[]).await?;
     assert_eq!(status, StatusCode::FOUND);
     let location = headers.get("Location").expect("login redirect");
-    assert!(location.to_str().unwrap().starts_with("https://auth.example.com/login?from=http://app.test"), "{location:?}");
+    assert!(
+        location
+            .to_str()
+            .unwrap()
+            .starts_with("https://auth.example.com/login?from=http://app.test"),
+        "{location:?}"
+    );
     Ok(())
 }
 
@@ -338,7 +350,9 @@ async fn forward_auth_401_location_login_passes_cookies() -> Result<()> {
     );
     let cookies: Vec<_> = headers.get_all("Set-Cookie").iter().collect();
     assert!(
-        cookies.iter().any(|c| c.to_str().unwrap().contains("casdoor=1")),
+        cookies
+            .iter()
+            .any(|c| c.to_str().unwrap().contains("casdoor=1")),
         "auth service cookies pass through: {cookies:?}"
     );
     Ok(())
@@ -376,7 +390,8 @@ async fn forward_auth_carries_original_target_headers() -> Result<()> {
         ("x-real-ip", "127.0.0.1"),
     ] {
         assert!(
-            seen.iter().any(|(name, value)| name == expected.0 && value == expected.1),
+            seen.iter()
+                .any(|(name, value)| name == expected.0 && value == expected.1),
             "{expected:?} missing among {seen:?}"
         );
     }

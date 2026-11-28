@@ -163,7 +163,7 @@ async fn spawn_auth_gateway(
         .await
         .map_err(|errors| anyhow::anyhow!("site compile failed: {errors:?}"))?;
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(rustls::RootCertStore::empty())
@@ -177,12 +177,7 @@ async fn spawn_auth_gateway(
 
 /// A proxy site on `domain` towards `backend`, with the auth fields
 /// assigned by `shape` on top of `Site::default()`.
-fn auth_site(
-    domain: &str,
-    key: &str,
-    backend: SocketAddr,
-    shape: impl FnOnce(&mut Site),
-) -> Site {
+fn auth_site(domain: &str, key: &str, backend: SocketAddr, shape: impl FnOnce(&mut Site)) -> Site {
     let mut site = Site {
         key: key.to_owned(),
         enable: true,
@@ -235,9 +230,7 @@ async fn send(
     for (name, value) in headers {
         builder = builder.header(*name, value);
     }
-    let request = builder.body(Full::new(Bytes::from(
-        form.unwrap_or_default().to_owned(),
-    )))?;
+    let request = builder.body(Full::new(Bytes::from(form.unwrap_or_default().to_owned())))?;
     let response = timeout(DEADLINE, sender.send_request(request)).await??;
     let status = response.status();
     let fields = response.headers().clone();
@@ -250,13 +243,8 @@ async fn send(
 /// The `name=value` part of the first Set-Cookie whose value starts
 /// with `prefix` (the attributes stay off).
 fn set_cookie(fields: &HeaderMap, prefix: &str) -> Option<String> {
-    set_cookie_raw(fields, prefix).map(|value| {
-        value
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .to_owned()
-    })
+    set_cookie_raw(fields, prefix)
+        .map(|value| value.split(';').next().unwrap_or_default().to_owned())
 }
 
 /// The full `name=value; attributes` text of the first Set-Cookie whose
@@ -361,7 +349,9 @@ async fn basic_auth_allows_and_denies() -> Result<()> {
     let echo: Value = serde_json::from_str(&body)?;
     assert_eq!(echo["target"], "/data?x=1", "the request is proxied");
     assert_eq!(
-        fields.get("x-trace-resp").and_then(|value| value.to_str().ok()),
+        fields
+            .get("x-trace-resp")
+            .and_then(|value| value.to_str().ok()),
         Some("leak"),
         "backend response headers are forwarded"
     );
@@ -379,7 +369,9 @@ async fn basic_auth_allows_and_denies() -> Result<()> {
     .await?;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(
-        fields.get("www-authenticate").and_then(|value| value.to_str().ok()),
+        fields
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok()),
         Some("Basic"),
         "the 401 carries the Basic challenge"
     );
@@ -414,7 +406,15 @@ async fn web_auth_login_flow() -> Result<()> {
     );
 
     // 登录页：200 + 表单（next 作为隐藏字段带回）。
-    let (status, _, body) = send(gateway, "GET", &format!("{AUTH_PATH}?next=/html"), "a.test", &[], None).await?;
+    let (status, _, body) = send(
+        gateway,
+        "GET",
+        &format!("{AUTH_PATH}?next=/html"),
+        "a.test",
+        &[],
+        None,
+    )
+    .await?;
     assert_eq!(status, StatusCode::OK);
     assert!(
         body.contains("<form") && body.contains("用户名") && body.contains("密码"),
@@ -440,8 +440,8 @@ async fn web_auth_login_flow() -> Result<()> {
         Some("/html"),
         "the redirect follows the safe next target"
     );
-    let session = set_cookie(&fields, "gately_site_")
-        .expect("the login sets the site session cookie");
+    let session =
+        set_cookie(&fields, "gately_site_").expect("the login sets the site session cookie");
 
     // 带 Cookie 重访：透传（不再要求登录）。
     let (status, _, body) = send(
@@ -571,7 +571,11 @@ async fn session_cookie_bound_to_site() -> Result<()> {
         None,
     )
     .await?;
-    assert_eq!(status, StatusCode::FOUND, "the cookie does not admit b.test");
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "the cookie does not admit b.test"
+    );
     assert_eq!(
         fields.get("location").and_then(|value| value.to_str().ok()),
         Some(format!("{AUTH_PATH}?next=/").as_str()),
@@ -618,19 +622,15 @@ async fn shared_user_totp_step() -> Result<()> {
     // 验证码步：令牌 + 正确的验证码 → 会话 Cookie，令牌被消费并清除。
     let code = totp_code(TOTP_SEED, unix_now());
     let form = format!("next=%2F&username=carol&password=pw&code={code}");
-    let (status, fields, _) = login(
-        gateway,
-        "s.test",
-        "http://s.test",
-        &form,
-        &[&token],
-    )
-    .await?;
-    assert_eq!(status, StatusCode::FOUND, "a valid code completes the login");
+    let (status, fields, _) = login(gateway, "s.test", "http://s.test", &form, &[&token]).await?;
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "a valid code completes the login"
+    );
     let session = set_cookie(&fields, "gately_site_").expect("the session cookie");
     assert!(
-        set_cookie_raw(&fields, "gately_totp=")
-            .is_some_and(|value| value.ends_with("Max-Age=0")),
+        set_cookie_raw(&fields, "gately_totp=").is_some_and(|value| value.ends_with("Max-Age=0")),
         "the token cookie is cleared after the step"
     );
 
@@ -648,14 +648,8 @@ async fn shared_user_totp_step() -> Result<()> {
 
     // 令牌重放：同一令牌第二次使用被拒绝（无新会话 Cookie）。
     let replay = format!("next=%2F&username=carol&password=pw&code={code}");
-    let (status, fields, body) = login(
-        gateway,
-        "s.test",
-        "http://s.test",
-        &replay,
-        &[&token],
-    )
-    .await?;
+    let (status, fields, body) =
+        login(gateway, "s.test", "http://s.test", &replay, &[&token]).await?;
     assert_eq!(status, StatusCode::OK, "the replayed token is rejected");
     assert!(
         body.contains("验证码错误"),
@@ -692,8 +686,15 @@ async fn auth_paths_bypass_path_rules_but_not_access_control() -> Result<()> {
     );
 
     // 未知的 auth 子路径：404（同样不代理）。
-    let (status, _, body) =
-        send(gateway, "GET", &format!("{AUTH_PATH}/bogus"), "p.test", &[], None).await?;
+    let (status, _, body) = send(
+        gateway,
+        "GET",
+        &format!("{AUTH_PATH}/bogus"),
+        "p.test",
+        &[],
+        None,
+    )
+    .await?;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(
         !body.contains("target"),
@@ -701,8 +702,15 @@ async fn auth_paths_bypass_path_rules_but_not_access_control() -> Result<()> {
     );
 
     // 退出：清 Cookie + 302 回根。
-    let (status, fields, _) =
-        send(gateway, "POST", &format!("{AUTH_PATH}/logout"), "p.test", &[], None).await?;
+    let (status, fields, _) = send(
+        gateway,
+        "POST",
+        &format!("{AUTH_PATH}/logout"),
+        "p.test",
+        &[],
+        None,
+    )
+    .await?;
     assert_eq!(status, StatusCode::FOUND);
     assert_eq!(
         fields.get("location").and_then(|value| value.to_str().ok()),
@@ -716,7 +724,11 @@ async fn auth_paths_bypass_path_rules_but_not_access_control() -> Result<()> {
 
     // 未登录的普通路径仍然要登录（访问控制不受保留路径影响）。
     let (status, fields, _) = send(gateway, "GET", "/", "p.test", &[], None).await?;
-    assert_eq!(status, StatusCode::FOUND, "ordinary paths still require login");
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "ordinary paths still require login"
+    );
     assert_eq!(
         fields.get("location").and_then(|value| value.to_str().ok()),
         Some(format!("{AUTH_PATH}?next=/").as_str())

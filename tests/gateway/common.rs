@@ -14,7 +14,7 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use rcgen::{BasicConstraints, Certificate, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
-use rustls::{ClientConfig, RootCertStore, ServerConfig, crypto::ring, pki_types::ServerName};
+use rustls::{ClientConfig, RootCertStore, ServerConfig, crypto::aws_lc_rs, pki_types::ServerName};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, BufReader, Lines},
@@ -379,7 +379,8 @@ impl Gateway {
         // the tests never change either way.
         let legacy = dir.path().join("legacy.toml");
         std::fs::write(&legacy, config)?;
-        let serves_directory = ferrumgate::migrate_toml::convert_to_dir(&legacy, dir.path()).is_ok();
+        let serves_directory =
+            ferrumgate::migrate_toml::convert_to_dir(&legacy, dir.path()).is_ok();
         let serve_path = if serves_directory {
             dir.path().to_path_buf()
         } else {
@@ -533,10 +534,11 @@ impl Ca {
     ) -> Result<TlsStream<TcpStream>> {
         let mut roots = RootCertStore::empty();
         roots.add(self.0.der().clone())?;
-        let mut config = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let mut config =
+            ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_root_certificates(roots)
+                .with_no_client_auth();
         config.alpn_protocols = vec![alpn.to_vec()];
         let stream = timeout(
             DEADLINE,
@@ -560,13 +562,14 @@ impl Identity {
     }
 
     pub fn acceptor(&self, protocol: &[u8]) -> Result<TlsAcceptor> {
-        let mut config = ServerConfig::builder_with_provider(Arc::new(ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![self.cert.der().clone()],
-                rustls::pki_types::PrivatePkcs8KeyDer::from(self.key.serialize_der()).into(),
-            )?;
+        let mut config =
+            ServerConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![self.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(self.key.serialize_der()).into(),
+                )?;
         config.alpn_protocols = vec![protocol.to_vec()];
         Ok(TlsAcceptor::from(Arc::new(config)))
     }
