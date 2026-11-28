@@ -14,6 +14,7 @@ pub mod domains;
 pub mod error_pages;
 pub mod identity;
 pub mod model;
+pub mod obs;
 pub mod proxy;
 pub mod rate_limit;
 pub mod routes;
