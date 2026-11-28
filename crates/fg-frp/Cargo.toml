@@ -1,0 +1,34 @@
+[package]
+name = "fg-frp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+axum = { workspace = true, features = ["json", "query"] }
+fg-config.workspace = true
+fg-core.workspace = true
+fg-logging.workspace = true
+fg-net.workspace = true
+fg-proc.workspace = true
+getrandom.workspace = true
+ipnet.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+subtle.workspace = true
+time = { workspace = true, features = ["formatting"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+flate2.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
