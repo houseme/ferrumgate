@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use base64::Engine as _;
 use hmac::Mac;
 use md5::{Digest, Md5};
@@ -79,13 +79,13 @@ impl HmacType {
     pub(crate) fn mac_new(self, key: &[u8]) -> Option<MacBox> {
         Some(match self {
             Self::Sha256 => {
-                MacBox::Sha256(<hmac::Hmac<sha2::Sha256> as Mac>::new_from_slice(key).ok()?)
+                MacBox::Sha256(<hmac::Hmac<sha2::Sha256> as KeyInit>::new_from_slice(key).ok()?)
             }
             Self::Sha384 => {
-                MacBox::Sha384(<hmac::Hmac<sha2::Sha384> as Mac>::new_from_slice(key).ok()?)
+                MacBox::Sha384(<hmac::Hmac<sha2::Sha384> as KeyInit>::new_from_slice(key).ok()?)
             }
             Self::Sha512 => {
-                MacBox::Sha512(<hmac::Hmac<sha2::Sha512> as Mac>::new_from_slice(key).ok()?)
+                MacBox::Sha512(<hmac::Hmac<sha2::Sha512> as KeyInit>::new_from_slice(key).ok()?)
             }
         })
     }
@@ -239,7 +239,7 @@ pub(crate) fn aes_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ct: &[u8]) -> Optio
     if ct.is_empty() || !ct.len().is_multiple_of(16) {
         return None;
     }
-    let cipher = aes::Aes256::new_from_slice(key).ok()?;
+    let cipher = aes::Aes256::new(key.into());
     let mut plain = vec![0u8; ct.len()];
     let mut previous = *iv;
     let (cipher_blocks, plain_blocks) = (ct.as_chunks::<16>().0, plain.as_chunks_mut::<16>().0);
@@ -247,9 +247,7 @@ pub(crate) fn aes_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], ct: &[u8]) -> Optio
         // The ciphertext block is the chain input for this block and the
         // XOR mask for the next one.
         let mut cipher_block = cipher_blocks[index];
-        cipher.decrypt_block(aes::cipher::generic_array::GenericArray::from_mut_slice(
-            &mut cipher_block,
-        ));
+        cipher.decrypt_block((&mut cipher_block).into());
         for (byte, prev) in cipher_block.iter_mut().zip(&previous) {
             *byte ^= prev;
         }
@@ -265,15 +263,13 @@ pub(crate) fn aes_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], plain: &[u8]) -> Ve
     let pad = (16 - plain.len() % 16) as u8;
     let mut padded = plain.to_vec();
     padded.resize(plain.len() + usize::from(pad), pad);
-    let cipher = aes::Aes256::new_from_slice(key).expect("32-byte key");
+    let cipher = aes::Aes256::new(key.into());
     let mut previous = *iv;
     for block in padded.as_chunks_mut::<16>().0 {
         for (byte, prev) in block.iter_mut().zip(&previous) {
             *byte ^= prev;
         }
-        cipher.encrypt_block(aes::cipher::generic_array::GenericArray::from_mut_slice(
-            block,
-        ));
+        cipher.encrypt_block(block.into());
         previous = *block;
     }
     padded

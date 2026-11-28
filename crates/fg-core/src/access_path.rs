@@ -10,7 +10,7 @@ use std::{
     time::Duration,
 };
 
-use hmac::{Mac, SimpleHmac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 use serde::Serialize;
 
 /// A tracer never follows more hops than this; a registration loop must

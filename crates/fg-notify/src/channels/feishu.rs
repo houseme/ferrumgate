@@ -5,7 +5,7 @@
 //! base64 of HMAC-SHA256 keyed by `"<timestamp>\n<secret>"` over the empty
 //! message.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde_json::json;
 use sha2::Sha256;
 use tokio_util::sync::CancellationToken;

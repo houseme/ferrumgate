@@ -5,7 +5,7 @@
 //! request appends `timestamp` (milliseconds) and `sign` — the URL-encoded
 //! base64 of HMAC-SHA256 keyed by the secret over `"<timestamp>\n<secret>"`.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC};
 use serde_json::json;
 use sha2::Sha256;

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use axum::http::HeaderMap;
-use hmac::{Mac, SimpleHmac};
+use hmac::{KeyInit, Mac, SimpleHmac};
 
 /// Marker cookie lifetime once planted.
 pub const MARKER_TTL: Duration = Duration::from_secs(30 * 24 * 3600);

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use data_encoding::BASE32_NOPAD;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::Serialize;
 use sha1::Sha1;
 use subtle::ConstantTimeEq;

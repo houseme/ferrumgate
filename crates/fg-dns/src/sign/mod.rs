@@ -12,7 +12,7 @@ pub mod ovh;
 pub mod sigv4;
 pub mod tc3;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 /// 当前 Unix 秒（生产环境的取时入口，签名函数本身不取时）。
@@ -32,7 +32,7 @@ pub fn nonce_hex() -> String {
 
 /// HMAC-SHA256（腾讯云、华为云、百度云、火山引擎签名的基础件）。
 pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     mac.finalize().into_bytes().to_vec()
 }
@@ -47,8 +47,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 
 /// HMAC-SHA1（阿里云 RPC 签名 v1.0）。
 pub fn hmac_sha1(key: &[u8], msg: &[u8]) -> Vec<u8> {
-    let mut mac =
-        <Hmac<sha1::Sha1> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     mac.finalize().into_bytes().to_vec()
 }
@@ -67,7 +66,7 @@ pub fn base64_std(data: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(data)
 }
 
-/// 把 Unix 秒转成 UTC 的 (年, 月, 日, 时, 分, 秒)。不引入日期库，
+/// 把 Unix 秒转成 UTC 的 (年，月，日，时，分，秒)。不引入日期库，
 /// 按天数到公历日期的换算（Howard Hinnant 的 civil_from_days 算法）。
 pub fn utc_parts(unix: i64) -> (i64, u32, u32, u32, u32, u32) {
     let days = unix.div_euclid(86_400);
