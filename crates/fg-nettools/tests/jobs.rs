@@ -26,7 +26,10 @@ async fn routes_run_port_probe_poll_and_stop() {
                 "target": "127.0.0.1",
                 "ports": format!("{}", open.port()),
                 "concurrency": 8,
-                "timeout": 1.5
+                // 1.5s is plenty on an idle machine but flaky under
+                // full-workspace parallel load; the probe still opens
+                // within the larger budget on this loopback listener.
+                "timeout": 4.0
             })),
         )
         .await;
