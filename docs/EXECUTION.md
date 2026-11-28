@@ -1381,3 +1381,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-43 托管程序基础设施（核心交付）
 
 - 2026-11-28 交付 a8e58de（根注册 fg-notify/fg-proc 成员、mod-notify feature、tar/zip 依赖、lock 与 gen 产物同笔落地）。fg-proc：`Proc::open` 维护 `<config>/bin`（0700、fsperm 保护）；安装器按规格解析发布 → 512 MiB 上限带进度下载（HttpGetter 注入，fg-net OutboundHttp 就绪后接自定义 DNS 与更新代理）→ SHA-256 校验（摘要文件或告警）→ 安全解包（穿越/绝对路径/符号链接/条目数/总量上限负向用例齐全）→ 运行确认 → 原子替换失败还原、保留 3 个旧版本；AutoChecker 每 12 小时发 `program.update`。监督器 SIGTERM→5 秒→SIGKILL（rustix，保持 forbid(unsafe_code)）、1s→60s 退避（稳定 30 秒重置）、输出清洗分级（frp/cloudflared 级别、URL 打码）、进程登记表不含参数与环境。45 项测试（rustc 现场编译夹具 + 本地假 HTTP 服务器真实 tar.gz 字节流）；clippy -D warnings、fmt 干净。Tailscale 等静态包清单 URL 与资产命名待各托管模块（WP-44/45/46/66）接入时对照上游发布页复核；fg-logging 进程日志来源变体与 CPU/RSS（WP-69）随后续接入。
+
+### WP-41 DNS 提供商适配（步骤 9 交付，全量 36 项）
+
+- 2026-11-28 交付 ba572e1。第三批 15 家（批次表实际 15 项，9+12+15=36 与契约表一致）：ovh（三步签名 + 时钟注入消除跨秒抖动、写入后强制 refresh）、ns1、cloudns、namecom、namesilo（XML reply.code、key 泄露防护）、spaceship（整域 PUT 按类型决定 force）、rainyun（线路代码）、nowcn/eranet/tnethk 三家共用 HMAC-SHA1 客户端（假服务器端重算签名比对）、hipmdnsmgr、godaddy、dynadot/namecheap/dyndns2（仅更新）。ovh 与 godaddy 的能力标记按上游注册表核对为 TXT+DEL（契约表原标注较保守，已在文件头注明）；能力断言扩至全部 36 家。fg-dns 全量 236 项测试（连跑 4 次稳定）、双 clippy 口径零警告。**WP-41 实现层收尾**：尚余步骤 10（与 WP-40/WP-32 的根进程接线联调，届时核对 dyndns2 的 UA 覆盖）与 DESIGN/EXECUTION 的提供商清单章节。
