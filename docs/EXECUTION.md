@@ -1385,3 +1385,12 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-41 DNS 提供商适配（步骤 9 交付，全量 36 项）
 
 - 2026-11-28 交付 ba572e1。第三批 15 家（批次表实际 15 项，9+12+15=36 与契约表一致）：ovh（三步签名 + 时钟注入消除跨秒抖动、写入后强制 refresh）、ns1、cloudns、namecom、namesilo（XML reply.code、key 泄露防护）、spaceship（整域 PUT 按类型决定 force）、rainyun（线路代码）、nowcn/eranet/tnethk 三家共用 HMAC-SHA1 客户端（假服务器端重算签名比对）、hipmdnsmgr、godaddy、dynadot/namecheap/dyndns2（仅更新）。ovh 与 godaddy 的能力标记按上游注册表核对为 TXT+DEL（契约表原标注较保守，已在文件头注明）；能力断言扩至全部 36 家。fg-dns 全量 236 项测试（连跑 4 次稳定）、双 clippy 口径零警告。**WP-41 实现层收尾**：尚余步骤 10（与 WP-40/WP-32 的根进程接线联调，届时核对 dyndns2 的 UA 覆盖）与 DESIGN/EXECUTION 的提供商清单章节。
+
+### WP-39 迁移现有 TOML 配置（步骤 1-9 交付，2026-11-28）
+
+- `fgate migrate --config <toml> --dir <dir> [--force] [--report]` 端到端可用：读取（仅 schema_version = 1）→ 纯函数转换 → 写入（目标目录须全新/空，--force 先备份，ssl.json 0600）→ 模型级自检 → 失败回滚；源文件永不改动。
+- 转换覆盖：server 段 → 监听器（保护值固化 5s/30s，显式超时保留、未配置按新默认并在报告说明）；[[routes]] → 站点（backends 权重/备援行、health 一一对应、response 三型、文本 statusCode）；[[certificates]]/​[acme] → ssl.json（file 来源 + acme 的 camelCase 参数、小时→天向上取整、DNS-01 → challenge/credentials）；TCP/UDP 转发 → portforward 规则（dial 取最大、UDP 会话求和）；ferrumgate.json 携带 disabledModules/shutdownTimeoutMs/upstreamCaFile。
+- 运行时双形态：serve/check 接受 TOML 文件或配置目录（dir_config 装配器：首个启用监听器、webservice.settings.enable 开关、ssl.json 证书池直供 TLS 解析、legacy 保护值固化、connection_lifetime 保留 300s）。
+- 测试切换：integration 套件经迁移目录运行（断言零改动）——11 个 migrate 单测 + 根 e2e 68 全绿。5 个场景显式留在 legacy 路径（replace+reload、websocket=false 拒绝、SIGINT 截止期、模块停用开关、证书轮换重读——均为 legacy 运行时专属语义，待 locations/身份头/WP-32 落地后迁移）。
+- 迁移套件抓出的真缺陷：connection_lifetime=0 使连接瞬时过期、webservice.settings.enable 被无视、TCP 健康检查误带 path、Site Default 与 serde 语义分叉（enable/forwardedHeaders）、文本 statusCode 缺失、桥接 WS 恒禁、tls::load 守卫误拒目录形态、ferrumgate.json 空对象丢全局。
+- 剩余：locations（前缀路由）落地后迁移剩余 5 个场景并移除 TOML 路径（serve --config 保留提示语一个版本）；README/样例更新随移除一起交付。
