@@ -1422,3 +1422,7 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 模型：settings 增 authSecret/authUsers/ssoDomains/autoBanSeconds，站点增 basicAuth/webAuth/users/sharedUsers/loginStyle；桥接校验「基本认证至少一个用户」「网页认证需用户或共享用户」。
 - 测试：auth 模块 54 单元 + 6 管线集成（basic 允许/拒绝、登录全流程含跨域拒绝、safe_next_only、跨站 Cookie 隔离、TOTP 步含令牌重放拒绝、保留路径旁路路径规则），fg-gateway 全量 309 lib + 68 e2e，clippy 0。
 - 尚余：dir_config 装配生产 Authenticator（with_authenticator 已就绪）；bcrypt 校验移入阻塞线程池；站点用户凭据指纹；SSO 父域 Cookie（Authenticator 需 ssoDomains 输入，随 WP-25）；auth.banned 事件接 WP-26 封禁表；登录页其余 9 种样式资产（WP-86）。
+
+### WP-55 WAF 实例与站点集成（引擎层第一梯队交付）
+
+- 2026-11-28 交付 9909249。fg-waf-engine（纯引擎，无 tokio、全借用零拷贝）：请求模型（headers 切片引用 + 主体摘要，默认送检 12.5 MiB 可钳制）、规则集 JSON（camelCase、四种互斥匹配形态：单条件〔negate/大小写不敏感〕与 all/any/not 嵌套）、8 字段 × 6 运算符（regex/contains/equals/prefix/suffix/ipIn〔仅 clientIp，IP/CIDR 列表〕）、allow/deny/count 动作（首 deny 生效、allow 短路、count 继续计数）。compile() 校验全部启用规则并收集所有错误（停用规则整体跳过便于 UI 保存）、预编译正则与 IP 集、上限集中（512 规则/深度 8/4096 字符/1 MiB 编译体积/1024 条目）；不可变 Compiled 经 ArcSwap 发布，每请求一次快照、命中前零分配；热重载失败保留旧快照。事件复用既有 `waf.blocked` Kind（fg-core 零改动），经集成层钩子发布；`ferrumgate_waf_*` 指标含总量/每规则命中/编译错误。63 项测试（UTF-8 截断不 panic、Unicode 折叠、IPv6 前缀等）；clippy -D warnings、fmt 干净。**后续梯队**：SecLang/CRS 解析、五阶段事务与异常评分、请求体解析器、libinjection、正则预过滤（E1-E11）；站点管道接线与管理接口（fg-waf 模块 crate）随集成层交付。
