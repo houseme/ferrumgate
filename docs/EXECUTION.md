@@ -1353,3 +1353,19 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 - 已核实偏差（写回 WP-41 文档注记）：文档「37 项」与契约表实际 36 行不符，`ALL_NAMES` 按契约表 36 个名称收录；cloudflare/dnspod/dnspodcom/porkbun/dynv6 的能力标记按上游源码为准（均支持 TXT 增删），与 §3.3「Cloudflare/DNSPod 的 ACME DNS-01 即可用」一致。
 - 测试规模：116 项（单元 61 + 契约 55）；Clippy -D warnings（含 no-default-features）、fmt 干净；每提供商一个 `dns-*` feature，default 为空、测试自依赖启用全部。
 - 尚余：步骤 7 签名工具（SigV4/TC3-HMAC-SHA256/阿里云 RPC/华为云 AK/SK/OVH 三步）、第二三批 28 项、与 WP-40/WP-32 的联调（`Deps.http` 换接 fg-net 出站策略）、`credentials_extra_masked_for_readonly` 随 WP-11 脱敏约定。
+
+### WP-91 持续集成（第一梯队交付）
+
+- 2026-11-28 交付 1e7377b。`.github/workflows/ci.yml` 四个 job（fmt / clippy / test / modules-check）全部经 `cargo xtask ci <job>` 单一代码路径（本地与 CI 同命令）；最小权限（contents: read、persist-credentials: false）、按 job 超时、分支级并发取消、按 Cargo.lock 键控的依赖缓存、actionlint 以固定 SHA 安装。dependabot 周更 cargo 与 actions（docker 待 WP-92 有 Dockerfile 后启用）。xtask 新增 ci 规划器：job 目录与外部环境要求、八变体构建矩阵（六种构建 + 两个语言档位，预设经 modules resolve 展开）输出 workflow-ready JSON、Pebble/网络测试等后续 job 的环境探测。40 项 xtask 测试（含工作流内容断言）；本地已跑 actionlint 与 YAML 校验，runner 实际行为待首跑验证。其余 job（supply-chain、msrv、cross、ui/e2e/pebble）随 WP-92/32/80 接线。
+
+### WP-42 STUN 穿透（第一梯队交付）
+
+- 2026-11-28 交付 3d8ddde（另 d990517 修复 7c38e40 引入的重复 BootOnly match 臂，恢复工作区 -D warnings 门）。fg-stun：RFC 5389 binding 编解码（XOR-MAPPED 优先、MAPPED 回退、双地址族、RFC 5769 线格式向量、TCP 自定界帧、2048 上限）、客户端（窗口内一次重传、按序服务器回退、同 socket NAT 一致性判定）、映射保持运行时（每规则独立 CancellationToken、ArcSwap 只读快照输出面、`ferrumgate_stun_*` 指标、`stun.changed` 事件、autoFirewall 经 fwopen Group 放行、drain 30 秒期限含 clear_all）、18 个操作口径的管理接口。45 项测试全部走本地假 STUN 服务器（UDP+TCP）。UPnP/NAT-PMP、内置转发、webhook/脚本通知、selfcheck 与 Lucky 导入随后续梯队。
+
+### WP-41 DNS 提供商适配（步骤 7-8 交付）
+
+- 2026-11-28 交付 b77de59。`src/sign/` 五套请求签名：AWS SigV4（官方 get-vanilla 套件向量）、腾讯云 TC3（官方文档哈希链 + 交叉验证签名）、阿里云 RPC HMAC-SHA1（官方示例向量）、华为云 SDK-HMAC-SHA256、OVH 三步签名，另有 BCE（百度云）签名随提供商实现；全部纯函数、时间戳由调用方注入。第二批 12 家提供商带契约测试（假服务器端按同算法重算比对签名）：tencentcloud、huaweicloud、alidns、route53（SigV4+XML）、edgeone、aliesa、baiducloud、trafficroute、dnsla、gcore、desec、vercel；能力标记与上游注册表一致（route53 仅 TXT 无删除），注册宏编译期断言。fg-dns 全量 190 项测试（74 新增）、双 clippy 口径零警告。第三批 16 项（含 ovh 提供商本体）随后续梯队。
+
+### WP-40 动态域名（完整模块交付）
+
+- 2026-11-28 交付 bf7a5ad（根注册与 lock 随对方会话的 WP-39 提交先行入库）。fg-ddns：ddns.json 模型、IP 来源（URL 按请求地址族钉住拨号、网卡地址、命令来源带超时与截断、停用地址替换表）、`{ipv4Addr}/{ipv6Addr}/{STUN_规则_IP|PORT|ADDR}` 变量展开、webhook 通知（URL 位置变量编码、successContent）、远端记录映射（Cloudflare proxied TTL 1、备注长度上限、删除语义复用 fg-dns pick_targets）、调度器（300 秒检查 / 3600 秒强推 / 失败退避封顶任务周期、RateLimited 取 Retry-After、stun.changed 即时同步）、批量添加解析（按行号报错、去重）、21 个管理操作、match/mismatch/unresolved 自检。66 项测试走本地假服务器与假提供商。根进程接线、指标与 OutboundHttp 迁移（ip_source/webhook 获得自定义 DNS 与更新代理）随后续接线批次；`Deps::delete_remote` 建议由 fg-dns 暴露顶层便捷函数后简化。
