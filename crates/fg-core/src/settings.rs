@@ -466,8 +466,8 @@ impl Settings {
             // WP-39 migrations: the shutdown deadline re-arms with the
             // process; the outbound CA bundle feeds the TLS connectors
             // built at startup.
-            "shutdownTimeoutMs": shutdown_timeout_ms, "upstreamCaFile": upstream_ca_file;
-        BootOnly => "apiToken": legacy_api_token;
+            "shutdownTimeoutMs": shutdown_timeout_ms, "upstreamCaFile": upstream_ca_file,
+            "apiToken": legacy_api_token;
     }
 }
 
