@@ -125,6 +125,13 @@ pub(crate) struct SiteProxyOptions {
     /// Compiled now; the WAF consumption point arrives with WP-52/55.
     #[allow(dead_code)]
     pub trust_auth_users: bool,
+    /// WP-26: the access decision inputs — deny-list entries and the
+    /// IP-list keys (whitelist or blacklist), compiled per site. The
+    /// ban table and the list registry are process-wide (the Proxy
+    /// carries them).
+    pub access: Option<crate::web::access::AccessDecision>,
+    /// WP-26: path rules carrying per-prefix list overrides.
+    pub path_rules: Vec<crate::web::access::path_rules::PathRule>,
 }
 
 impl Default for SiteProxyOptions {
@@ -147,6 +154,8 @@ impl Default for SiteProxyOptions {
             cookie_name: String::new(),
             forward_auth: None,
             trust_auth_users: false,
+            access: None,
+            path_rules: Vec::new(),
         }
     }
 }

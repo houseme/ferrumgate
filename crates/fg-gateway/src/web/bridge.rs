@@ -193,6 +193,11 @@ fn compile_wp23_options(
         cookie_name: crate::web::auth::session::cookie_name("main", &site.key),
         forward_auth: compile_forward_auth(site, label, errors),
         trust_auth_users: site.trust_auth_users,
+        // WP-26 access: the fields live on the site model (WP-22 shape
+        // carries accessAllow/accessDeny); list keys and rules wire in
+        // when the site model gains the ipLists/rules sections.
+        access: None,
+        path_rules: Vec::new(),
     }
 }
 

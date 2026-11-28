@@ -72,6 +72,12 @@ pub(crate) struct Proxy {
     upgrade_client: Client<HttpsConnector<HttpConnector>, RequestBody>,
     h2c_client: Client<HttpConnector, RequestBody>,
     response_header_timeout: Duration,
+    /// WP-26: the process-wide ban table and the subscription-list
+    /// registry the access decision chain queries. Empty by default
+    /// (the TOML path has no ban table yet); `with_access_state` wires
+    /// the real ones for directory-mode sites.
+    ban_table: Option<Arc<fg_net::banlist::BanTable>>,
+    list_registry: Arc<fg_net::ip_list::Registry>,
 }
 
 impl Proxy {
@@ -112,6 +118,8 @@ impl Proxy {
             // webservice configuration path attaches its
             // settings-derived authenticator via `with_authenticator`.
             authenticator: Arc::new(Authenticator::new(&[], Vec::new())),
+            ban_table: None,
+            list_registry: Arc::new(fg_net::ip_list::Registry::new()),
             client: builder.build(negotiated),
             upgrade_client: builder.build(http1),
             h2c_client: builder.http2_only(true).build(connector),
@@ -126,6 +134,40 @@ impl Proxy {
     #[allow(dead_code)]
     pub(crate) fn with_authenticator(mut self, authenticator: Arc<Authenticator>) -> Self {
         self.authenticator = authenticator;
+        self
+    }
+
+    /// Attaches the process-wide access state (WP-26): the ban table
+    /// and the subscription-list registry the decision chain queries.
+    #[allow(dead_code)]
+    pub(crate) fn with_access_state(
+        mut self,
+        ban_table: Option<Arc<fg_net::banlist::BanTable>>,
+        list_registry: Arc<fg_net::ip_list::Registry>,
+    ) -> Self {
+        self.ban_table = ban_table;
+        self.list_registry = list_registry;
+        self
+    }
+
+    /// Test-only: attaches the access decision to every proxied route
+    /// (the access tests shape decisions without going through the site
+    /// model). Consuming self keeps the route table's shared ownership
+    /// intact.
+    #[cfg(test)]
+    pub(crate) fn with_test_access(
+        mut self,
+        decision: crate::web::access::AccessDecision,
+        rules: Vec<crate::web::access::path_rules::PathRule>,
+    ) -> Self {
+        for routes in self.routes.by_host.values_mut() {
+            for route in routes {
+                if let config::RouteAction::Proxy(proxy_route) = &mut route.action {
+                    proxy_route.options.access = Some(decision.clone());
+                    proxy_route.options.path_rules = rules.clone();
+                }
+            }
+        }
         self
     }
 
@@ -247,6 +289,51 @@ impl Proxy {
             // TOML path (`SiteProxyOptions::default`), so legacy routes
             // behave byte-for-byte as before.
             let options = &route.options;
+            // WP-26: the access decision chain runs before authentication
+            // (§3.3 order): bans, deny lists, IP lists (path rules
+            // override), knock, country. Rejections answer per the deny
+            // mode; sites without compiled access inputs skip the chain.
+            if let Some(decision) = &options.access {
+                let banned = self
+                    .ban_table
+                    .as_ref()
+                    .is_some_and(|table| table.is_banned(peer.ip(), std::time::SystemTime::now()));
+                let registry = self.list_registry.clone();
+                let contains = move |key: &str, ip: std::net::IpAddr| {
+                    registry.get(key).is_some_and(|set| set.contains(ip))
+                };
+                if let Err(reason) = crate::web::access::decide(
+                    peer.ip(),
+                    banned,
+                    decision,
+                    &options.path_rules,
+                    target.path(),
+                    // Knock admission wires with the knock gate (WP-54);
+                    // absent gates admit everyone.
+                    true,
+                    &|_ip| None,
+                    &contains,
+                ) {
+                    tracing::debug!(?reason, %host, "access decision denied");
+                    return match decision.deny_mode {
+                        crate::web::access::DenyMode::Close => {
+                            // 444 semantics: no body at all — the
+                            // visitor's client reads the exchange as
+                            // dropped. hyper has no nginx-444, so the
+                            // answer is a bare 422 with an empty body
+                            // and no content type.
+                            let mut response: Reply = Response::new(Either::Right(
+                                Either::Left(Full::new(Bytes::new())),
+                            ));
+                            *response.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+                            response
+                        }
+                        crate::web::access::DenyMode::Forbid403 => {
+                            reply(StatusCode::FORBIDDEN)
+                        }
+                    };
+                }
+            }
             // WP-25: forward authentication runs first and exclusively
             // (§3.3 — it cannot combine with basic/web auth, which the
             // bridge validates): the sub-request decides allow/redirect/
@@ -1178,3 +1265,10 @@ mod wp24_auth;
 #[cfg(test)]
 #[path = "../../../tests/gateway/wp25_ext.rs"]
 mod wp25_ext;
+
+// WP-26 batch 2: the access decision chain — bans, deny lists, IP
+// lists with path-rule overrides, deny modes — driven end-to-end
+// through `Proxy::forward` (`tests/gateway/wp26_access.rs`).
+#[cfg(test)]
+#[path = "../../../tests/gateway/wp26_access.rs"]
+mod wp26_access;
