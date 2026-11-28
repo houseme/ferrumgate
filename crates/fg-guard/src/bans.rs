@@ -414,6 +414,7 @@ mod tests {
                 firewall: true,
                 ..Settings::default()
             },
+            jails: Vec::new(),
         })
         .settings;
         guard.apply_settings(&enabled);
@@ -476,6 +477,7 @@ mod tests {
                 max_ban_seconds: 0,
                 ..Settings::default()
             },
+            jails: Vec::new(),
         })
         .settings;
         guard.apply_settings(&settings);
@@ -507,6 +509,7 @@ mod tests {
                 ignore_list: vec!["9.9.9.0/24".to_owned()],
                 ..Settings::default()
             },
+            jails: Vec::new(),
         })
         .settings;
         guard.apply_settings(&settings);

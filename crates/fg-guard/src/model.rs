@@ -1,8 +1,10 @@
-//! The `guard.json` model (WP-50 §3.3): the module switch and the ban
-//! table policy knobs. The trap / scan detectors and jails land with
-//! WP-52 / WP-53 and extend this file later.
+//! The `guard.json` model (WP-50 §3.3 / WP-52 §4): the module switch and
+//! the ban table policy knobs, plus the jail rules (`jails[]`, WP-52).
+//! The trap / scan detectors land with WP-53 and extend this file later.
 
 use serde::{Deserialize, Serialize};
+
+use crate::jail::model::Jail;
 
 /// The configuration file name in the config store (`guard.json`).
 pub const FILE_NAME: &str = "guard";
@@ -11,6 +13,8 @@ pub const FILE_NAME: &str = "guard";
 #[serde(default, deny_unknown_fields)]
 pub struct FileConfig {
     pub settings: Settings,
+    /// The detection rules (WP-52 §4): `jails[]` of `guard.json`.
+    pub jails: Vec<Jail>,
 }
 
 /// Module settings. JSON field names follow upstream (camelCase).

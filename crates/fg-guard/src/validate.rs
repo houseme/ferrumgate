@@ -7,6 +7,7 @@ use std::net::IpAddr;
 
 use ipnet::IpNet;
 
+use crate::jail;
 use crate::model::{FileConfig, Settings};
 
 /// Upstream default: ban duration (3600 s).
@@ -37,7 +38,7 @@ pub struct Problem {
 }
 
 /// Applies upstream defaults for zero-valued settings and clamps both
-/// durations to their documented ranges.
+/// durations to their documented ranges; every jail is normalized too.
 pub fn normalize(mut config: FileConfig) -> FileConfig {
     let settings = &mut config.settings;
     settings.ban_seconds = if settings.ban_seconds == 0 {
@@ -60,10 +61,15 @@ pub fn normalize(mut config: FileConfig) -> FileConfig {
         .filter(|entry| !entry.is_empty())
         .take(MAX_IGNORE_LIST)
         .collect();
+    config.jails = std::mem::take(&mut config.jails)
+        .into_iter()
+        .map(jail::validate::normalize_jail)
+        .collect();
     config
 }
 
-/// Collects every validation problem of an already normalized config.
+/// Collects every validation problem of an already normalized config:
+/// the whitelist entries and every jail (paths prefixed `jails[i].`).
 pub fn validate(config: &FileConfig) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (index, entry) in config.settings.ignore_list.iter().enumerate() {
@@ -72,6 +78,12 @@ pub fn validate(config: &FileConfig) -> Vec<Problem> {
                 field: format!("settings.ignoreList[{index}]"),
                 reason: "not an IP address or CIDR network".to_owned(),
             });
+        }
+    }
+    for (index, jail) in config.jails.iter().enumerate() {
+        for mut problem in jail::validate::jail_problems(jail) {
+            problem.field = format!("jails[{index}].{}", problem.field);
+            problems.push(problem);
         }
     }
     problems
@@ -136,6 +148,7 @@ mod tests {
                 ignore_list: vec!["  10.0.0.1  ".to_owned(), "".to_owned()],
                 ..Settings::default()
             },
+            jails: Vec::new(),
         });
         assert_eq!(config.settings.ban_seconds, MAX_BAN_SECONDS);
         assert_eq!(config.settings.max_ban_seconds, MAX_MAX_BAN_SECONDS);
@@ -148,6 +161,7 @@ mod tests {
                 max_ban_seconds: 3600,
                 ..Settings::default()
             },
+            jails: Vec::new(),
         });
         assert_eq!(config.settings.max_ban_seconds, 7200);
     }
@@ -159,6 +173,7 @@ mod tests {
                 ignore_list: vec!["10.0.0.0/8".to_owned(), "bogus".to_owned()],
                 ..Settings::default()
             },
+            jails: Vec::new(),
         }));
         assert_eq!(problems.len(), 1);
         assert_eq!(problems[0].field, "settings.ignoreList[1]");

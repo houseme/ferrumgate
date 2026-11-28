@@ -193,6 +193,7 @@ mod tests {
                 firewall: true,
                 ..crate::model::Settings::default()
             },
+            jails: Vec::new(),
         })
         .settings;
         let service = crate::bans::GuardService::open_memory(&settings, EventBus::default());
@@ -232,6 +233,7 @@ mod tests {
                 firewall: true,
                 ..crate::model::Settings::default()
             },
+            jails: Vec::new(),
         })
         .settings;
         let service = crate::bans::GuardService::open_memory(&settings, EventBus::default());

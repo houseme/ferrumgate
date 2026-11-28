@@ -45,6 +45,7 @@ async fn harness() -> Harness {
     let service = GuardService::open(&store, &settings, events.clone()).expect("service");
     let config = Arc::new(RwLock::new(FileConfig {
         settings: settings.clone(),
+        jails: Vec::new(),
     }));
     let persists = Arc::new(AtomicUsize::new(0));
     let (count_persist, store_for_persist) = (persists.clone(), store.clone());
@@ -54,8 +55,12 @@ async fn harness() -> Harness {
         Ok(())
     });
     let state = Arc::new(RoutesState {
-        config,
+        config: Arc::clone(&config),
         service: Arc::clone(&service),
+        engine: Arc::new(fg_guard::jail::JailEngine::new(
+            Arc::clone(&service),
+            fg_net::banlist::system_clock(),
+        )),
         persist,
     });
     let app: Router = mount(Router::new(), state);
