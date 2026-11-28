@@ -1373,3 +1373,11 @@ macOS arm64、Rust stable 1.100.0 上通过 439 项工作区测试和 9 项本�
 ### WP-51 防火墙同步（核心交付）
 
 - 2026-11-28 交付 cc19fa0。fg-guard/src/firewall 把 BanTable 镜像进系统防火墙：nftables `table inet gately`（ban4/ban6 带内核超时集合，IPv6 自动封禁按 /64 网络地址入集并以掩码 saddr 匹配；deny4/deny6 interval 集合吸收重叠手动网段；prerouting 链按文档顺序放行 lo/回复流量后注释计数 drop）+ 内核无 nf_tables 时的 iptables legacy + ipset 回退（mangle GATELY_PRE 链、hash:ip/net 集合、restore -exist 批量写）。引擎增量对账：banned 钩子毫秒级唤醒、10 秒轮询、到期前 10 分钟重推、结构检查缺失即全量重写并折叠计数器基线、连续 3 次写失败降级为应用层封禁并 300 秒退避重试、停机有界等待内先清空集合。状态经 `/api/guard/status#firewallSync` 与 `GET /api/guard/firewall/rules` 暴露，自检增 guard.firewall 项。40 项新增测试（fg-guard+fg-net 全量 142 无回归）；clippy -D warnings、fmt 干净。**未在真实防火墙验证**（按 §7 要求标注）：建议在带 NET_ADMIN 的网络命名空间按 §8 顺序验证并先确认带外恢复手段。WP-53 的 redir/trap 集与 WP-54 的 knock 表随后续包扩展同一张表。
+
+### WP-68 通知中心（完整模块交付）
+
+- 2026-11-28 交付 7934208（并发会话已暂存的 WP-39 增量 src/lib.rs、migrate_toml、tests/gateway/common.rs 因共享 index 一并入库，已验证自洽可构建）。fg-notify：14 种渠道（webhook/telegram/bark/ntfy/gotify/pushover/discord/slack/serverchan/pushplus/wecom/dingtalk/feishu/email，业务返回码逐一检查，钉钉/飞书 HMAC-SHA256 签名以 RFC 4231 向量校验）、规则分发（事件通配与级别过滤、静默窗口去重、模板渲染含 URL 位置变量编码）、重试时间线 10s/30s/60s 后每 60s（默认 3 次上限 10）、耗尽入 `notify/pending.json` 补推队列（每渠道 100 条、0600 原子写、默认 24h 保留）倍增退避补发、全局+渠道级代理（follow/direct/updateProxy/custom；http CONNECT 与 socks5；SMTP 走同隧道，错误中密码一律脱敏）、28 个管理操作 + 测试发送 + 历史与待补推视图。74 项测试走本地假服务器（自签 TLS/假代理/假 SMTP）；clippy -D warnings、fmt 干净。渠道请求格式按各服务公开 API 实现（仓库内无上游快照对照，文件头已注明来源）；SMTP 仅 AUTH PLAIN。文档 §4「rules 各有 secrets」与总数 32 冲突，按 32 实现（rules 不带 secrets）并已在 routes.rs 注明。根进程接线与 `Deps.update_proxy`/`server_language` 注入随后续接线批次。
+
+### WP-43 托管程序基础设施（核心交付）
+
+- 2026-11-28 交付 a8e58de（根注册 fg-notify/fg-proc 成员、mod-notify feature、tar/zip 依赖、lock 与 gen 产物同笔落地）。fg-proc：`Proc::open` 维护 `<config>/bin`（0700、fsperm 保护）；安装器按规格解析发布 → 512 MiB 上限带进度下载（HttpGetter 注入，fg-net OutboundHttp 就绪后接自定义 DNS 与更新代理）→ SHA-256 校验（摘要文件或告警）→ 安全解包（穿越/绝对路径/符号链接/条目数/总量上限负向用例齐全）→ 运行确认 → 原子替换失败还原、保留 3 个旧版本；AutoChecker 每 12 小时发 `program.update`。监督器 SIGTERM→5 秒→SIGKILL（rustix，保持 forbid(unsafe_code)）、1s→60s 退避（稳定 30 秒重置）、输出清洗分级（frp/cloudflared 级别、URL 打码）、进程登记表不含参数与环境。45 项测试（rustc 现场编译夹具 + 本地假 HTTP 服务器真实 tar.gz 字节流）；clippy -D warnings、fmt 干净。Tailscale 等静态包清单 URL 与资产命名待各托管模块（WP-44/45/46/66）接入时对照上游发布页复核；fg-logging 进程日志来源变体与 CPU/RSS（WP-69）随后续接入。
