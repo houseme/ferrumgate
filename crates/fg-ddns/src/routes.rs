@@ -1893,7 +1893,7 @@ mod tests {
             .iter()
             .map(|(meta, _)| meta.name)
             .collect();
-        for provider in &providers {
+        for provider in providers {
             let name = provider["name"].as_str().expect("name");
             let expected = registry_names.contains(name);
             assert_eq!(

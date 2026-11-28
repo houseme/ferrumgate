@@ -255,9 +255,6 @@ mod tests {
         assert_eq!(TAILSCALE.main_file(), "tailscale");
         assert_eq!(CLOUDFLARED.version_args, &["--version"]);
         assert!(TAILSCALE.asset_pattern().is_none());
-        assert_eq!(
-            FILEBROWSER.asset_pattern(),
-            Some("{os}-{arch}-filebrowser")
-        );
+        assert_eq!(FILEBROWSER.asset_pattern(), Some("{os}-{arch}-filebrowser"));
     }
 }
