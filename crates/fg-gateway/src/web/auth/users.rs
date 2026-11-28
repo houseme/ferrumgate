@@ -223,7 +223,11 @@ mod tests {
         hash_site_users(&mut users, &[]).unwrap();
         let (name, pass) = split_entry(&users[0]).unwrap();
         assert_eq!(name, "alice");
-        assert!(is_hash(pass), "plaintext should become a hash: {}", users[0]);
+        assert!(
+            is_hash(pass),
+            "plaintext should become a hash: {}",
+            users[0]
+        );
         assert_eq!(pass[4..6].parse::<u32>().unwrap(), bcrypt::DEFAULT_COST);
         assert!(verify_site_user(&users[0], "alice", "secret"));
         // 再次保存：已是有效哈希的保持不变（凭据指纹不变）
@@ -282,7 +286,11 @@ mod tests {
         // 无冒号的条目永不匹配
         assert!(!verify_site_user("nocolon", "nocolon", "nocolon"));
         // `$2` 形态绝不当明文比较
-        assert!(!verify_site_user("dave:$2a$10$broken", "dave", "$2a$10$broken"));
+        assert!(!verify_site_user(
+            "dave:$2a$10$broken",
+            "dave",
+            "$2a$10$broken"
+        ));
     }
 
     #[test]
@@ -290,10 +298,16 @@ mod tests {
         let old = vec![fixture("alice", "oldpw")];
         let mut users = vec!["bob:********".to_string()];
         hash_site_users(&mut users, &old).unwrap();
-        assert_eq!(users, vec![format!("bob:{}", split_entry(&old[0]).unwrap().1)]);
+        assert_eq!(
+            users,
+            vec![format!("bob:{}", split_entry(&old[0]).unwrap().1)]
+        );
         // 数量变了就不是改名，不再按位置沿用
         let mut users = vec!["bob:********".to_string(), "carol:********".to_string()];
-        assert_eq!(hash_site_users(&mut users, &old), Err(UserError::NoOriginal));
+        assert_eq!(
+            hash_site_users(&mut users, &old),
+            Err(UserError::NoOriginal)
+        );
     }
 
     #[test]
@@ -333,7 +347,10 @@ mod tests {
         ];
         let mut users = original.clone();
         // alice 在旧表中有两个不同的密码：拒绝
-        assert_eq!(hash_site_users(&mut users, &old), Err(UserError::NoOriginal));
+        assert_eq!(
+            hash_site_users(&mut users, &old),
+            Err(UserError::NoOriginal)
+        );
         assert_eq!(users, original, "rejected list must stay untouched");
         // 没有冒号的条目没有密码可沿用
         let mut users = vec!["nocolon".to_string()];
@@ -345,12 +362,18 @@ mod tests {
         // `$2` 形态但不是有效 bcrypt 哈希：拒绝而不是当明文重新哈希
         let original = vec!["dave:$2a$10$broken".to_string()];
         let mut users = original.clone();
-        assert_eq!(hash_site_users(&mut users, &[]), Err(UserError::InvalidHash));
+        assert_eq!(
+            hash_site_users(&mut users, &[]),
+            Err(UserError::InvalidHash)
+        );
         assert_eq!(users, original);
         // 掩码沿用的值同样要验证
         let mut users = vec!["erin:********".to_string()];
         let old = vec!["erin:$2a$10$broken".to_string()];
-        assert_eq!(hash_site_users(&mut users, &old), Err(UserError::InvalidHash));
+        assert_eq!(
+            hash_site_users(&mut users, &old),
+            Err(UserError::InvalidHash)
+        );
     }
 
     #[test]

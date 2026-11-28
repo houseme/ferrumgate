@@ -9,10 +9,10 @@ use std::time::Instant;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
+use super::BasicOutcome;
 use super::reserve::Reserve;
 use super::shared::{AuthUser, check_password};
 use super::users::{split_entry, verify_site_user};
-use super::BasicOutcome;
 
 /// Verifies HTTP basic credentials. Users come from the site entries
 /// (`name:password`, plaintext or bcrypt) and, failing those, the
@@ -127,10 +127,20 @@ mod tests {
         let reserve = Reserve::new();
         let plaintext = ["alice:s3cret".to_string()];
         assert!(allowed(verify(
-            &plaintext, &[], &reserve, source(), "alice", "s3cret"
+            &plaintext,
+            &[],
+            &reserve,
+            source(),
+            "alice",
+            "s3cret"
         )));
         assert!(!allowed(verify(
-            &plaintext, &[], &reserve, source(), "alice", "wrong"
+            &plaintext,
+            &[],
+            &reserve,
+            source(),
+            "alice",
+            "wrong"
         )));
 
         // bcrypt 哈希条目（存量配置）照常通过。
@@ -139,16 +149,31 @@ mod tests {
             bcrypt::hash("s3cret", 4).expect("bcrypt hash")
         )];
         assert!(allowed(verify(
-            &hashed, &[], &reserve, source(), "alice", "s3cret"
+            &hashed,
+            &[],
+            &reserve,
+            source(),
+            "alice",
+            "s3cret"
         )));
         assert!(!allowed(verify(
-            &hashed, &[], &reserve, source(), "bob", "s3cret"
+            &hashed,
+            &[],
+            &reserve,
+            source(),
+            "bob",
+            "s3cret"
         )));
 
         // 冒号后的内容整体属于密码（与站点用户的拆分规则一致）。
         let colon = ["carol:pa:ss".to_string()];
         assert!(allowed(verify(
-            &colon, &[], &reserve, source(), "carol", "pa:ss"
+            &colon,
+            &[],
+            &reserve,
+            source(),
+            "carol",
+            "pa:ss"
         )));
     }
 
@@ -197,7 +222,12 @@ mod tests {
         ));
         // 对照：同一列表中无 TOTP 的用户不受影响。
         assert!(allowed(verify(
-            &[], &shared, &reserve, source(), "dave", "pw"
+            &[],
+            &shared,
+            &reserve,
+            source(),
+            "dave",
+            "pw"
         )));
     }
 
@@ -223,7 +253,11 @@ mod tests {
         let reserve = Reserve::new();
         let mut slots = Vec::new();
         for _ in 0..MAX_INFLIGHT + MAX_WAITING {
-            slots.push(reserve.try_acquire(source()).expect("the gates hold 72 slots"));
+            slots.push(
+                reserve
+                    .try_acquire(source())
+                    .expect("the gates hold 72 slots"),
+            );
         }
         let users = ["alice:pw".to_string()];
         assert!(matches!(

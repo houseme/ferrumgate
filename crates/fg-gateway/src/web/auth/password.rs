@@ -177,13 +177,19 @@ mod tests {
             Err(PasswordError::Mismatch)
         );
         // The happy path.
-        assert_eq!(validate_change(true, "old-pw-1", "new-pw-1", "new-pw-1"), Ok(()));
+        assert_eq!(
+            validate_change(true, "old-pw-1", "new-pw-1", "new-pw-1"),
+            Ok(())
+        );
     }
 
     #[test]
     fn validate_length_is_chars_not_bytes_and_bounds_inclusive() {
         // 8 and 128 characters are accepted (bounds inclusive).
-        assert_eq!(validate_change(true, "old-pw-1", "12345678", "12345678"), Ok(()));
+        assert_eq!(
+            validate_change(true, "old-pw-1", "12345678", "12345678"),
+            Ok(())
+        );
         let max = "x".repeat(128);
         assert_eq!(validate_change(true, "old-pw-1", &max, &max), Ok(()));
         // 7 CJK characters are 21 bytes but only 7 characters → too short;
@@ -245,6 +251,9 @@ mod tests {
             PasswordError::SameAsCurrent.to_string(),
             "新密码不能与当前密码相同"
         );
-        assert_eq!(PasswordError::Mismatch.to_string(), "两次输入的新密码不一致");
+        assert_eq!(
+            PasswordError::Mismatch.to_string(),
+            "两次输入的新密码不一致"
+        );
     }
 }

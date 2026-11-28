@@ -47,7 +47,7 @@ impl Default for Settings {
 /// One shared authentication user (WP-24): the password is bcrypt (a
 /// submitted plaintext is hashed on save; responses show `********`)
 /// and the TOTP secret is Base32 (empty = disabled).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct AuthUserSite {
     pub id: String,
@@ -59,21 +59,6 @@ pub struct AuthUserSite {
     #[serde(default)]
     pub groups: Vec<String>,
     pub remark: String,
-}
-
-impl Default for AuthUserSite {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            password: String::new(),
-            totp_secret: String::new(),
-            email: String::new(),
-            display_name: String::new(),
-            groups: Vec::new(),
-            remark: String::new(),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -292,11 +292,7 @@ pub fn safe_next(next: &str) -> &str {
         && !next.starts_with("//")
         && !next.contains('\\')
         && !next.chars().any(char::is_control);
-    if safe {
-        next
-    } else {
-        "/"
-    }
+    if safe { next } else { "/" }
 }
 
 /// Extracts the host of an `Origin`/`Referer` header value (the caller
@@ -313,7 +309,9 @@ pub fn origin_host(header: Option<&str>) -> Option<String> {
     let host = match authority.rsplit_once(':') {
         // Only a numeric tail counts as a port (IPv6 literals keep
         // their colons; the bracketed host compares fine).
-        Some((host, port)) if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) => {
+        Some((host, port))
+            if !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
             host
         }
         _ => authority,
@@ -399,16 +397,17 @@ pub fn page_reply(
 
 /// A locked-out source: the page renders, but the status says 429 —
 /// even correct credentials are refused until the window expires.
-pub fn throttled_reply(
-    page: &LoginPage,
-    need_code: bool,
-    host: &str,
-    next: &str,
-) -> AuthPathReply {
+pub fn throttled_reply(page: &LoginPage, need_code: bool, host: &str, next: &str) -> AuthPathReply {
     AuthPathReply::Handled {
         status: 429,
         content_type: HTML,
-        body: render(page, Some("尝试次数过多，请稍后再试"), need_code, host, next),
+        body: render(
+            page,
+            Some("尝试次数过多，请稍后再试"),
+            need_code,
+            host,
+            next,
+        ),
         location: String::new(),
         set_cookies: Vec::new(),
     }
@@ -833,4 +832,3 @@ mod handling_tests {
         );
     }
 }
-

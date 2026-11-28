@@ -33,7 +33,11 @@ mod tests {
         assert!(verify_code(SEED, "081804", 1_111_111_109));
         // parse() uppercases and strips spaces, so these still verify.
         assert!(verify_code(&SEED.to_lowercase(), "287082", 59));
-        assert!(verify_code(&format!("{} {}", &SEED[..16], &SEED[16..]), "287082", 59));
+        assert!(verify_code(
+            &format!("{} {}", &SEED[..16], &SEED[16..]),
+            "287082",
+            59
+        ));
     }
 
     #[test]

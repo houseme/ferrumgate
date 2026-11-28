@@ -631,7 +631,9 @@ impl Proxy {
                     authenticated = true;
                 }
                 BasicOutcome::Denied => {
-                    authenticator.reserve().record_failure(source, Instant::now());
+                    authenticator
+                        .reserve()
+                        .record_failure(source, Instant::now());
                     return Some(basic_challenge(StatusCode::UNAUTHORIZED));
                 }
                 BasicOutcome::Locked => return Some(reply(StatusCode::TOO_MANY_REQUESTS)),
@@ -767,9 +769,8 @@ fn auth_reply(outcome: AuthPathReply) -> Reply {
             let Ok(status) = StatusCode::from_u16(status) else {
                 return reply(StatusCode::BAD_GATEWAY);
             };
-            let mut response = Response::new(Either::Right(Either::Left(Full::new(Bytes::from(
-                body,
-            )))));
+            let mut response =
+                Response::new(Either::Right(Either::Left(Full::new(Bytes::from(body)))));
             *response.status_mut() = status;
             response
                 .headers_mut()

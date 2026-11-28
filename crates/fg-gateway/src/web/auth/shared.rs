@@ -117,8 +117,7 @@ const PLACEHOLDER_HASH: &str = "$2b$12$C6UzMDM.H6dfI/f/IKcEeO7ZBpEbA1Fu6wCmRaFnW
 /// password or TOTP secret invalidates their existing sessions.
 pub fn cred_fingerprint(secret: &[u8], user: &AuthUser) -> String {
     let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
-    let mut message =
-        String::with_capacity(user.password.len() + user.totp_secret.len());
+    let mut message = String::with_capacity(user.password.len() + user.totp_secret.len());
     message.push_str(&user.password);
     message.push_str(&user.totp_secret);
     let tag = hmac::sign(&key, message.as_bytes());
@@ -198,7 +197,8 @@ mod tests {
         let id = new_user_id();
         assert_eq!(id.len(), 32, "128 位随机数的十六进制应为 32 个字符");
         assert!(
-            id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
+            id.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c)),
             "id 应为小写 hex：{id}"
         );
         assert_ne!(id, new_user_id(), "同名重建（重新生成）得到新 ID");
@@ -234,7 +234,10 @@ mod tests {
 
         // 手工编辑留下的嵌套配置：匹配取最长的那个域
         let nested = ["example.com".to_owned(), "a.example.com".to_owned()];
-        assert_eq!(sso_for(&nested, "example.com").as_deref(), Some("example.com"));
+        assert_eq!(
+            sso_for(&nested, "example.com").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(
             sso_for(&nested, "www.example.com").as_deref(),
             Some("example.com")

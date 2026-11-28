@@ -58,7 +58,9 @@ pub struct Slot {
 
 impl std::fmt::Debug for Slot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Slot").field("source", &self.source).finish()
+        f.debug_struct("Slot")
+            .field("source", &self.source)
+            .finish()
     }
 }
 
@@ -231,12 +233,23 @@ mod tests {
 
         let mut slots = Vec::new();
         for _ in 0..MAX_INFLIGHT {
-            slots.push(reserve.try_acquire(ip).expect("the first 8 verifications run"));
+            slots.push(
+                reserve
+                    .try_acquire(ip)
+                    .expect("the first 8 verifications run"),
+            );
         }
         for _ in 0..MAX_WAITING {
-            slots.push(reserve.try_acquire(ip).expect("the next 64 queue behind them"));
+            slots.push(
+                reserve
+                    .try_acquire(ip)
+                    .expect("the next 64 queue behind them"),
+            );
         }
-        assert!(reserve.try_acquire(ip).is_none(), "the 73rd is rejected outright");
+        assert!(
+            reserve.try_acquire(ip).is_none(),
+            "the 73rd is rejected outright"
+        );
 
         // The gates are per source: another IP is unaffected.
         let other = reserve
@@ -248,13 +261,19 @@ mod tests {
         // next attempt takes; the queue is still full, so the attempt
         // after that is rejected again.
         drop(slots.remove(0));
-        let rerun = reserve.try_acquire(ip).expect("freed running position is reusable");
+        let rerun = reserve
+            .try_acquire(ip)
+            .expect("freed running position is reusable");
         assert!(reserve.try_acquire(ip).is_none());
         slots.push(rerun);
 
         // `cancel` frees one queued position, then the gates are full again.
         reserve.cancel(ip);
-        slots.push(reserve.try_acquire(ip).expect("cancelled queue position is reusable"));
+        slots.push(
+            reserve
+                .try_acquire(ip)
+                .expect("cancelled queue position is reusable"),
+        );
         assert!(reserve.try_acquire(ip).is_none());
 
         // Running slots release on drop, queued ones via cancel: after
@@ -278,7 +297,11 @@ mod tests {
 
         let mut slots = Vec::new();
         for _ in 0..MAX_INFLIGHT + MAX_WAITING {
-            slots.push(reserve.try_acquire(ip).expect("8 running plus 64 queued fit"));
+            slots.push(
+                reserve
+                    .try_acquire(ip)
+                    .expect("8 running plus 64 queued fit"),
+            );
         }
         assert!(reserve.try_acquire(ip).is_none());
 
@@ -290,8 +313,14 @@ mod tests {
         );
 
         reserve.cancel(ip);
-        assert!(reserve.try_acquire(ip).is_some(), "cancel frees one queued position");
-        assert!(reserve.try_acquire(ip).is_none(), "only one position was freed");
+        assert!(
+            reserve.try_acquire(ip).is_some(),
+            "cancel frees one queued position"
+        );
+        assert!(
+            reserve.try_acquire(ip).is_none(),
+            "only one position was freed"
+        );
     }
 
     #[test]
@@ -307,12 +336,18 @@ mod tests {
         assert!(!reserve.locked(ip, start), "nine failures do not lock yet");
 
         reserve.record_failure(ip, start);
-        assert!(reserve.locked(ip, start), "the tenth failure locks the source");
+        assert!(
+            reserve.locked(ip, start),
+            "the tenth failure locks the source"
+        );
         assert!(
             reserve.locked(ip, start + FAILURE_WINDOW - Duration::from_secs(1)),
             "the lockout holds for the rest of the window"
         );
-        assert!(!reserve.locked(other, start), "other sources are unaffected");
+        assert!(
+            !reserve.locked(other, start),
+            "other sources are unaffected"
+        );
     }
 
     #[test]
@@ -332,7 +367,10 @@ mod tests {
             !reserve.locked(ip, lapses),
             "the window lapses 15 minutes after the first failure"
         );
-        assert!(reserve.try_acquire(ip).is_some(), "access is restored once unlocked");
+        assert!(
+            reserve.try_acquire(ip).is_some(),
+            "access is restored once unlocked"
+        );
 
         // A failure after the lapse restarts the window at count one.
         reserve.record_failure(ip, lapses);
@@ -348,13 +386,24 @@ mod tests {
 
         // `expire` drops the lapsed entries as housekeeping.
         reserve.expire(lapses + FAILURE_WINDOW);
-        assert!(reserve.gates.failures.lock().expect("reserve failures lock").is_empty());
+        assert!(
+            reserve
+                .gates
+                .failures
+                .lock()
+                .expect("reserve failures lock")
+                .is_empty()
+        );
     }
 
     #[test]
     fn source_key_folds_ipv6_into_slash_sixty_four_buckets() {
         let folded = v6("2001:db8:1:2::");
-        assert_eq!(source_key(v6("2001:db8:1:2:3:4:5:6")), folded, "low 64 bits zeroed");
+        assert_eq!(
+            source_key(v6("2001:db8:1:2:3:4:5:6")),
+            folded,
+            "low 64 bits zeroed"
+        );
         assert_eq!(
             source_key(v6("2001:db8:1:2:aabb:ccdd:11ff:2233")),
             folded,
@@ -379,8 +428,14 @@ mod tests {
         for _ in 0..MAX_FAILURES {
             reserve.record_failure(first, start);
         }
-        assert!(reserve.locked(second, start), "the whole /64 is locked together");
-        assert!(!reserve.locked(elsewhere, start), "a different /64 is unaffected");
+        assert!(
+            reserve.locked(second, start),
+            "the whole /64 is locked together"
+        );
+        assert!(
+            !reserve.locked(elsewhere, start),
+            "a different /64 is unaffected"
+        );
     }
 
     #[test]
@@ -390,6 +445,9 @@ mod tests {
         let mapped_now = instant_of(now);
         let mapped_later = instant_of(later);
         assert!(mapped_later >= mapped_now);
-        assert_eq!(mapped_later.duration_since(mapped_now), Duration::from_secs(60));
+        assert_eq!(
+            mapped_later.duration_since(mapped_now),
+            Duration::from_secs(60)
+        );
     }
 }

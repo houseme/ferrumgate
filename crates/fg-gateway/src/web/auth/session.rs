@@ -69,8 +69,7 @@ pub fn issue(
         c: fingerprint.to_owned(),
         a: Vec::new(),
         sh: false,
-        e: unix_seconds(now)
-            .saturating_add(i64::try_from(SESSION_TTL).unwrap_or(i64::MAX)),
+        e: unix_seconds(now).saturating_add(i64::try_from(SESSION_TTL).unwrap_or(i64::MAX)),
     };
     sign(secret, &session)
 }
@@ -176,8 +175,7 @@ impl OneTimeTokens {
         let mut bytes = [0u8; 16];
         getrandom::fill(&mut bytes).expect("OS randomness unavailable");
         let token = to_hex(&bytes);
-        self.lock()
-            .push((token.clone(), format!("{user}:{host}")));
+        self.lock().push((token.clone(), format!("{user}:{host}")));
         token
     }
 
@@ -229,17 +227,16 @@ mod tests {
     #[test]
     fn cookie_name_shape_and_binding() {
         // Known answer: sha256("listener/site")[:6] = 8b57e3f18dcc.
-        assert_eq!(
-            cookie_name("listener", "site"),
-            "gately_site_8b57e3f18dcc"
-        );
+        assert_eq!(cookie_name("listener", "site"), "gately_site_8b57e3f18dcc");
 
         // Shape: prefix + 12 lowercase hex characters.
         let name = cookie_name("web-1", "blog");
         let hash = name.strip_prefix("gately_site_").expect("prefix");
         assert_eq!(hash.len(), 12);
-        assert!(hash.bytes().all(|byte| byte.is_ascii_hexdigit()
-            && !byte.is_ascii_uppercase()));
+        assert!(
+            hash.bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
 
         // Different listener or site keys never share a cookie name.
         assert_ne!(cookie_name("l", "s"), cookie_name("l2", "s"));
@@ -281,7 +278,10 @@ mod tests {
         let mut value = issue(SECRET, "alice", HOST, Scope::Site, "fp", now());
         // Flip the first payload character (stays valid base64url).
         value.replace_range(..1, if value.starts_with('A') { "B" } else { "A" });
-        assert_ne!(value, issue(SECRET, "alice", HOST, Scope::Site, "fp", now()));
+        assert_ne!(
+            value,
+            issue(SECRET, "alice", HOST, Scope::Site, "fp", now())
+        );
         assert!(verify(SECRET, &value, HOST, now()).is_none());
     }
 
@@ -374,8 +374,11 @@ mod tests {
         // Issue-consume works once; replay is rejected.
         let first = tokens.issue("alice", HOST);
         assert_eq!(first.len(), 32);
-        assert!(first.bytes().all(|byte| byte.is_ascii_hexdigit()
-            && !byte.is_ascii_uppercase()));
+        assert!(
+            first
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
         assert!(tokens.consume(&first, "alice", HOST));
         assert!(!tokens.consume(&first, "alice", HOST));
 

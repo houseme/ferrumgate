@@ -1884,13 +1884,23 @@ mod tests {
             .find(|provider| provider["name"] == "duckdns")
             .expect("duckdns listed");
         assert_eq!(duckdns["supportsDelete"], false);
-        // A provider that exists upstream but is not compiled into the test
-        // build is listed as unavailable.
-        assert!(
-            providers
-                .iter()
-                .any(|provider| provider["available"] == false)
-        );
+        // Every upstream provider is listed exactly once; `available`
+        // mirrors registry membership, which depends on the enabled
+        // `dns-*` features — workspace-wide test runs unify features, so
+        // do not assume any specific provider is unavailable here.
+        assert_eq!(providers.len(), fg_dns::ALL_NAMES.len());
+        let registry_names: std::collections::HashSet<&str> = fg_dns::registry()
+            .iter()
+            .map(|(meta, _)| meta.name)
+            .collect();
+        for provider in &providers {
+            let name = provider["name"].as_str().expect("name");
+            let expected = registry_names.contains(name);
+            assert_eq!(
+                provider["available"], expected,
+                "availability must match the compiled registry for {name}"
+            );
+        }
 
         let (_, defaults) = app.send("GET", "/api/ddns/defaults", None).await;
         assert_eq!(defaults["interval"], 300);

@@ -161,9 +161,7 @@ fn compile_wp23_options(
     // WP-24 site authentication (§3.4): basic auth needs at least one
     // user; web auth needs one user or an enabled shared-user pool.
     if site.basic_auth && site.users.is_empty() {
-        errors.push(format!(
-            "site {label}: basicAuth 需要至少一个用户（users）"
-        ));
+        errors.push(format!("site {label}: basicAuth 需要至少一个用户（users）"));
     }
     if site.web_auth && site.users.is_empty() && !site.shared_users {
         errors.push(format!(

@@ -116,12 +116,7 @@ impl Authenticator {
     }
 
     /// Verifies a session cookie value against the host.
-    pub fn verify_session(
-        &self,
-        value: &str,
-        host: &str,
-        now: SystemTime,
-    ) -> Option<SiteSession> {
+    pub fn verify_session(&self, value: &str, host: &str, now: SystemTime) -> Option<SiteSession> {
         session::verify(&self.secret, value, host, now)
     }
 
@@ -215,7 +210,8 @@ impl Authenticator {
                 )
             }
             LoginHit::Miss => {
-                self.reserve.record_failure(cx.source, std::time::Instant::now());
+                self.reserve
+                    .record_failure(cx.source, std::time::Instant::now());
                 login_page::page_reply(
                     page,
                     Some("用户名或密码错误"),
@@ -267,7 +263,9 @@ impl Authenticator {
                     vec![
                         (
                             site.cookie_name.to_owned(),
-                            format!("{value}; Path=/; HttpOnly; Max-Age={SESSION_TTL}; SameSite=Lax"),
+                            format!(
+                                "{value}; Path=/; HttpOnly; Max-Age={SESSION_TTL}; SameSite=Lax"
+                            ),
                         ),
                         // The step is done: clear the token cookie.
                         (
@@ -278,7 +276,8 @@ impl Authenticator {
                 )
             }
             None => {
-                self.reserve.record_failure(cx.source, std::time::Instant::now());
+                self.reserve
+                    .record_failure(cx.source, std::time::Instant::now());
                 login_page::page_reply(page, Some("验证码错误"), true, cx.host, next)
             }
         }

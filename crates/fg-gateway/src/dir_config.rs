@@ -19,26 +19,19 @@ use crate::web::model::{FileConfig as WebFileConfig, Listener};
 type ManagementSettings = fg_core::settings::Settings;
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("读取 {} 失败", path.display()))?;
-    serde_json::from_slice(&bytes)
-        .with_context(|| format!("解析 {} 失败", path.display()))
+    let bytes = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    serde_json::from_slice(&bytes).with_context(|| format!("解析 {} 失败", path.display()))
 }
 
 /// Assembles the runtime config from a configuration directory.
 /// `managed` mirrors the TOML loader's signature; the new model has no
 /// ACME section to restore into it yet (WP-32).
 pub(crate) async fn load(dir: &Path, _managed: Arc<Managed>) -> Result<Config> {
-    ensure!(
-        dir.is_dir(),
-        "配置目录 {} 不存在或不是目录",
-        dir.display()
-    );
-    let management: ManagementSettings = read_json(&dir.join("ferrumgate.json"))
-        .context("读取 ferrumgate.json 失败")?;
+    ensure!(dir.is_dir(), "配置目录 {} 不存在或不是目录", dir.display());
+    let management: ManagementSettings =
+        read_json(&dir.join("ferrumgate.json")).context("读取 ferrumgate.json 失败")?;
     let webservice: WebFileConfig = match std::fs::read(dir.join("webservice.json")) {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .context("解析 webservice.json 失败")?,
+        Ok(bytes) => serde_json::from_slice(&bytes).context("解析 webservice.json 失败")?,
         // No webservice document: the gateway runs management-only.
         Err(_) if !dir.join("webservice.json").exists() => WebFileConfig::default(),
         Err(error) => return Err(error).context("读取 webservice.json 失败"),
@@ -68,9 +61,7 @@ pub(crate) async fn load(dir: &Path, _managed: Arc<Managed>) -> Result<Config> {
 
     let routes = crate::web::bridge::compile_routes(listener)
         .await
-        .map_err(|errors| {
-            anyhow::anyhow!("webservice.json 校验失败：{}", errors.join("；"))
-        })?;
+        .map_err(|errors| anyhow::anyhow!("webservice.json 校验失败：{}", errors.join("；")))?;
 
     let portforward = crate::config::load_portforward_json(dir).await?;
     let (tcp_forward, udp_forward) = portforward.unwrap_or_default();
@@ -93,10 +84,7 @@ fn first_enabled_listener(webservice: &WebFileConfig) -> Result<&Listener> {
         .iter()
         .filter(|listener| listener.enable)
         .collect();
-    ensure!(
-        !enabled.is_empty(),
-        "webservice.json 没有启用的监听器"
-    );
+    ensure!(!enabled.is_empty(), "webservice.json 没有启用的监听器");
     ensure!(
         enabled.len() == 1,
         "当前版本只支持一个启用的监听器（读到 {} 个）；其余监听器请先停用",
