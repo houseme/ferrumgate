@@ -18,18 +18,6 @@ use crate::web::model::{FileConfig as WebFileConfig, Listener};
 /// The management settings file (fg-core owns its schema).
 type ManagementSettings = fg_core::settings::Settings;
 
-#[derive(Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct DirDocuments {
-    webservice: Option<WebFileConfig>,
-}
-
-impl Default for DirDocuments {
-    fn default() -> Self {
-        Self { webservice: None }
-    }
-}
-
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("读取 {} 失败", path.display()))?;
@@ -46,9 +34,13 @@ pub async fn load(dir: &Path, managed: Arc<Managed>) -> Result<Config> {
     );
     let management: ManagementSettings = read_json(&dir.join("ferrumgate.json"))
         .context("读取 ferrumgate.json 失败")?;
-    let documents: DirDocuments =
-        read_json(&dir.join("webservice.json")).context("读取 webservice.json 失败")?;
-    let webservice = documents.webservice.unwrap_or_default();
+    let webservice: WebFileConfig = match std::fs::read(dir.join("webservice.json")) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .context("解析 webservice.json 失败")?,
+        // No webservice document: the gateway runs management-only.
+        Err(_) if !dir.join("webservice.json").exists() => WebFileConfig::default(),
+        Err(error) => return Err(error).context("读取 webservice.json 失败"),
+    };
 
     let listener = first_enabled_listener(&webservice)?;
     let legacy_settings = derive_settings(&management, &listener);
