@@ -78,6 +78,10 @@ pub type FirewallSlot = Arc<Mutex<Option<Arc<FirewallSync>>>>;
 /// modules.
 pub struct GuardService {
     table: Arc<BanTable>,
+    /// The table's clock, mirrored here so the query surface
+    /// (`is_banned`/`trust_login`/`counts`) evaluates with the same time
+    /// source the entries were written with (tests inject fake time).
+    clock: fg_net::banlist::Clock,
     settings: RwLock<Settings>,
     /// Local IPv6 networks, registered by the assembly layer; merged into
     /// the whitelist on every settings application.
@@ -86,6 +90,11 @@ pub struct GuardService {
     /// via the table hook, and future publishers (jails) reuse it.
     events: EventBus,
     firewall: FirewallSlot,
+    /// Pauses the per-ban `guard.banned` publication while a batched
+    /// writer (WP-53 handshake flush: one notification per batch) does
+    /// the writing and publishes its own summary event. Shared with the
+    /// table hook.
+    events_paused: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl GuardService {
@@ -104,12 +113,16 @@ impl GuardService {
     pub fn open(store: &ConfigStore, settings: &Settings, events: EventBus) -> Result<Arc<Self>> {
         let path = store.data_dir(DATA_DIR)?.join(BANS_FILE);
         let firewall: FirewallSlot = Arc::new(Mutex::new(None));
+        let events_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = BanHooks {
             banned: Some(Arc::new({
                 let events = events.clone();
                 let firewall = Arc::clone(&firewall);
+                let paused = Arc::clone(&events_paused);
                 move |entry: &fg_net::banlist::Entry| {
-                    publish_banned(&events, entry);
+                    if !paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        publish_banned(&events, entry);
+                    }
                     if let Some(sync) = firewall.lock().expect("guard firewall slot").as_ref() {
                         sync.note_banned(entry);
                     }
@@ -131,11 +144,13 @@ impl GuardService {
                 Some(FirewallSync::start(Arc::clone(&table), system_clock()));
         }
         Ok(Arc::new(Self {
+            clock: system_clock(),
             table,
             settings: RwLock::new(settings.clone()),
             local_v6: Mutex::new(Vec::new()),
             events,
             firewall,
+            events_paused,
         }))
     }
 
@@ -143,13 +158,27 @@ impl GuardService {
     /// the firewall sync on its own; inject one with [`set_firewall`]
     /// ([`GuardService::set_firewall`]) if needed.
     pub fn open_memory(settings: &Settings, events: EventBus) -> Arc<Self> {
+        Self::open_memory_with_clock(settings, events, fg_net::banlist::system_clock())
+    }
+
+    /// Test seam: the same in-memory service sharing the caller's clock,
+    /// so fake-time entries are visible to `is_banned` queries.
+    pub fn open_memory_with_clock(
+        settings: &Settings,
+        events: EventBus,
+        clock: fg_net::banlist::Clock,
+    ) -> Arc<Self> {
         let firewall: FirewallSlot = Arc::new(Mutex::new(None));
+        let events_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let hooks = BanHooks {
             banned: Some(Arc::new({
                 let events = events.clone();
                 let firewall = Arc::clone(&firewall);
+                let paused = Arc::clone(&events_paused);
                 move |entry: &fg_net::banlist::Entry| {
-                    publish_banned(&events, entry);
+                    if !paused.load(std::sync::atomic::Ordering::SeqCst) {
+                        publish_banned(&events, entry);
+                    }
                     if let Some(sync) = firewall.lock().expect("guard firewall slot").as_ref() {
                         sync.note_banned(entry);
                     }
@@ -158,15 +187,13 @@ impl GuardService {
             load_warning: None,
         };
         Arc::new(Self {
-            table: BanTable::open_memory(
-                policy_from_settings(settings, &[]),
-                hooks,
-                system_clock(),
-            ),
+            clock: clock.clone(),
+            table: BanTable::open_memory(policy_from_settings(settings, &[]), hooks, clock),
             settings: RwLock::new(settings.clone()),
             local_v6: Mutex::new(Vec::new()),
             events,
             firewall,
+            events_paused,
         })
     }
 
@@ -285,12 +312,12 @@ impl GuardService {
     /// Lock-free hot path query for other modules (web service
     /// accessCheck, L4 source rules, knock packet handling).
     pub fn is_banned(&self, ip: IpAddr) -> bool {
-        self.table.is_banned(ip, SystemTime::now())
+        self.table.is_banned(ip, (self.clock)())
     }
 
     /// Called by the admin login flow (WP-12) after a successful login.
     pub fn trust_login(&self, ip: IpAddr) {
-        self.table.trust_login(ip, SystemTime::now());
+        self.table.trust_login(ip, (self.clock)());
     }
 
     pub fn counts(&self) -> BanCounts {
@@ -312,9 +339,65 @@ impl GuardService {
         Arc::clone(&self.table)
     }
 
+    /// Whether the per-ban `guard.banned` publication is currently
+    /// paused (batched writers only).
+    pub fn ban_events_paused(&self) -> bool {
+        self.events_paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Pauses or resumes the per-ban `guard.banned` publication. The
+    /// WP-53 handshake flush pauses around a batch write and publishes
+    /// one summary event per batch instead (WP-53 §3.3: 扫描往往成批
+    /// 出现，每批只发一条通知). The firewall nudge still runs per ban.
+    pub fn pause_ban_events(&self, paused: bool) {
+        self.events_paused
+            .store(paused, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether handshake-side detection must skip this source entirely:
+    /// the whitelist (built-in ranges, `ignoreList`, registered local
+    /// IPv6 networks), or — with `ignore_private` on — any private,
+    /// loopback or link-local address (WP-53 §3.3: 白名单与「忽略内网
+    /// 地址」覆盖的地址不处理). Login trust and confirmed trusted
+    /// sources are separate checks ([`GuardService::login_trusted`] and
+    /// `fg_net::trust_src::is_trusted`).
+    pub fn detection_exempt(&self, ip: IpAddr) -> bool {
+        let settings = self.settings();
+        if settings.ignore_private && is_local_address(ip) {
+            return true;
+        }
+        let local = self.local_v6.lock().expect("guard local nets").clone();
+        let mut whitelist = fg_net::banlist::default_whitelist();
+        whitelist.extend(whitelist_from_settings(&settings));
+        whitelist.extend(local);
+        whitelist.iter().any(|net| net.contains(&ip))
+    }
+
+    /// Whether the address logged into the admin UI recently (WP-50
+    /// login trust; the handshake side must not count it for 24 h).
+    pub fn login_trusted(&self, ip: IpAddr, now: SystemTime) -> bool {
+        self.table.is_login_trusted(ip, now)
+    }
+
     /// Writes pending changes now (shutdown path, tests).
     pub fn flush(&self) -> Result<()> {
         self.table.flush().context("flushing the bans file")
+    }
+}
+
+/// Whether the address is loopback, private, link-local or unique-local
+/// (the "ignore internal addresses" scope).
+pub fn is_local_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return v4.is_loopback() || v4.is_private() || v4.is_link_local();
+            }
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+        }
     }
 }
 

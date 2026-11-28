@@ -1,6 +1,6 @@
-//! The `guard.json` model (WP-50 §3.3 / WP-52 §4): the module switch and
-//! the ban table policy knobs, plus the jail rules (`jails[]`, WP-52).
-//! The trap / scan detectors land with WP-53 and extend this file later.
+//! The `guard.json` model (WP-50 §3.3 / WP-52 §4 / WP-53 §4): the module
+//! switch and the ban table policy knobs, the decoy port and port-scan
+//! settings (`trap`, `scan`), plus the jail rules (`jails[]`, WP-52).
 
 use serde::{Deserialize, Serialize};
 
@@ -40,6 +40,10 @@ pub struct Settings {
     /// Extra whitelist entries (IP or CIDR) on top of the built-in
     /// internal ranges and the local IPv6 networks.
     pub ignore_list: Vec<String>,
+    /// Decoy ports (WP-53): `trap{enable,ports,banSeconds}`.
+    pub trap: TrapSettings,
+    /// Port scan detection (WP-53): `scan{enable,threshold,excludePorts,banSeconds,ipv6Strict}`.
+    pub scan: ScanSettings,
 }
 
 impl Default for Settings {
@@ -52,6 +56,38 @@ impl Default for Settings {
             max_ban_seconds: 0,
             ignore_private: false,
             ignore_list: Vec::new(),
+            trap: TrapSettings::default(),
+            scan: ScanSettings::default(),
         }
     }
+}
+
+/// Decoy port settings (`trap`, WP-53 §4). `ban_seconds` of `0` follows
+/// the module default (`settings.banSeconds`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct TrapSettings {
+    pub enable: bool,
+    /// Comma / whitespace separated port list (`23,3389,5900-5910`); an
+    /// empty value normalizes to [`crate::trap::DEFAULT_TRAP_PORTS`].
+    pub ports: String,
+    pub ban_seconds: u32,
+}
+
+/// Port scan settings (`scan`, WP-53 §4). `ban_seconds` of `0` follows
+/// the module default.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "camelCase")]
+pub struct ScanSettings {
+    pub enable: bool,
+    /// Hits per one-minute window that trigger a ban; 0 normalizes to
+    /// [`crate::scan::DEFAULT_SCAN_THRESHOLD`].
+    pub threshold: u32,
+    /// Extra ports treated as open (comma / whitespace separated) —
+    /// e.g. ports forwarded by other firewall rules.
+    pub exclude_ports: String,
+    pub ban_seconds: u32,
+    /// IPv6 strict mode: an IPv6 source touching any non-open port is
+    /// banned on the first hit (TCP only, requires scan detection).
+    pub ipv6_strict: bool,
 }

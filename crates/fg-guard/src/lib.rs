@@ -3,18 +3,24 @@
 //! 事件发布、管理路由与自检；防火墙同步（[`firewall`]，WP-51）与日志规则
 //! jails（[`jail`]，WP-52：文件 / journal / 命令 / Docker / 事件来源与
 //! Web / TLS 探测，见 [`webprobe`]）在本包之上实现，它们调用
-//! [`bans::GuardService::ban_auto`] 写入同一张表。诱饵端口与扫描检测
-//! （WP-53）也走同一入口。
+//! [`bans::GuardService::ban_auto`] 写入同一张表。诱饵端口、扫描检测与
+//! IPv6 严格模式（WP-53）也走同一入口：[`ports`] 计算开放端口，
+//! [`trap`] 管理用户态诱饵监听，[`scan`] 承载计数与严格模式判定，
+//! [`handshake`] 是两条路径共用的握手确认回调。
 
 #![forbid(unsafe_code)]
 
 pub mod bans;
 pub mod firewall;
+pub mod handshake;
 pub mod jail;
 pub mod model;
+pub mod ports;
 pub mod presets;
 pub mod routes;
+pub mod scan;
 pub mod selfcheck;
+pub mod trap;
 pub mod validate;
 pub mod webprobe;
 

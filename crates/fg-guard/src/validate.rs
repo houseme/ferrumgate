@@ -38,7 +38,8 @@ pub struct Problem {
 }
 
 /// Applies upstream defaults for zero-valued settings and clamps both
-/// durations to their documented ranges; every jail is normalized too.
+/// durations to their documented ranges; the trap / scan blocks and
+/// every jail are normalized too.
 pub fn normalize(mut config: FileConfig) -> FileConfig {
     let settings = &mut config.settings;
     settings.ban_seconds = if settings.ban_seconds == 0 {
@@ -61,6 +62,19 @@ pub fn normalize(mut config: FileConfig) -> FileConfig {
         .filter(|entry| !entry.is_empty())
         .take(MAX_IGNORE_LIST)
         .collect();
+    // Trap ports: empty follows the upstream default list.
+    settings.trap.ports = settings.trap.ports.trim().to_owned();
+    if settings.trap.ports.is_empty() {
+        settings.trap.ports = crate::trap::DEFAULT_TRAP_PORTS.to_owned();
+    }
+    // Scan: threshold defaults to the upstream 12; the port lists are
+    // trimmed so parsing sees canonical text.
+    settings.scan.threshold = if settings.scan.threshold == 0 {
+        crate::scan::DEFAULT_SCAN_THRESHOLD
+    } else {
+        settings.scan.threshold.min(crate::scan::MAX_SCAN_THRESHOLD)
+    };
+    settings.scan.exclude_ports = settings.scan.exclude_ports.trim().to_owned();
     config.jails = std::mem::take(&mut config.jails)
         .into_iter()
         .map(jail::validate::normalize_jail)
@@ -69,7 +83,8 @@ pub fn normalize(mut config: FileConfig) -> FileConfig {
 }
 
 /// Collects every validation problem of an already normalized config:
-/// the whitelist entries and every jail (paths prefixed `jails[i].`).
+/// the whitelist entries, the trap / scan port lists and every jail
+/// (paths prefixed `jails[i].`).
 pub fn validate(config: &FileConfig) -> Vec<Problem> {
     let mut problems = Vec::new();
     for (index, entry) in config.settings.ignore_list.iter().enumerate() {
@@ -79,6 +94,18 @@ pub fn validate(config: &FileConfig) -> Vec<Problem> {
                 reason: "not an IP address or CIDR network".to_owned(),
             });
         }
+    }
+    for bad in crate::ports::range::bad_tokens(&config.settings.trap.ports) {
+        problems.push(Problem {
+            field: "settings.trap.ports".to_owned(),
+            reason: format!("not a port or port range: {bad}"),
+        });
+    }
+    for bad in crate::ports::range::bad_tokens(&config.settings.scan.exclude_ports) {
+        problems.push(Problem {
+            field: "settings.scan.excludePorts".to_owned(),
+            reason: format!("not a port or port range: {bad}"),
+        });
     }
     for (index, jail) in config.jails.iter().enumerate() {
         for mut problem in jail::validate::jail_problems(jail) {
@@ -204,5 +231,70 @@ mod tests {
         assert!(!valid_manual_seconds(60));
         assert!(!valid_manual_seconds(MANUAL_MAX_SECONDS + 1));
         assert!(!valid_manual_seconds(-2));
+    }
+
+    #[test]
+    fn normalize_applies_trap_and_scan_defaults() {
+        let config = normalize(FileConfig::default());
+        assert_eq!(config.settings.trap.ports, crate::trap::DEFAULT_TRAP_PORTS);
+        assert!(!config.settings.trap.enable);
+        assert_eq!(
+            config.settings.scan.threshold,
+            crate::scan::DEFAULT_SCAN_THRESHOLD
+        );
+        assert!(!config.settings.scan.ipv6_strict);
+
+        let config = normalize(FileConfig {
+            settings: Settings {
+                trap: crate::model::TrapSettings {
+                    ports: " 23,3389 ".to_owned(),
+                    ..crate::model::TrapSettings::default()
+                },
+                scan: crate::model::ScanSettings {
+                    threshold: 99_999,
+                    exclude_ports: " 8000-8010 ".to_owned(),
+                    ..crate::model::ScanSettings::default()
+                },
+                ..Settings::default()
+            },
+            jails: Vec::new(),
+        });
+        assert_eq!(config.settings.trap.ports, "23,3389", "kept, only trimmed");
+        assert_eq!(
+            config.settings.scan.threshold,
+            crate::scan::MAX_SCAN_THRESHOLD,
+            "the threshold is clamped"
+        );
+        assert_eq!(config.settings.scan.exclude_ports, "8000-8010");
+    }
+
+    #[test]
+    fn validate_reports_bad_trap_and_exclude_port_lists() {
+        let problems = validate(&normalize(FileConfig {
+            settings: Settings {
+                trap: crate::model::TrapSettings {
+                    ports: "23,abc,70000".to_owned(),
+                    ..crate::model::TrapSettings::default()
+                },
+                scan: crate::model::ScanSettings {
+                    exclude_ports: "8000-8010,wrong".to_owned(),
+                    ..crate::model::ScanSettings::default()
+                },
+                ..Settings::default()
+            },
+            jails: Vec::new(),
+        }));
+        let fields: Vec<&str> = problems
+            .iter()
+            .map(|problem| problem.field.as_str())
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                "settings.trap.ports",
+                "settings.trap.ports",
+                "settings.scan.excludePorts"
+            ]
+        );
     }
 }
