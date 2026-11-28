@@ -2314,6 +2314,7 @@ mod tests {
                 note: "frpc".to_owned(),
             }],
         );
+
         assert_eq!(
             auto(&table, "5.5.5.5", 0),
             BanOutcome::Rejected(RejectReason::TrustedSource)
@@ -2346,6 +2347,9 @@ mod tests {
             auto(&table, "5.5.5.5", 3),
             BanOutcome::Banned { .. }
         ));
+        // The registry is process-global; clear it so later tests in
+        // this binary see a clean slate even when ordering changes.
+        crate::trust_src::clear(owner);
     }
 
     #[test]
