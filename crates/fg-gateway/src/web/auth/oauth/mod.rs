@@ -3,6 +3,7 @@
 //! finish) wires in a later batch.
 #![allow(dead_code)]
 
+pub mod flow;
 pub mod state;
 
 pub use state::{sign_state, verify_state, OAuthState};
