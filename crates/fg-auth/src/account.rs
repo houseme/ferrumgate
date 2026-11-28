@@ -9,10 +9,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, ensure};
 use arc_swap::ArcSwap;
+use aws_lc_rs::hmac;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use fg_config::{ConfigStore, Loaded};
 use fg_core::events::{Event, EventBus, Kind};
-use ring::hmac;
 use serde::{Deserialize, Serialize};
 
 use crate::{

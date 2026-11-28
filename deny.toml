@@ -17,7 +17,7 @@ allow = [
     # This repository and most transitive crates.
     "Apache-2.0",
     "MIT",
-    # rustls / rustls-webpki / untrusted / ring (Apache-2.0 AND ISC for ring).
+    # rustls, rustls-webpki and untrusted.
     "ISC",
     # curve25519-dalek, ed25519-dalek, subtle; matchit adds BSD-3-Clause too.
     "BSD-3-Clause",

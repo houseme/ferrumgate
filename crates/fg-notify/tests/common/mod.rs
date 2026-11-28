@@ -191,10 +191,14 @@ impl SmtpStream {
         };
         let key =
             rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![certified.cert.der().clone()], key)
-            .expect("server config");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("AWS-LC supports the default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key)
+        .expect("server config");
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
         acceptor
             .accept(stream)
@@ -354,10 +358,14 @@ impl FakeHttps {
                 .expect("self-signed cert");
         let key =
             rustls::pki_types::PrivateKeyDer::Pkcs8(certified.signing_key.serialize_der().into());
-        let config = rustls::ServerConfig::builder()
-            .with_no_client_auth()
-            .with_single_cert(vec![certified.cert.der().clone()], key)
-            .expect("server config");
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("AWS-LC supports the default protocol versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![certified.cert.der().clone()], key)
+        .expect("server config");
         let acceptor = Arc::new(tokio_rustls::TlsAcceptor::from(Arc::new(config)));
         let tls_listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
         let tls_addr = tls_listener.local_addr().expect("addr");

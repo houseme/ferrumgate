@@ -304,9 +304,9 @@ fn find_indices(listeners: &[Listener], keys: &[String]) -> Option<Vec<usize>> {
 /// 12 lowercase hex characters, unique within the collection — the same
 /// shape the fg-admin collections generate.
 fn random_key(listeners: &[Listener]) -> Result<String, Failure> {
-    use ring::rand::SecureRandom;
+    use aws_lc_rs::rand::SecureRandom;
 
-    let random = ring::rand::SystemRandom::new();
+    let random = aws_lc_rs::rand::SystemRandom::new();
     for _ in 0..8 {
         let mut bytes = [0; 8];
         if random.fill(&mut bytes[2..]).is_err() {

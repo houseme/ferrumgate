@@ -6,8 +6,8 @@
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use aws_lc_rs::{digest, hmac};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::{digest, hmac};
 
 use super::SESSION_TTL;
 

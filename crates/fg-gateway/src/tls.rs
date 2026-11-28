@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use rustls::{
     ClientConfig, RootCertStore, ServerConfig,
-    crypto::ring,
+    crypto::aws_lc_rs,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     server::{
         Acceptor, ClientHello, NoServerSessionStorage, ResolvesServerCert,
@@ -219,7 +219,7 @@ pub(crate) async fn load<'a>(
                 && certificates.len() <= 1024),
         "server.tls requires manual or managed certificates; HTTP requires an empty certificate list"
     );
-    let provider = Arc::new(ring::default_provider());
+    let provider = Arc::new(aws_lc_rs::default_provider());
     let server = if enabled {
         let mut names: HashSet<String> = managed
             .iter()

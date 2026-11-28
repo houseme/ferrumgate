@@ -58,7 +58,7 @@ pub fn normalize_settings(settings: &mut Settings) {
 /// value (the same shape as the other collections, conventions §3.3).
 pub fn normalize(config: &mut FileConfig) -> Result<(), CertError> {
     normalize_settings(&mut config.settings);
-    let random = ring::rand::SystemRandom::new();
+    let random = aws_lc_rs::rand::SystemRandom::new();
     let mut keys = HashSet::new();
     for cert in &mut config.certs {
         cert.key = cert.key.trim().to_string();
@@ -139,8 +139,11 @@ fn validate_upload(cert: &Cert) -> Result<(), CertError> {
 /// A fresh 12-lowercase-hex key absent from `taken` (which records the
 /// generated key). `None` means the system RNG kept failing, which in
 /// practice never happens; the caller then leaves the key untouched.
-fn generate_key(random: &ring::rand::SystemRandom, taken: &mut HashSet<String>) -> Option<String> {
-    use ring::rand::SecureRandom;
+fn generate_key(
+    random: &aws_lc_rs::rand::SystemRandom,
+    taken: &mut HashSet<String>,
+) -> Option<String> {
+    use aws_lc_rs::rand::SecureRandom;
 
     for _ in 0..8 {
         let mut bytes = [0u8; 6];

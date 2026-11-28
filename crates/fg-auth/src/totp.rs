@@ -1,8 +1,8 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use aws_lc_rs::hmac;
 use data_encoding::BASE32_NOPAD;
-use ring::hmac;
 use subtle::ConstantTimeEq;
 
 const PERIOD: u64 = 30;

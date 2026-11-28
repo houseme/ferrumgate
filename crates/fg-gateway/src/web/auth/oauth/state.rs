@@ -4,8 +4,8 @@
 
 use std::fmt::Write as _;
 
+use aws_lc_rs::hmac;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::hmac;
 use serde::{Deserialize, Serialize};
 
 /// The state lifetime.

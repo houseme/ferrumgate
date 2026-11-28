@@ -97,7 +97,7 @@ fn token_secret() -> String {
 }
 
 fn token_hash() -> Result<String> {
-    use ring::digest::{SHA256, digest};
+    use aws_lc_rs::digest::{SHA256, digest};
     let hash = digest(&SHA256, token_secret().as_bytes());
     Ok(data_encoding::HEXLOWER.encode(hash.as_ref()))
 }

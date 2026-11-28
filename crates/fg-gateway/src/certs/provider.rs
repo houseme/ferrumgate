@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use rustls::{
+    crypto::aws_lc_rs,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     sign::CertifiedKey,
 };
@@ -68,7 +69,7 @@ impl LoadedCert {
         let tls = CertifiedKey::from_der(
             chain.clone(),
             private_key.clone_key(),
-            &rustls::crypto::ring::default_provider(),
+            &aws_lc_rs::default_provider(),
         )
         .map_err(|_| LoadError("证书与私钥无法装配".into()))?;
         tls.keys_match()
@@ -104,7 +105,7 @@ impl LoadedCert {
             let Some(Ok(key)) = PrivateKeyDer::pem_slice_iter(KEY_PEM.as_bytes()).next() else {
                 panic!("fixture key PEM does not parse");
             };
-            match CertifiedKey::from_der(certs, key, &rustls::crypto::ring::default_provider()) {
+            match CertifiedKey::from_der(certs, key, &aws_lc_rs::default_provider()) {
                 Ok(key) => Some(Arc::new(key)),
                 Err(error) => panic!("fixture key does not assemble: {error}"),
             }

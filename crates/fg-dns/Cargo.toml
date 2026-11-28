@@ -16,6 +16,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls = { workspace = true, features = ["webpki-roots"] }
 hyper-util.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha1.workspace = true

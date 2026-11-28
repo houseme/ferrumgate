@@ -238,7 +238,7 @@ fn sub_client() -> SubClient {
     let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
     connector.set_nodelay(true);
     let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
+        .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())
         .expect("native roots")
         .https_or_http()
         .enable_http1()

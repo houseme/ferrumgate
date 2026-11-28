@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use ring::hmac;
+use aws_lc_rs::hmac;
 
 /// How long a verified basic credential stays trusted.
 pub const TRUST_BASIC_TTL: Duration = Duration::from_secs(10 * 60);

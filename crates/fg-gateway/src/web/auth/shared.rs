@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use ring::hmac;
+use aws_lc_rs::hmac;
 
 /// One shared user. `password` is a bcrypt hash (submitted plaintext is
 /// hashed on save); `totp_secret` empty means TOTP is off.

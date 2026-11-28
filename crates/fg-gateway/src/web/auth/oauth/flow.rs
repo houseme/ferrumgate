@@ -38,7 +38,7 @@ impl Pkce {
 
     /// base64url(SHA-256(verifier)) without padding.
     pub fn challenge_of(verifier: &str) -> String {
-        use ring::digest;
+        use aws_lc_rs::digest;
         let digest = digest::digest(&digest::SHA256, verifier.as_bytes());
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest.as_ref())
     }
@@ -308,7 +308,7 @@ fn oauth_client() -> SubClient {
     let mut connector = hyper_util::client::legacy::connect::HttpConnector::new();
     connector.set_nodelay(true);
     let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_native_roots()
+        .with_provider_and_native_roots(rustls::crypto::aws_lc_rs::default_provider())
         .expect("native roots")
         .https_or_http()
         .enable_http1()

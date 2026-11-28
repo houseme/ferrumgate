@@ -79,6 +79,8 @@ fg-testkit = { path = "crates/fg-testkit", version = "0.1.0" }
 aes = "0.9"
 anyhow = "1"
 arc-swap = "1"
+# AWS-LC supplies rustls crypto and the workspace's digest, HMAC, and RNG calls.
+aws-lc-rs = { version = "1.19", default-features = false, features = ["aws-lc-sys"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 base64 = "0.23"
 bcrypt = "0.19"
@@ -112,7 +114,6 @@ percent-encoding = "2"
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "socks", "query", "form"] }
 regex = "1"
-ring = "0.17"
 # WP-61 web terminal: async SSH client/server (keys module merged since 0.50).
 # AWS-LC backend to match the workspace's rustls choice.
 russh = { version = "0.65", default-features = false, features = ["aws-lc-rs", "rsa", "flate2"] }
@@ -233,11 +234,11 @@ path = "src/main.rs"
 
 
 [dev-dependencies]
+aws-lc-rs.workspace = true
 bcrypt.workspace = true
 data-encoding.workspace = true
 futures-util = { workspace = true, features = ["sink"] }
 h2.workspace = true
-ring.workspace = true
 hickory-proto.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

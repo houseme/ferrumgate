@@ -20,6 +20,7 @@ use std::{
 };
 
 use anyhow::Result;
+use aws_lc_rs::hmac;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -30,7 +31,6 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use ring::hmac;
 use serde_json::{Value, json};
 use tokio::{
     net::{TcpListener, TcpStream},

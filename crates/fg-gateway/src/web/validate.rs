@@ -36,7 +36,7 @@ pub struct Problem {
 ///   12-lowercase-hex value;
 /// - an empty `listenIp` becomes `0.0.0.0`.
 pub fn normalize(mut config: FileConfig) -> FileConfig {
-    let random = ring::rand::SystemRandom::new();
+    let random = aws_lc_rs::rand::SystemRandom::new();
     let mut listener_keys = HashSet::new();
     for listener in &mut config.listeners {
         listener.key = listener.key.trim().to_string();
@@ -74,8 +74,11 @@ pub fn normalize(mut config: FileConfig) -> FileConfig {
 /// A fresh 12-lowercase-hex key absent from `taken` (which records the
 /// generated key). `None` means the system RNG kept failing, which in
 /// practice never happens; the caller then leaves the key untouched.
-fn generate_key(random: &ring::rand::SystemRandom, taken: &mut HashSet<String>) -> Option<String> {
-    use ring::rand::SecureRandom;
+fn generate_key(
+    random: &aws_lc_rs::rand::SystemRandom,
+    taken: &mut HashSet<String>,
+) -> Option<String> {
+    use aws_lc_rs::rand::SecureRandom;
 
     for _ in 0..8 {
         let mut bytes = [0u8; 6];

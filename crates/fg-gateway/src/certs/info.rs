@@ -67,7 +67,7 @@ impl CertInfo {
             .next()
             .ok_or(InfoError::Unparseable)?
             .map_err(|_| InfoError::Unparseable)?;
-        let provider = rustls::crypto::ring::default_provider();
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
         match CertifiedKey::from_der(vec![certificate], key, &provider) {
             // rustls reports a leaf/key mismatch as an error; surface it
             // as `false` while unparseable material stays an error.
@@ -125,7 +125,7 @@ fn unix_time(timestamp: i64) -> Option<SystemTime> {
 fn sha256_fingerprint(der: &[u8]) -> String {
     use std::fmt::Write as _;
 
-    let digest = ring::digest::digest(&ring::digest::SHA256, der);
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, der);
     let mut fingerprint = String::with_capacity(digest.as_ref().len() * 2);
     for byte in digest.as_ref() {
         let _ = write!(fingerprint, "{byte:02x}");

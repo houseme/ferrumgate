@@ -9,8 +9,8 @@ use std::{
     time::Duration,
 };
 
+use aws_lc_rs::digest;
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-use ring::digest;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 

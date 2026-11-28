@@ -50,7 +50,7 @@ impl OutboundHttp {
 
     pub fn with_timeout(timeout: Duration) -> anyhow::Result<Self> {
         let https = HttpsConnectorBuilder::new()
-            .with_webpki_roots()
+            .with_provider_and_webpki_roots(rustls::crypto::aws_lc_rs::default_provider())?
             .https_or_http()
             .enable_http1()
             .build();

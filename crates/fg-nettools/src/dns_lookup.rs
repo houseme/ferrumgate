@@ -51,7 +51,8 @@ pub(crate) type HttpsClient = Client<HttpsConnector<HttpConnector>, Full<Bytes>>
 /// by DoH and the speed test.
 pub(crate) fn http_client() -> HttpsClient {
     let https = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
+        .with_provider_and_webpki_roots(rustls::crypto::aws_lc_rs::default_provider())
+        .expect("AWS-LC supports the default protocol versions")
         .https_or_http()
         .enable_http1()
         .enable_http2()

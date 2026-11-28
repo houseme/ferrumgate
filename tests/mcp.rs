@@ -26,7 +26,7 @@ async fn start() -> Result<(String, String, tokio::process::Child)> {
             }),
         )?;
         let secret = format!("gtl_{}", "9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d4c3b2a1f0e9d8c7b6a");
-        use ring::digest::{SHA256, digest};
+        use aws_lc_rs::digest::{SHA256, digest};
         let hash = digest(&SHA256, secret.as_bytes());
         store.save("tokens", &json!({"tokens":[{
             "id":"abc123def456","name":"ops","group":"",

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use aws_lc_rs::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use hyper::{
     Method, Request, Response, StatusCode, Version,
@@ -12,7 +13,6 @@ use hyper::{
     upgrade::{self, OnUpgrade},
 };
 use hyper_util::rt::TokioIo;
-use ring::digest::{Context, SHA1_FOR_LEGACY_USE_ONLY};
 
 use crate::proxy::strip_hop_headers;
 

@@ -147,17 +147,20 @@ fn base64_of(text: String) -> String {
 /// A client-side TLS connector; `insecure_skip_verify` accepts any
 /// certificate chain (the upstream `TestSMTPInsecureSkipVerify` case).
 fn tls_connector(insecure_skip_verify: bool) -> Result<TlsConnector, String> {
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|error| format!("SMTP TLS 初始化失败：{error}"))?;
     let config = if insecure_skip_verify {
-        rustls::ClientConfig::builder()
+        builder
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(InsecureVerifier))
             .with_no_client_auth()
     } else {
         let roots =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
+        builder.with_root_certificates(roots).with_no_client_auth()
     };
     Ok(TlsConnector::from(Arc::new(config)))
 }

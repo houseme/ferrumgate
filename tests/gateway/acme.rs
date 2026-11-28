@@ -5,7 +5,7 @@ use http_body_util::BodyExt;
 use hyper::{Method, Response, body::Incoming};
 use rustls::{
     ClientConfig, RootCertStore,
-    crypto::ring,
+    crypto::aws_lc_rs,
     pki_types::{CertificateDer, ServerName, pem::PemObject},
 };
 use serde_json::{Value, json};
@@ -310,7 +310,7 @@ async fn connect_tls(
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
     let mut roots = RootCertStore::empty();
     roots.add(root)?;
-    let client = ClientConfig::builder_with_provider(Arc::new(ring::default_provider()))
+    let client = ClientConfig::builder_with_provider(Arc::new(aws_lc_rs::default_provider()))
         .with_safe_default_protocol_versions()?
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -967,6 +967,6 @@ fn assert_deployed_pair(current: &Path, expected: &CertificateDer<'_>) -> Result
     let key_file = pinned.join("private.pem");
     let key = PrivateKeyDer::from_pem_file(&key_file)?;
     assert_eq!(key_file.metadata()?.permissions().mode() & 0o777, 0o600);
-    CertifiedKey::from_der(chain, key, &ring::default_provider())?.keys_match()?;
+    CertifiedKey::from_der(chain, key, &aws_lc_rs::default_provider())?.keys_match()?;
     Ok(())
 }

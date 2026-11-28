@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ring::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use serde::Deserialize;
 
 use super::model::RawAccess;

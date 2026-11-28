@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use hickory_resolver::{
     TokioResolver,
@@ -29,7 +30,6 @@ use hyper_util::{
     client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout};
 
@@ -305,7 +305,7 @@ impl Dns01 {
 
     async fn client(&self) -> Result<Cloudflare> {
         let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
+            rustls::crypto::aws_lc_rs::default_provider(),
         ))
         .with_safe_default_protocol_versions()?
         .with_root_certificates(self.roots().await?)

@@ -213,7 +213,7 @@ async fn spawn_gateway(sites: Vec<Site>) -> Result<SocketAddr> {
         .await
         .map_err(|errors| anyhow::anyhow!("site compile failed: {errors:?}"))?;
     let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
+        rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(rustls::RootCertStore::empty())

@@ -39,6 +39,6 @@ url.workspace = true
 bcrypt.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-ring.workspace = true
+aws-lc-rs.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "test-util"] }
 webauthn-authenticator-rs.workspace = true

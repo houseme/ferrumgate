@@ -5,8 +5,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, ensure};
+use aws_lc_rs::{digest, hmac};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::{digest, hmac};
 use serde::{Deserialize, Serialize};
 
 use crate::{

@@ -1,7 +1,7 @@
 use anyhow::Context;
+use aws_lc_rs::hmac;
 use data_encoding::BASE32_NOPAD;
 use fg_auth::{AccountManager, LoginLimits};
-use ring::hmac;
 use webauthn_authenticator_rs::{WebauthnAuthenticator, softpasskey::SoftPasskey};
 
 use super::*;
@@ -25,13 +25,13 @@ fn credentials(username: &str, password: &str) -> String {
 
 #[tokio::test]
 async fn login_oidc_uses_single_use_browser_state_pkce_and_signed_allowed_subject() -> Result<()> {
-    use data_encoding::BASE64URL_NOPAD;
-    use fg_auth::{passkey::Url, third_login::ThirdLogin};
-    use ring::{
+    use aws_lc_rs::{
         digest,
         rand::SystemRandom,
         signature::{Ed25519KeyPair, KeyPair},
     };
+    use data_encoding::BASE64URL_NOPAD;
+    use fg_auth::{passkey::Url, third_login::ThirdLogin};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;

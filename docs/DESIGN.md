@@ -20,7 +20,7 @@ FerrumGate 是面向家庭网络、NAS 和小型服务器的 Rust 自托管网�
 
 ## 2. 实施边界与组件
 
-Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，Hyper 提供 HTTP 编解码，hyper-util 提供共享上游连接池。Serde/TOML 严格加载配置，ArcSwap 发布包含路由、TLS 和上游连接池的只读运行快照。核心自有 Rust 代码禁用 `unsafe`。Axum 可用于未来管理 API。TLS 采用 rustls，优先选可复现构建并通过目标矩阵的密码学提供方。
+Cargo workspace 使用 Rust 2024 和 resolver 3。Tokio 驱动网络与信号，Hyper 提供 HTTP 编解码，hyper-util 提供共享上游连接池。Serde/TOML 严格加载配置，ArcSwap 发布包含路由、TLS 和上游连接池的只读运行快照。核心自有 Rust 代码禁用 `unsafe`。Axum 可用于未来管理 API。TLS 采用 rustls，密码学提供方为 `aws-lc-rs`。
 
 ```text
 配置文件 → 读取上限 → 反序列化 → 校验和编译 → 原子发布运行快照
@@ -517,4 +517,4 @@ OpenAPI 只读取登记的路由和类型定义。鉴权后发送同一份静态
 
 routes.rs 挂载管理面：规则集合（创建/列表/复制/更新/删除/单项与批量启停/排序/分组）与设置 GET/PUT，镜像 fg-admin 集合契约——12 位十六进制键、复制后源后插入、1–500 批量键去重、无部分删除、无操作变更跳过持久化并返回 changed:0；每次变更走 normalize → validate → apply → persist → publish → on_change 的提交顺序，校验失败以 400 返回完整问题清单，持久化失败不推进内存快照。设置 PUT 应用上游默认并钳制首数据超时。会话/令牌认证由挂载点的 ApiRouter 层强制。
 
-`lucky.rs` 把 Lucky 导出映射为 portforward 规则：白名单模式填 allow、黑名单模式合并 blacklist 与 globalBlacklist 到 deny、关闭模式名单为空且 autoFirewall=false；自建过滤规则按动作并入对应名单（allow 留 None 当为空——空 Some 在 WP-36 语义下是拒绝所有人）；无法导入的条目进入告警；键由 ring 系统随机源生成。数据面 serve 循环（bind/accept/来源判定/拨号/管道）接入 l4 Module 与 WP-39 的 TOML 迁移同批落地；既有 TCP/UDP 语义（UDP 多目标轮询、每规则 8 目标、64 监听器等自有保护）保持不变并在文档中说明与上游的差异。
+`lucky.rs` 把 Lucky 导出映射为 portforward 规则：白名单模式填 allow、黑名单模式合并 blacklist 与 globalBlacklist 到 deny、关闭模式名单为空且 autoFirewall=false；自建过滤规则按动作并入对应名单（allow 留 None 当为空——空 Some 在 WP-36 语义下是拒绝所有人）；无法导入的条目进入告警；键由 AWS-LC 随机源生成。数据面 serve 循环（bind/accept/来源判定/拨号/管道）接入 l4 Module 与 WP-39 的 TOML 迁移同批落地；既有 TCP/UDP 语义（UDP 多目标轮询、每规则 8 目标、64 监听器等自有保护）保持不变并在文档中说明与上游的差异。

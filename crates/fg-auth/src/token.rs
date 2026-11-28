@@ -10,9 +10,9 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use arc_swap::ArcSwap;
+use aws_lc_rs::digest;
 use data_encoding::{HEXLOWER, HEXLOWER_PERMISSIVE};
 use fg_config::{ConfigStore, Loaded};
-use ring::digest;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq};
 use time::OffsetDateTime;

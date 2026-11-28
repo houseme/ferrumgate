@@ -105,12 +105,13 @@ fn probe_client() -> &'static ProbeClient {
     static CLIENT: OnceLock<ProbeClient> = OnceLock::new();
     CLIENT.get_or_init(|| {
         let roots = RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let tls =
-            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("ring supports the default protocol versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
+        let tls = ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .expect("AWS-LC supports the default protocol versions")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         let https = HttpsConnectorBuilder::new()

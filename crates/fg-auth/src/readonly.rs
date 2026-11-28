@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fmt, time::SystemTime};
 
 use anyhow::{Context, Result, ensure};
+use aws_lc_rs::digest;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use ring::digest;
 use serde::{Deserialize, Serialize};
 
 use crate::{

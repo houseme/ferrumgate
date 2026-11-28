@@ -29,7 +29,7 @@ use instant_acme::{
     Identifier, NewAccount, NewOrder, OrderStatus, RetryPolicy,
 };
 use rustls::{
-    crypto::ring,
+    crypto::aws_lc_rs,
     pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject},
     server::ResolvesServerCertUsingSni,
     sign::CertifiedKey,
@@ -603,7 +603,7 @@ impl AcmeConfig {
         let chain =
             CertificateDer::pem_slice_iter(bytes).collect::<std::result::Result<Vec<_>, _>>()?;
         let key = PrivateKeyDer::from_pem_slice(bytes)?;
-        let key = CertifiedKey::from_der(chain, key, &ring::default_provider())?;
+        let key = CertifiedKey::from_der(chain, key, &aws_lc_rs::default_provider())?;
         key.keys_match()?;
         let mut verifier = ResolvesServerCertUsingSni::new();
         for domain in &self.domains {

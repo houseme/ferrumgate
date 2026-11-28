@@ -4,9 +4,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use aws_lc_rs::digest;
 use fg_auth::token::{TokenError, TokenInput, TokenManager};
 use fg_config::ConfigStore;
-use ring::digest;
 use serde_json::{Value, json};
 use time::{OffsetDateTime, macros::datetime};
 

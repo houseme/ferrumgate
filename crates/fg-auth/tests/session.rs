@@ -324,7 +324,7 @@ async fn lockout_notifies_once_and_remembers_successful_subnets_after_restart() 
 
 #[test]
 fn totp_replay_is_rejected_concurrently_and_after_restart() -> Result<()> {
-    use ring::hmac;
+    use aws_lc_rs::hmac;
 
     let (dir, store, mut account) = fixture()?;
     let password = "Password2024!";
