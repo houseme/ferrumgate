@@ -91,12 +91,28 @@ async fn uploads_stream_past_json_limit_and_reject_sizes_and_unauthorized_writes
     assert_eq!(successful.0, StatusCode::OK);
     assert_eq!(successful.2, json!({"received":5 << 20}));
     assert!(!successful.1.contains_key("connection"));
+    // Streaming past the limit races the server's early reject: the
+    // client may hit a broken pipe while still writing chunks the server
+    // stopped reading. Either the rejection response (deterministic on
+    // less loaded runs) or that write error is an acceptable observation;
+    // the declared-length variant above already asserts the response
+    // deterministically.
     let overshoot = server
         .call("POST", path, &[("x-test-id", "admin")], upload(7))
-        .await?;
-    assert_eq!(overshoot.0, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(overshoot.1["connection"], "close");
-    assert_eq!(overshoot.2, json!({"error":"upload exceeds route limit"}));
+        .await;
+    match overshoot {
+        Ok((status, headers, body)) => {
+            assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+            assert_eq!(headers["connection"], "close");
+            assert_eq!(body, json!({"error":"upload exceeds route limit"}));
+        }
+        Err(error) => {
+            assert!(
+                error.to_string().contains("writing a body"),
+                "the only tolerated failure is the early-close write race: {error}"
+            );
+        }
+    }
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     Ok(())
 }
