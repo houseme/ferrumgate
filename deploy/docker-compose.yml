@@ -1,0 +1,22 @@
+# FerrumGate Docker Compose deployment example (WP-92)
+services:
+  ferrumgate:
+    image: ghcr.io/houseme/ferrumgate:latest
+    container_name: ferrumgate
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./data:/etc/ferrumgate
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - TZ=Asia/Shanghai
+      - FERRUMGATE_CONFIG_DIR=/etc/ferrumgate
+      # Optional: override initial log level (UI setting takes precedence when configured)
+      # - FERRUMGATE_LOG_LEVEL=info
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

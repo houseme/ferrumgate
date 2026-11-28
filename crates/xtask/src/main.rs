@@ -1,6 +1,6 @@
 //! Repository maintenance tasks: `xtask i18n-extract`, `xtask i18n-check`,
-//! the WP-90 module manifest commands under `xtask modules` and the WP-91 CI
-//! jobs under `xtask ci`.
+//! the WP-90 module manifest commands under `xtask modules`, the WP-91 CI
+//! jobs under `xtask ci`, and the WP-92 packaging commands under `xtask package`.
 
 use std::path::PathBuf;
 
@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 pub mod ci;
 pub mod i18n;
 pub mod modules;
+pub mod package;
 
 fn main() -> Result<()> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,6 +54,10 @@ fn main() -> Result<()> {
         "ci" => {
             let rest: Vec<String> = arguments.collect();
             ci::run(&root, &rest)
+        }
+        "package" => {
+            let rest: Vec<String> = arguments.collect();
+            package::run(&root, &rest)
         }
         other => bail!("unknown task {other}"),
     }

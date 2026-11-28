@@ -1,0 +1,13 @@
+appname               = ferrumgate
+version               = 0.1.0
+display_name          = FerrumGate
+desc                  = All-in-one reverse proxy, port forwarding, DDNS and network gateway
+platform              = x86
+source                = thirdparty
+maintainer            = FerrumGate
+distributor           = FerrumGate
+desktop_uidir         = ui
+desktop_applaunchname = ferrumgate.Application
+service_port          = 16680
+checkport             = false
+os_min_version        = 0.8.0

@@ -3,3 +3,4 @@
 pub mod ci;
 pub mod i18n;
 pub mod modules;
+pub mod package;
